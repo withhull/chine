@@ -227,6 +227,33 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
+        pub fn tm_metal_norm_add_f32(
+            ctx: *mut TmMetalCtx,
+            x: *mut TmMetalBuffer,
+            weight: *mut TmMetalBuffer,
+            res: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            eps: f32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn tm_metal_qk_norm_f32(
+            ctx: *mut TmMetalCtx,
+            q: *mut TmMetalBuffer,
+            q_weight: *mut TmMetalBuffer,
+            q_out: *mut TmMetalBuffer,
+            k: *mut TmMetalBuffer,
+            k_weight: *mut TmMetalBuffer,
+            k_out: *mut TmMetalBuffer,
+            q_rows: u32,
+            k_rows: u32,
+            cols: u32,
+            eps: f32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
         pub fn tm_metal_f16_row_f32(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
@@ -2277,6 +2304,112 @@ impl MetalContext {
                     wc,
                     yc,
                     rows,
+                    cols,
+                    eps,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// y[row] = rmsnorm(x[row], weight) + res[row]: the fused post-block
+    /// norm + residual add. Replaces the rmsnorm + axpy pair (which read
+    /// and wrote the row three times) with one pass: reads x and res,
+    /// writes y. Per-row arithmetic mirrors [`Self::rmsnorm`], then adds
+    /// the residual elementwise exactly like [`Self::f32_axpy`] with
+    /// alpha 1. Both engine paths that the bit-identity gates compare use
+    /// this kernel, so the pair's numerics stay stable across chunk and
+    /// per-token execution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn norm_add(
+        &self,
+        x: &MetalBuffer,
+        weight: &MetalBuffer,
+        res: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> Result<()> {
+        for (buffer, name) in [(x, "x"), (weight, "weight"), (res, "res"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (xc, wc, rc, yc) = (x.raw, weight.raw, res.raw, y.raw);
+        self.operate("norm_add", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::tm_metal_norm_add_f32(
+                    ctx,
+                    xc,
+                    wc,
+                    rc,
+                    yc,
+                    rows,
+                    cols,
+                    eps,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// One launch for the per-head Q/K RMS norms of an attention core:
+    /// rows `[0, q_rows)` normalize `q` with `q_weight`, rows
+    /// `[q_rows, q_rows + k_rows)` normalize `k` with `k_weight`.
+    /// Per-row arithmetic is exactly [`Self::rmsnorm`]'s (no add, so no
+    /// contraction): bit-identical to the two rmsnorm launches it
+    /// replaces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn qk_norm(
+        &self,
+        q: &MetalBuffer,
+        q_weight: &MetalBuffer,
+        q_out: &MetalBuffer,
+        k: &MetalBuffer,
+        k_weight: &MetalBuffer,
+        k_out: &MetalBuffer,
+        q_rows: u32,
+        k_rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> Result<()> {
+        for (buffer, name) in [
+            (q, "q"),
+            (q_weight, "q_weight"),
+            (q_out, "q_out"),
+            (k, "k"),
+            (k_weight, "k_weight"),
+            (k_out, "k_out"),
+        ] {
+            self.check_owned(buffer, name)?;
+        }
+        let (qc, qwc, qoc, kc, kwc, koc) = (
+            q.raw,
+            q_weight.raw,
+            q_out.raw,
+            k.raw,
+            k_weight.raw,
+            k_out.raw,
+        );
+        self.operate("qk_norm", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::tm_metal_qk_norm_f32(
+                    ctx,
+                    qc,
+                    qwc,
+                    qoc,
+                    kc,
+                    kwc,
+                    koc,
+                    q_rows,
+                    k_rows,
                     cols,
                     eps,
                     err.as_mut_ptr(),

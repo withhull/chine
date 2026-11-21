@@ -361,6 +361,95 @@ kernel void tm_rmsnorm_f32(device const float *x [[buffer(0)]],
     }
 }
 
+/* One launch for the per-head Q/K RMS norms of an attention core: rows
+ * [0, q_rows) normalize q with q_weight, rows [q_rows, q_rows + k_rows)
+ * normalize k with k_weight. Per-row arithmetic is exactly
+ * tm_rmsnorm_f32's (same stride-128 accumulate, same tm_reduce_sum_128,
+ * same x * rms * w — no add, so no contraction), making the merge
+ * bit-identical to the two rmsnorm launches it replaces. */
+kernel void tm_qk_norm_f32(device const float *q [[buffer(0)]],
+                           device const float *q_weight [[buffer(1)]],
+                           device float *q_out [[buffer(2)]],
+                           device const float *k [[buffer(3)]],
+                           device const float *k_weight [[buffer(4)]],
+                           device float *k_out [[buffer(5)]],
+                           constant uint &q_rows [[buffer(6)]],
+                           constant uint &k_rows [[buffer(7)]],
+                           constant uint &cols [[buffer(8)]],
+                           constant float &eps [[buffer(9)]],
+                           uint row [[threadgroup_position_in_grid]],
+                           uint tid [[thread_position_in_threadgroup]],
+                           uint lane [[thread_index_in_simdgroup]],
+                           uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float scratch[4];
+    if (row >= q_rows + k_rows) {
+        return;
+    }
+    const bool is_q = row < q_rows;
+    const size_t r = is_q ? row : row - q_rows;
+    const device float *xrow = (is_q ? q : k) + r * (size_t)cols;
+    device float *yrow = (is_q ? q_out : k_out) + r * (size_t)cols;
+    const device float *weight = is_q ? q_weight : k_weight;
+    float acc = 0.0f;
+    for (uint i = tid; i < cols; i += 128u) {
+        acc += xrow[i] * xrow[i];
+    }
+    const float sumsq = tm_reduce_sum_128(acc, scratch, lane, simd_group);
+    const float rms = 1.0f / sqrt(sumsq / (float)cols + eps);
+    for (uint i = tid; i < cols; i += 128u) {
+        yrow[i] = xrow[i] * rms * weight[i];
+    }
+}
+
+/* y[row] = rmsnorm(x[row]) + res[row]: the fused post-block norm +
+ * residual add. The rmsnorm + axpy pair it replaces reads and writes the
+ * row three times (norm reads x writes y; axpy reads y and res, writes
+ * y); this reads x and res and writes y once. Per-row arithmetic mirrors
+ * tm_rmsnorm_f32 exactly (same stride-128 accumulate, same
+ * tm_reduce_sum_128, same x * rms * w); the final multiply-add contracts
+ * to one fma (Metal fast math; MSL has no `precise`), which is one
+ * rounding less than the pair's memory round-trip and is qualified by
+ * the metal-crate gate within 4 eps x max(|norm|,|res|) (cancellation-
+ * aware), not by bit equality. Both engine paths that the bit-identity
+ * gates compare use this kernel, so the pair's numerics stay stable
+ * across chunk and per-token execution. */
+/* The normed product as a real call boundary: `optnone` disables
+ * optimization inside (including multiply-add contraction) and implies
+ * no-inline, so the returned value is rounded to f32 exactly like the
+ * rmsnorm + axpy pair's device-memory round-trip. This keeps the fused
+ * kernel bit-identical to the pair it replaces, which the chunk-vs-
+ * per-token bit-identity gates depend on (both engine modes must agree
+ * bit for bit even when one runs fused and the other does not). */
+__attribute__((optnone)) static inline float tm_normed_uncontracted(float x, float rms,
+                                                                   float w) {
+    return x * rms * w;
+}
+
+kernel void tm_norm_add_f32(device const float *x [[buffer(0)]],
+                            device const float *weight [[buffer(1)]],
+                            device const float *res [[buffer(2)]],
+                            device float *y [[buffer(3)]],
+                            constant uint &cols [[buffer(4)]],
+                            constant float &eps [[buffer(5)]],
+                            uint row [[threadgroup_position_in_grid]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint lane [[thread_index_in_simdgroup]],
+                            uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float scratch[4];
+    const device float *xrow = x + (size_t)row * (size_t)cols;
+    const device float *resrow = res + (size_t)row * (size_t)cols;
+    device float *yrow = y + (size_t)row * (size_t)cols;
+    float acc = 0.0f;
+    for (uint i = tid; i < cols; i += 128u) {
+        acc += xrow[i] * xrow[i];
+    }
+    const float sumsq = tm_reduce_sum_128(acc, scratch, lane, simd_group);
+    const float rms = 1.0f / sqrt(sumsq / (float)cols + eps);
+    for (uint i = tid; i < cols; i += 128u) {
+        yrow[i] = tm_normed_uncontracted(xrow[i], rms, weight[i]) + resrow[i];
+    }
+}
+
 /*
  * NeoX-style RoPE applied in place to q (n_q heads) and k (n_kv heads) at
  * position `pos`, with inv_freq[i] = theta^(-2i/head_dim) for i < head_dim/2

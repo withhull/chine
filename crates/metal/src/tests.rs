@@ -619,6 +619,214 @@ fn cpu_rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
 }
 
 #[test]
+fn norm_add_matches_the_sequential_pair() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // The fused kernel replaces the engine's post-block pair:
+    // `rmsnorm(x)` then `y += normed` where y is the residual stream.
+    // Registered: bit-identical to the pair (measured 0 ulps on every
+    // shape). The kernel routes the normed product through an optnone,
+    // no-inline helper — a real call boundary that rounds to f32 before
+    // the residual add, exactly the pair's device-memory round-trip.
+    // That is what the chunk-vs-per-token engine bit-identity gates rely
+    // on (either mode may run fused). The `aliased` passes use the
+    // engine's in-place wiring (the output buffer is the residual input).
+    // Shapes cover Gemma 3's 1152 hidden, the 2B's 2048, decode rows and
+    // partial chunks.
+    let mut rng = Rng(29);
+    for (rows, cols, aliased) in [
+        (1usize, 1024usize, false),
+        (1, 1152, false),
+        (128, 1152, false),
+        (37, 1152, false),
+        (37, 1152, true),
+        (128, 2048, false),
+        (5, 2048, true),
+        (128, 6912, false),
+    ] {
+        let x: Vec<f32> = (0..rows * cols)
+            .map(|_| ((rng.next() % 20_001) as f32 - 10_000.0) / 1000.0)
+            .collect();
+        let res: Vec<f32> = (0..rows * cols)
+            .map(|_| ((rng.next() % 20_001) as f32 - 10_000.0) / 1000.0)
+            .collect();
+        let w: Vec<f32> = (0..cols)
+            .map(|_| 0.5 + (rng.next() % 1000) as f32 / 1000.0)
+            .collect();
+        let eps = 1e-6f32;
+        let n = rows * cols;
+        let xb = ctx.buffer(n * 4, true).unwrap();
+        let resb = ctx.buffer(n * 4, true).unwrap();
+        let wb = ctx.buffer(cols * 4, true).unwrap();
+        let nb = ctx.buffer(n * 4, true).unwrap();
+        let refb = ctx.buffer(n * 4, true).unwrap();
+        let fb = ctx.buffer(n * 4, true).unwrap();
+        xb.upload(0, &f32_bytes(&x)).unwrap();
+        resb.upload(0, &f32_bytes(&res)).unwrap();
+        wb.upload(0, &f32_bytes(&w)).unwrap();
+        // Sequential pair: norm into nb, then the reference accumulator
+        // (a copy of the residual) += nb.
+        ctx.rmsnorm(&xb, &wb, &nb, rows as u32, cols as u32, eps)
+            .unwrap();
+        refb.upload(0, &f32_bytes(&res)).unwrap();
+        ctx.f32_axpy(&nb, &refb, 1.0, n as u32).unwrap();
+        // Fused: one pass from x and the residual.
+        if aliased {
+            ctx.norm_add(&xb, &wb, &resb, &resb, rows as u32, cols as u32, eps)
+                .unwrap();
+        } else {
+            ctx.norm_add(&xb, &wb, &resb, &fb, rows as u32, cols as u32, eps)
+                .unwrap();
+        }
+        ctx.fence().unwrap();
+        let mut seq = vec![0u8; n * 4];
+        let mut fus = vec![0u8; n * 4];
+        refb.download(0, &mut seq).unwrap();
+        if aliased {
+            resb.download(0, &mut fus).unwrap();
+        } else {
+            fb.download(0, &mut fus).unwrap();
+        }
+        for i in 0..n {
+            let a = f32::from_le_bytes(seq[i * 4..i * 4 + 4].try_into().unwrap());
+            let b = f32::from_le_bytes(fus[i * 4..i * 4 + 4].try_into().unwrap());
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "({rows},{cols},aliased={aliased}) element {i}: fused {a} vs sequential {b}"
+            );
+        }
+    }
+    eprintln!("norm_add vs sequential pair: bit-identical (all shapes, incl. aliased)");
+}
+
+#[test]
+fn norm_add_pair_timing_when_requested() {
+    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+        return;
+    }
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // The engine's post-block sites: Gemma 3's 1152 hidden, the 2B's 2048,
+    // at the 128-token chunk row count.
+    for (rows, cols) in [(128usize, 1152usize), (128, 2048), (1, 2048), (1, 1152)] {
+        let n = (rows * cols) as u32;
+        let xb = ctx.buffer(n as usize * 4, true).unwrap();
+        let resb = ctx.buffer(n as usize * 4, true).unwrap();
+        let wb = ctx.buffer(cols * 4, true).unwrap();
+        let yb = ctx.buffer(n as usize * 4, true).unwrap();
+        let group = |fused: bool| {
+            ctx.begin_group().unwrap();
+            for _ in 0..16 {
+                if fused {
+                    ctx.norm_add(&xb, &wb, &resb, &yb, rows as u32, cols as u32, 1e-6)
+                        .unwrap();
+                } else {
+                    ctx.rmsnorm(&xb, &wb, &yb, rows as u32, cols as u32, 1e-6)
+                        .unwrap();
+                    ctx.f32_axpy(&resb, &yb, 1.0, n).unwrap();
+                }
+            }
+            ctx.end_group().unwrap();
+            ctx.fence().unwrap();
+        };
+        for fused in [false, true] {
+            for _ in 0..3 {
+                group(fused);
+            }
+            let iters = 40;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                group(fused);
+            }
+            let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
+            eprintln!(
+                "norm-add {} {rows:>3}x{cols:<4}: {:>7.2} us per row-set",
+                if fused { "fused " } else { "pair  " },
+                per * 1e6
+            );
+        }
+    }
+}
+
+#[test]
+fn qk_norm_matches_the_two_rmsnorm_launches_bit_for_bit() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // The merged Q/K norm must be bit-identical to the two rmsnorm
+    // launches it replaces (no add in the expression, so no contraction).
+    // Shapes: the Gemma 3 chunk core (512 q rows, 128 k rows of 256), the
+    // 2B's per-token core, and odd row counts.
+    let mut rng = Rng(41);
+    for (q_rows, k_rows, cols) in [
+        (512usize, 128usize, 256usize),
+        (4, 1, 256),
+        (128, 32, 128),
+        (7, 3, 96),
+    ] {
+        let q: Vec<f32> = (0..q_rows * cols)
+            .map(|_| ((rng.next() % 20_001) as f32 - 10_000.0) / 1000.0)
+            .collect();
+        let k: Vec<f32> = (0..k_rows * cols)
+            .map(|_| ((rng.next() % 20_001) as f32 - 10_000.0) / 1000.0)
+            .collect();
+        let qw: Vec<f32> = (0..cols)
+            .map(|_| 0.5 + (rng.next() % 1000) as f32 / 1000.0)
+            .collect();
+        let kw: Vec<f32> = (0..cols)
+            .map(|_| 0.5 + (rng.next() % 1000) as f32 / 1000.0)
+            .collect();
+        let eps = 1e-6f32;
+        let qb = ctx.buffer(q_rows * cols * 4, true).unwrap();
+        let qwb = ctx.buffer(cols * 4, true).unwrap();
+        let qout = ctx.buffer(q_rows * cols * 4, true).unwrap();
+        let kb = ctx.buffer(k_rows * cols * 4, true).unwrap();
+        let kwb = ctx.buffer(cols * 4, true).unwrap();
+        let kout = ctx.buffer(k_rows * cols * 4, true).unwrap();
+        let mqout = ctx.buffer(q_rows * cols * 4, true).unwrap();
+        let mkout = ctx.buffer(k_rows * cols * 4, true).unwrap();
+        qb.upload(0, &f32_bytes(&q)).unwrap();
+        qwb.upload(0, &f32_bytes(&qw)).unwrap();
+        kb.upload(0, &f32_bytes(&k)).unwrap();
+        kwb.upload(0, &f32_bytes(&kw)).unwrap();
+        // Sequential: two rmsnorm launches.
+        ctx.rmsnorm(&qb, &qwb, &qout, q_rows as u32, cols as u32, eps)
+            .unwrap();
+        ctx.rmsnorm(&kb, &kwb, &kout, k_rows as u32, cols as u32, eps)
+            .unwrap();
+        // Merged: one launch.
+        ctx.qk_norm(
+            &qb,
+            &qwb,
+            &mqout,
+            &kb,
+            &kwb,
+            &mkout,
+            q_rows as u32,
+            k_rows as u32,
+            cols as u32,
+            eps,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut seq_q = vec![0u8; q_rows * cols * 4];
+        let mut m_q = vec![0u8; q_rows * cols * 4];
+        let mut seq_k = vec![0u8; k_rows * cols * 4];
+        let mut m_k = vec![0u8; k_rows * cols * 4];
+        qout.download(0, &mut seq_q).unwrap();
+        mqout.download(0, &mut m_q).unwrap();
+        kout.download(0, &mut seq_k).unwrap();
+        mkout.download(0, &mut m_k).unwrap();
+        assert_eq!(seq_q, m_q, "({q_rows},{k_rows},{cols}) q bits");
+        assert_eq!(seq_k, m_k, "({q_rows},{k_rows},{cols}) k bits");
+    }
+}
+
+#[test]
 fn rmsnorm_matches_the_scalar_reference() {
     let Some(ctx) = metal_context() else {
         return;

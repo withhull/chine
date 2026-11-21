@@ -148,6 +148,21 @@ int tm_metal_rmsnorm_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer 
                          tm_metal_buffer *y, uint32_t rows, uint32_t cols, float eps,
                          char *err, size_t err_cap);
 
+/* y[row] = rmsnorm(x[row], weight) + res[row] (the fused post-block
+ * norm + residual add; one threadgroup of 128 per row, mirroring
+ * tm_metal_rmsnorm_f32's arithmetic). */
+int tm_metal_norm_add_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *weight,
+                           tm_metal_buffer *res, tm_metal_buffer *y, uint32_t rows,
+                           uint32_t cols, float eps, char *err, size_t err_cap);
+
+/* One launch for the per-head Q/K RMS norms: rows [0, q_rows) normalize q
+ * with q_weight, rows [q_rows, q_rows + k_rows) normalize k with
+ * k_weight; bit-identical to the two rmsnorm launches it replaces. */
+int tm_metal_qk_norm_f32(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *q_weight,
+                          tm_metal_buffer *q_out, tm_metal_buffer *k, tm_metal_buffer *k_weight,
+                          tm_metal_buffer *k_out, uint32_t q_rows, uint32_t k_rows,
+                          uint32_t cols, float eps, char *err, size_t err_cap);
+
 /* NeoX RoPE in place over n_q_heads of q and n_kv_heads of k at `pos`,
  * using host-precomputed inv_freq[head_dim/2]. */
 /* k_cache[h][pos][:] = k_src[h][:], same for v; `round_f16` stores

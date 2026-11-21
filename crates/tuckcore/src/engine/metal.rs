@@ -536,9 +536,14 @@ impl SwiGluBlock {
         self.gate_mul(gpu, &s.g, &s.u, (n * self.width) as u32)?;
         self.down.gemm(gpu, &s.g, &s.d2, nn, exact)?;
         if let Some(w) = &self.out_norm {
-            ctx.rmsnorm(&s.d2, w, &s.d2, nn, hidden as u32, self.eps)?;
+            // The pair this replaces is `f32_axpy(&s.d2, &s.x, ...)`:
+            // the residual stream s.x is the accumulator, so the fused
+            // write target is s.x (aliasing the `res` input; each thread
+            // reads its position before writing it).
+            ctx.norm_add(&s.d2, w, &s.x, &s.x, nn, hidden as u32, self.eps)
+        } else {
+            ctx.f32_axpy(&s.d2, &s.x, 1.0, (n * hidden) as u32)
         }
-        ctx.f32_axpy(&s.d2, &s.x, 1.0, (n * hidden) as u32)
     }
 }
 
@@ -1192,8 +1197,20 @@ impl AttentionBlock {
         } else {
             &s.a
         };
-        ctx.rmsnorm(q, &self.q_norm, q, nn * heads, hd, self.eps)?;
-        ctx.rmsnorm(&s.b, &self.k_norm, &s.b, nn * kv, hd, self.eps)?;
+        // One launch for both per-head norms (bit-identical to the two
+        // rmsnorm calls it replaces; the metal-crate gate pins the bits).
+        ctx.qk_norm(
+            q,
+            &self.q_norm,
+            q,
+            &s.b,
+            &self.k_norm,
+            &s.b,
+            nn * heads,
+            nn * kv,
+            hd,
+            self.eps,
+        )?;
         ctx.qwen35_rope_partial_chunk(
             q,
             &s.b,
@@ -1247,18 +1264,16 @@ impl AttentionBlock {
         if let (Some(qg), Some(gate)) = (&self.qg, &self.gate) {
             gpu.q_gate_split_dev(qg, &self.q, gate, s.heads as u32, s.head_dim as u32)?;
         }
-        ctx.rmsnorm(
+        // One launch for both per-head norms (bit-identical to the two
+        // rmsnorm calls it replaces).
+        ctx.qk_norm(
             &self.q,
             &self.q_norm,
             &self.q,
-            s.heads as u32,
-            s.head_dim as u32,
-            self.eps,
-        )?;
-        ctx.rmsnorm(
             &self.k,
             &self.k_norm,
             &self.k,
+            s.heads as u32,
             s.kv_heads as u32,
             s.head_dim as u32,
             self.eps,
@@ -1524,9 +1539,11 @@ impl Layer {
             Mixer::Attention(b) => b.prefill(gpu, s, n, pos0, mode)?,
         }
         if let Some(w) = &self.mixer_out_norm {
-            ctx.rmsnorm(&s.proj, w, &s.proj, nn, hidden as u32, eps)?;
+            // Same convention as the FFN site: s.x is the accumulator.
+            ctx.norm_add(&s.proj, w, &s.x, &s.x, nn, hidden as u32, eps)?;
+        } else {
+            ctx.f32_axpy(&s.proj, &s.x, 1.0, (n * hidden) as u32)?;
         }
-        ctx.f32_axpy(&s.proj, &s.x, 1.0, (n * hidden) as u32)?;
         ctx.rmsnorm(&s.x, &self.post_norm, &s.h2, nn, hidden as u32, eps)?;
         self.ffn.prefill(gpu, s, n, hidden, mode.exact)
     }

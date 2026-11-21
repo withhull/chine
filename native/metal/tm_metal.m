@@ -71,6 +71,8 @@ struct tm_metal_ctx {
     id<MTLComputePipelineState> pso_f16gemv;
     id<MTLComputePipelineState> pso_q8row;
     id<MTLComputePipelineState> pso_rmsnorm;
+    id<MTLComputePipelineState> pso_norm_add;
+    id<MTLComputePipelineState> pso_qk_norm;
     id<MTLComputePipelineState> pso_silu;
     id<MTLComputePipelineState> pso_gelu_tanh_mul;
     id<MTLComputePipelineState> pso_f16row;
@@ -372,6 +374,8 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_f16gemv = tm_pipeline(ctx, @"tm_f16_gemv", &error);
         ctx->pso_q8row = tm_pipeline(ctx, @"tm_q8_0_row_f32", &error);
         ctx->pso_rmsnorm = tm_pipeline(ctx, @"tm_rmsnorm_f32", &error);
+        ctx->pso_norm_add = tm_pipeline(ctx, @"tm_norm_add_f32", &error);
+        ctx->pso_qk_norm = tm_pipeline(ctx, @"tm_qk_norm_f32", &error);
         ctx->pso_silu = tm_pipeline(ctx, @"tm_silu_mul_f32", &error);
         ctx->pso_gelu_tanh_mul = tm_pipeline(ctx, @"tm_gelu_tanh_mul_f32", &error);
         ctx->pso_f16row = tm_pipeline(ctx, @"tm_f16_row_f32", &error);
@@ -408,7 +412,8 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_q35_attention_chunk_f32 == nil || ctx->pso_q35_kv_store_chunk_f32 == nil ||
             ctx->pso_f16f32 == nil ||
             ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_f16gemv == nil ||
-            ctx->pso_q8row == nil || ctx->pso_rmsnorm == nil || ctx->pso_silu == nil ||
+            ctx->pso_q8row == nil || ctx->pso_rmsnorm == nil || ctx->pso_norm_add == nil ||
+            ctx->pso_qk_norm == nil || ctx->pso_silu == nil ||
             ctx->pso_f16row == nil || ctx->pso_q8gemm == nil || ctx->pso_q8gemm_mma == nil ||
             ctx->pso_q8gemm_mma_f16op == nil || ctx->pso_f16gemm == nil ||
             ctx->pso_q35_conv == nil || ctx->pso_q35_conv_shift == nil ||
@@ -470,6 +475,8 @@ void tm_metal_destroy(tm_metal_ctx *ctx) {
         [ctx->pso_f16row release];
         [ctx->pso_silu release];
         [ctx->pso_rmsnorm release];
+        [ctx->pso_norm_add release];
+        [ctx->pso_qk_norm release];
         [ctx->pso_q8row release];
         [ctx->pso_f16gemv release];
         [ctx->pso_q8gemv release];
@@ -1142,6 +1149,94 @@ int tm_metal_rmsnorm_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer 
                          char *err, size_t err_cap) {
     return tm_rmsnorm_dispatch(ctx, ctx->pso_rmsnorm, x, weight, y, rows, cols, eps, 4,
                                err, err_cap, "rmsnorm");
+}
+
+int tm_metal_norm_add_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *weight,
+                           tm_metal_buffer *res, tm_metal_buffer *y, uint32_t rows,
+                           uint32_t cols, float eps, char *err, size_t err_cap) {
+    if (tm_check_ctx(ctx, err, err_cap, "norm_add") != TM_METAL_OK) {
+        return TM_METAL_ERR_UNSUPPORTED;
+    }
+    if (rows == 0 || cols == 0) {
+        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED, @"norm_add: zero shape");
+    }
+    size_t need = (size_t)rows * (size_t)cols * 4u;
+    if (tm_check_buffer(ctx, x, need, err, err_cap, "norm_add.x") != TM_METAL_OK ||
+        tm_check_buffer(ctx, weight, (size_t)cols * 4u, err, err_cap, "norm_add.weight") != TM_METAL_OK ||
+        tm_check_buffer(ctx, res, need, err, err_cap, "norm_add.res") != TM_METAL_OK ||
+        tm_check_buffer(ctx, y, need, err, err_cap, "norm_add.y") != TM_METAL_OK) {
+        return TM_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        tm_frame f;
+        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        if (enc == nil) {
+            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"norm_add: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_norm_add];
+        [enc setBuffer:x->buffer offset:0 atIndex:0];
+        [enc setBuffer:weight->buffer offset:0 atIndex:1];
+        [enc setBuffer:res->buffer offset:0 atIndex:2];
+        [enc setBuffer:y->buffer offset:0 atIndex:3];
+        [f.keep addObject:x->buffer];
+        [f.keep addObject:weight->buffer];
+        [f.keep addObject:res->buffer];
+        [f.keep addObject:y->buffer];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:4];
+        [enc setBytes:&eps length:sizeof(eps) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        return tm_frame_commit(ctx, &f, err, err_cap, "norm_add");
+    }
+}
+
+int tm_metal_qk_norm_f32(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *q_weight,
+                          tm_metal_buffer *q_out, tm_metal_buffer *k, tm_metal_buffer *k_weight,
+                          tm_metal_buffer *k_out, uint32_t q_rows, uint32_t k_rows, uint32_t cols,
+                          float eps, char *err, size_t err_cap) {
+    if (tm_check_ctx(ctx, err, err_cap, "qk_norm") != TM_METAL_OK) {
+        return TM_METAL_ERR_UNSUPPORTED;
+    }
+    if (q_rows == 0 || k_rows == 0 || cols == 0) {
+        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED, @"qk_norm: zero shape");
+    }
+    size_t q_need = (size_t)q_rows * (size_t)cols * 4u;
+    size_t k_need = (size_t)k_rows * (size_t)cols * 4u;
+    if (tm_check_buffer(ctx, q, q_need, err, err_cap, "qk_norm.q") != TM_METAL_OK ||
+        tm_check_buffer(ctx, q_weight, (size_t)cols * 4u, err, err_cap, "qk_norm.q_weight") != TM_METAL_OK ||
+        tm_check_buffer(ctx, q_out, q_need, err, err_cap, "qk_norm.q_out") != TM_METAL_OK ||
+        tm_check_buffer(ctx, k, k_need, err, err_cap, "qk_norm.k") != TM_METAL_OK ||
+        tm_check_buffer(ctx, k_weight, (size_t)cols * 4u, err, err_cap, "qk_norm.k_weight") != TM_METAL_OK ||
+        tm_check_buffer(ctx, k_out, k_need, err, err_cap, "qk_norm.k_out") != TM_METAL_OK) {
+        return TM_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        tm_frame f;
+        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        if (enc == nil) {
+            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qk_norm: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_qk_norm];
+        [enc setBuffer:q->buffer offset:0 atIndex:0];
+        [enc setBuffer:q_weight->buffer offset:0 atIndex:1];
+        [enc setBuffer:q_out->buffer offset:0 atIndex:2];
+        [enc setBuffer:k->buffer offset:0 atIndex:3];
+        [enc setBuffer:k_weight->buffer offset:0 atIndex:4];
+        [enc setBuffer:k_out->buffer offset:0 atIndex:5];
+        [f.keep addObject:q->buffer];
+        [f.keep addObject:q_weight->buffer];
+        [f.keep addObject:q_out->buffer];
+        [f.keep addObject:k->buffer];
+        [f.keep addObject:k_weight->buffer];
+        [f.keep addObject:k_out->buffer];
+        [enc setBytes:&q_rows length:sizeof(q_rows) atIndex:6];
+        [enc setBytes:&k_rows length:sizeof(k_rows) atIndex:7];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:8];
+        [enc setBytes:&eps length:sizeof(eps) atIndex:9];
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)(q_rows + k_rows), 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        return tm_frame_commit(ctx, &f, err, err_cap, "qk_norm");
+    }
 }
 
 int tm_metal_silu_mul_f32(tm_metal_ctx *ctx, tm_metal_buffer *gate, tm_metal_buffer *up,

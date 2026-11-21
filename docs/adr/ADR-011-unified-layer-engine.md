@@ -687,3 +687,45 @@ three passes each; full prefill ~330 ms):
   llama.cpp and exo's Flint run fused stacked kernels with fewer
   launches. The next lever on this model is fused GeGLU/norm kernels —
   not further GEMM tuning.
+
+- **Follow-up (2026-11-22): the fused post-block norm + residual add, and
+  the merged Q/K norms.** Two structural cuts to the non-GEMM stack
+  identified as Gemma 3's remaining prefill gap:
+  - `tm_norm_add_f32`: one pass for the engine's post-block pair
+    (`rmsnorm(out)` then `y += normed`, where y is the residual stream).
+    The pair reads and writes the row three times; the fused kernel reads
+    twice and writes once. Metal fast math contracts the fused
+    multiply-add (MSL has no `precise`), which cost 1 f32 rounding
+    versus the pair's device-memory round-trip; routing the normed
+    product through an `optnone` no-inline helper (a real call boundary)
+    restores bit-identity — measured 0 ulps against the sequential pair
+    on every shape including the engine's in-place (output aliases the
+    residual input) wiring, and this is what the chunk-vs-per-token
+    bit-identity gates rely on (either mode may run fused). Measured,
+    in-run, at the engine's shapes: 52.2 -> 31.4 us per 128x1152 row-set
+    (-40%), 71.0 -> 50.3 us at 128x2048 (-29%); the first (contracted)
+    version was 15-25% slower at decode rows and is recorded as
+    tried-not-kept before the optnone fix.
+  - `tm_qk_norm_f32`: one launch for the per-head Q and K RMS norms
+    (rows [0, q_rows) for q, the rest for k); per-row arithmetic is
+    exactly `tm_rmsnorm_f32`'s — bit-identical, pinned by a metal-crate
+    gate. 208 fewer launches per 512-token prefill, 52 fewer per decode
+    token.
+  - Applied at the two prefill sites only (decode keeps the pair: at
+    rows=1 the fusion is a wash and the decode records stay untouched).
+  - The gemma3 fixture bit-identity gate caught a real wiring bug before
+    any commit: the first fusion wrote the result into the block output
+    instead of the residual stream (the pair accumulates into s.x), so
+    prefill diverged completely; Qwen3.5's gates missed it because its
+    layers take the no-norm branch. Fixed, gate green, and the unit gate
+    now also covers the engine's aliased wiring.
+  - Ungrouped 512-token Gemma profile after: the norm/elementwise stack
+  collapsed from ~30 ms (rmsnorm 16.1 + axpy 13.9) to ~10 ms (norm_add
+  7.2, rmsnorm 3.1 — the per-head norms left the rmsnorm row entirely);
+  GEMM unchanged at 79-80%. Kernel-level arithmetic projects the quiet
+  bench TTFT saving at ~6-7 ms (pair cost ~14.5 ms quiet x 40%, plus
+  launch overhead) — a projection; the standard quiet bench run records
+  the request-level number.
+  - Qualification: metal suite 32/32 (two new gates), engine suites
+    19/19 on the real 0.8B and 2B, the Gemma real-text Metal gate
+    unchanged (max 0.0256, top-1 equal), full gate 510 tests.
