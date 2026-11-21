@@ -621,3 +621,22 @@ three passes each; full prefill ~330 ms):
   carries shape-specialization constants (`bci/bco/ne12/ne13/r2/r3`) that
   our ABI does not. A 128-row tile is a known dead end (register spill,
   the variant table above). Follow-up needs a quiet machine.
+
+- **Request-level record (2026-11-22, quiet AC, `2d03884`, all rounds
+  valid, zero swap growth).** `scripts/bench-baseline.sh`, 512/256, 3
+  ABBA rounds, one model at a time, Claude app closed:
+  - Qwen3.5-2B (3 GiB, default KV f16, `…-qwen35-2b-q8_0-f16op-quiet`):
+    warm decode 39.82 vs 40.60 tok/s, paired 0.980 (0.982/0.980/0.980);
+    warm TTFT 601 vs 587 ms, paired 1.02× — **prefill 98% of llama.cpp**,
+    up from 94% (two AC runs with f32 operands) and 86% (noisy battery
+    run). The Phase 1 prefill bar is met on the 2B in this run;
+    reproduction pending by the repo's convention. Both engines were
+    steady this run (TuckCore 600-602 ms, llama.cpp 587-588 ms).
+  - Gemma 3 1B (f16 KV, ignore-EOS, `…-gemma3-1b-f16op-quiet`): warm
+    TTFT 330 vs 290 ms, paired 1.14× (~88%, within the recorded 85-90%
+    band — the residual is the 5% kernel gap at its 6912x1152 FFN
+    shapes above); warm decode 65.04 vs 75.89 tok/s, paired 0.857 —
+    llama.cpp's fastest recorded decode round (75.9-76.1 tok/s; it
+    swings 61-76 across runs) while TuckCore is unchanged and steady
+    (64.90-65.19, median 65.04, identical to every prior run). The
+    profile does not touch decode.
