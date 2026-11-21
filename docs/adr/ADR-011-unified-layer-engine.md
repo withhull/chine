@@ -668,3 +668,22 @@ three passes each; full prefill ~330 ms):
     0.8B and 2B engine suites 19/19 each; the Gemma real-text Metal
     gate identical (max 0.0256, top-1 equal at every length).
   - The quiet-machine bench rerun records the request-level number.
+
+- **Acceptance record, same day (quiet battery run, clean tree
+  `5f242d0`, all rounds valid, zero swap,
+  `…-gemma3-1b-f16op-tuned-quiet`).** Warm TTFT 326 vs llama.cpp 289 ms
+  — paired 1.13x, prefill **~88.5%** (pairs 1.128 / 1.128 / 1.062);
+  paired decode 0.860 (TuckCore steady 65.0 ± 0.2 as in every recorded
+  run; llama.cpp swung to 62.5 tok/s in round 3). The >= 90% prefill
+  bar is **not crossed** on Gemma 3 by the median. Correction, recorded
+  plainly: the -9.5% quoted above from in-process profiles compared
+  different machine-load windows and was load-contaminated; the
+  request-level effect of the edge-stage fix is -1.2% warm TTFT
+  (330 -> 326 ms), which matches the same-window kernel arithmetic
+  (stack -2.65% x 79% GEMM share). With the GEMM stack now 1.6-1.9%
+  behind llama, the remaining ~11% request-level gap sits in the
+  non-GEMM stack and host dispatch (~21% of prefill: gelu 5.6%,
+  attention 5.6%, rmsnorm 3.8%, axpy 3.3%, recurrence/conv ~5%), where
+  llama.cpp and exo's Flint run fused stacked kernels with fewer
+  launches. The next lever on this model is fused GeGLU/norm kernels —
+  not further GEMM tuning.

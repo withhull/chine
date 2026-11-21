@@ -49,14 +49,18 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   vs 67.4 tok/s (paired 1.23), time to first token 0.279 vs 0.287 s
   (paired 0.99): unchanged by Gemma 3, the lifecycle work and the
   attention-window kernels.
-- **Gemma 3 1B Q8_0** (three runs, f16 KV, ignore-EOS; the third with
-  the f16-operand GEMM profile): decode 57.1/65.0/65.0 vs
-  63.7/68.4/75.9 tok/s (paired medians 0.896, 0.950 and 0.857 — the
-  ratio tracks llama.cpp, whose decode swings 61-76 tok/s across runs;
-  TuckCore is steady at 65.0 ± 0.2 in every run), time to first token
-  368/341/330 vs 331/291/290 ms (paired 1.11×, 1.17× and 1.14×).
-  Prefill stays at 85-90% in the recorded runs (before the FFN tuning
-  below); the quiet rerun on the tuned kernel is pending.
+- **Gemma 3 1B Q8_0** (four runs, f16 KV, ignore-EOS; the last two with
+  the f16-operand GEMM profile, the newest after the FFN edge-stage
+  tuning): decode 57.1/65.0/65.0/65.1 vs 63.7/68.4/75.9/75.6 tok/s
+  (paired medians 0.896, 0.950, 0.857, 0.860 — the ratio tracks
+  llama.cpp, whose decode swings 61-76 tok/s across runs; TuckCore is
+  steady at 65.0 ± 0.2 in every run), time to first token
+  368/341/330/326 vs 331/291/290/289 ms (paired 1.11×, 1.17×, 1.14×,
+  1.13×). Prefill is at **~88.5%** after the FFN tuning (was 85-90%):
+  the GEMM kernel stack closed to 1.6-1.9% behind llama, and the
+  remaining gap is the non-GEMM stack and host dispatch (~21% of
+  prefill) — fused GeGLU/norm kernels are the recorded next lever, not
+  further GEMM tuning.
 - **Qwen3.5-2B Q8_0** (four runs, 3 GiB budget; the fourth with the
   f16-operand GEMM profile): decode 38.4-39.8 vs 38.1-40.7 tok/s (paired
   0.956-1.030, at parity). Time to first token 0.623 s vs 0.587-0.588 s
