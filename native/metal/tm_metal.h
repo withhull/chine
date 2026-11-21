@@ -415,3 +415,4 @@ int tm_metal_set_gdn_chunk_generic(tm_metal_ctx *ctx, int generic);
 #endif
 
 #endif /* TM_METAL_H */
+

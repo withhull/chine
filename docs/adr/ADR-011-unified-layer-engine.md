@@ -640,3 +640,31 @@ three passes each; full prefill ~330 ms):
     swings 61-76 across runs) while TuckCore is unchanged and steady
     (64.90-65.19, median 65.04, identical to every prior run). The
     profile does not touch decode.
+
+- **Follow-up, same day: the edge stage's occupancy tax.** The f16-operand
+  kernel's static 8 KB edge stage (`ot`) was allocated by every group,
+  though full tiles never touch it; at ~32 KB threadgroup memory per core
+  that halved resident groups (14 KB -> 2/core; 6 KB -> 5/core). Replacing
+  it with per-SIMD-group 64-float stages (256 B each, 7 KB total) and
+  storing full fragments straight from the accumulators:
+  - isolated, same-window, 128-token batches: 6912x1152 890.5 vs llama
+    874.8 us (1.018, was 1.052), 1152x6912 972.7 vs 954.7 (1.019, was
+    ~1.04), and the small attention shapes moved AHEAD of llama
+    (1024x1152 163.1 vs 169.4, 256x1152 70.9 vs 74.2, 1152x1024 169.3 vs
+    170.5);
+  - in the Gemma model, in-process: 512-token batched prefill wall
+    411 -> 371-389 ms (-9.5% median), GEMM GPU time 337 -> 308-311 ms;
+    the per-layer GEMM stack is now 1.6% behind llama (was 4.6%);
+  - 2B shapes gained 1-1.5% in-run; its 98% prefill stands.
+  - A first rewrite of the edge tail (a whole-tile fragment loop holding
+    the accumulators across threadgroup barriers) was measured 15-25%
+    SLOWER on full tiles - a never-executed tail had inflated the
+    kernel's register allocation and cut occupancy for every launch.
+    It was replaced before commit by the per-SIMD-group structure above;
+    the lesson is recorded: never let a cold path hold live
+    accumulators across group-wide barriers.
+  - Qualification unchanged and re-run green: kernel vs f32 reference
+    worst rel 2.9e-6 (the edge-path rewrite preserves values exactly);
+    0.8B and 2B engine suites 19/19 each; the Gemma real-text Metal
+    gate identical (max 0.0256, top-1 equal at every length).
+  - The quiet-machine bench rerun records the request-level number.

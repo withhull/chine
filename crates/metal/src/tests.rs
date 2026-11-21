@@ -1555,7 +1555,7 @@ fn q8_0_gemm_mma_grouped_wall_timing_when_requested() {
                 ctx.end_group().unwrap();
                 ctx.fence().unwrap();
             };
-            for f16op in [false, true] {
+            for (f16op, label) in [(false, "f32  "), (true, "f16op")] {
                 for _ in 0..3 {
                     group(f16op);
                 }
@@ -1566,8 +1566,7 @@ fn q8_0_gemm_mma_grouped_wall_timing_when_requested() {
                 }
                 let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
                 eprintln!(
-                    "ours mul_mat {} {rows:>5}x{cols:<5} tokens {batch:>3}: {:>8.1} us  {:>6.0} GFLOP/s",
-                    if f16op { "f16op" } else { "f32  " },
+                    "ours mul_mat {label} {rows:>5}x{cols:<5} tokens {batch:>3}: {:>8.1} us  {:>6.0} GFLOP/s",
                     per * 1e6,
                     2.0 * (rows * cols * batch) as f64 / per / 1e9
                 );

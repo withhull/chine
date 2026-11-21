@@ -55,8 +55,8 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   ratio tracks llama.cpp, whose decode swings 61-76 tok/s across runs;
   TuckCore is steady at 65.0 ± 0.2 in every run), time to first token
   368/341/330 vs 331/291/290 ms (paired 1.11×, 1.17× and 1.14×).
-  Prefill stays at 85-90%; the recorded residual is the f16-operand
-  kernel's 5% gap at the 6912x1152 FFN shapes.
+  Prefill stays at 85-90% in the recorded runs (before the FFN tuning
+  below); the quiet rerun on the tuned kernel is pending.
 - **Qwen3.5-2B Q8_0** (four runs, 3 GiB budget; the fourth with the
   f16-operand GEMM profile): decode 38.4-39.8 vs 38.1-40.7 tok/s (paired
   0.956-1.030, at parity). Time to first token 0.623 s vs 0.587-0.588 s
@@ -81,7 +81,13 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   shape; in the 2B model the GEMM stack's GPU time drops ~4%. The
   request-level quiet bench run records it: 2B prefill 94% → **98%**
   (`…-qwen35-2b-q8_0-f16op-quiet`, AC, all rounds valid, zero swap),
-  decode at parity 0.980. Opt out per load with
+  decode at parity 0.980. FFN-shape tuning (2026-11-22): the kernel's
+  static 8 KB edge stage cost every full-tile group resident slots —
+  replaced by per-SIMD-group 256 B stages, Gemma's FFN shapes went from
+  5% behind llama to 1.8-1.9% with the small attention shapes ahead of
+  it, and Gemma's in-process 512-token prefill dropped 9.5%
+  (411 → ~373 ms, GEMM GPU time 337 → 308-311 ms); numerics unchanged
+  (reference gate identical, kernel drift 2.9e-6). Opt out per load with
   `--tuckcore-profile oracle-f32` (with `--kernels metal`); the resolved
   profile is recorded in every identity, stat and verify record.
 - **Decode** is at parity or ahead. llama.cpp's own decode in this harness

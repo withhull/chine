@@ -652,11 +652,13 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
                                    uint tid [[thread_position_in_threadgroup]],
                                    uint sg [[simdgroup_index_in_threadgroup]]) {
     /* sa: 32 W^T fragments (4 k-blocks x 8 row-blocks), sb: 16 X fragments
-     * (4 k-blocks x 4 token-blocks); 32 halves each. ot: the edge-tile
-     * output stage (float; accumulators never round through it). */
+     * (4 k-blocks x 4 token-blocks); 32 halves each. edge_frag: one
+     * 64-float stage per SIMD group for partial edge fragments (see the
+     * edge comment at the store). 7 KB total keeps resident groups per
+     * core high. */
     threadgroup half sa[TM_MMA_ROWS * 32u];
     threadgroup half sb[TM_MMA_TOK * 32u];
-    threadgroup float ot[TM_MMA_ROWS * TM_MMA_TOK];
+    threadgroup float edge_frag[4][64];
 
     const uint token_tiles = (batch + TM_MMA_TOK - 1u) / TM_MMA_TOK;
     const uint tok0 = (tg % token_tiles) * TM_MMA_TOK;
@@ -753,20 +755,48 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         }
         return;
     }
-    /* Edge tile: stage [32 tokens x 64 rows], store in bounds only. */
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint j = 0; j < 2u; ++j) {
-        for (uint i = 0; i < 4u; ++i) {
-            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * TM_MMA_ROWS + (sg_r + i) * 8u,
-                            TM_MMA_ROWS);
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint idx = tid; idx < TM_MMA_ROWS * TM_MMA_TOK; idx += 128u) {
-        const uint r = idx % TM_MMA_ROWS;
-        const uint b = idx / TM_MMA_ROWS;
-        if (row0 + r < rows && b < tile_batch) {
-            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * TM_MMA_ROWS + r];
+    /* Edge tile: every SIMD group consumes all of its own accumulators
+     * first (full 8x8 fragments store straight from the registers, no
+     * synchronization), and only the partial fragments then round-trip
+     * through the shared 64-float stage. Keeping the accumulators'
+     * live range inside one barrier-free pass is what keeps the kernel's
+     * register allocation (and with it full-tile occupancy) unchanged —
+     * a tail that holds them across threadgroup barriers inflated the
+     * allocation and cost every full tile 15-25% (measured, ADR-011
+     * engine note 2026-11-22). The 256 B stage replaces the whole-tile
+     * 8 KB buffer this kernel used to carry statically, which cost every
+     * full-tile group resident slots (3.4% at 6912x1152). */
+    const uint tok_end = tok0 + tile_batch;
+    {
+        threadgroup float * const edge_frag_mine = edge_frag[sg];
+        const uint rb_base = row0 + sg_r * 8u;
+        const uint tb_base = tok0 + sg_t * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                const uint rb = rb_base + i * 8u;
+                const uint tb = tb_base + j * 8u;
+                if (rb >= rows || tb >= tok_end) {
+                    continue; /* nothing of this fragment is valid */
+                }
+                if (rb + 8u <= rows && tb + 8u <= tok_end) {
+                    simdgroup_store(mc[j][i], y + y_off + (size_t)tb * rows + rb, rows);
+                } else {
+                    simdgroup_store(mc[j][i], edge_frag_mine, 8);
+                    /* sg-scoped: orders the stage write against the reads
+                     * below without a threadgroup-wide barrier (the tail
+                     * holds no cross-SIMD-group synchronization at all). */
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                    for (uint lane = tid % 32u; lane < 64u; lane += 32u) {
+                        const uint fr = lane / 8u; /* token within fragment */
+                        const uint ft = lane % 8u; /* row within fragment */
+                        if (tb + fr < tok_end && rb + ft < rows) {
+                            y[y_off + (size_t)(tb + fr) * rows + rb + ft] =
+                                edge_frag_mine[fr * 8u + ft];
+                        }
+                    }
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                }
+            }
         }
     }
 }
