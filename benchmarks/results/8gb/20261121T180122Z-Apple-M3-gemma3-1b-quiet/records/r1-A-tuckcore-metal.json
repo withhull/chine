@@ -1,0 +1,107 @@
+{
+  "schema_version": 5,
+  "run_id": "93b3c161c1c3960e6f7c6ee77c8f5cc2d446508c5381a16ef202416d824f86f5",
+  "started_unix_ms": 1795284088228,
+  "device_id": "ba21df61ac2b1321f1d27c2a8de898bbd6fbafa969f5294b8e890a6a144fbc8e",
+  "artifact_id": "21775a3726c652afd2174d1455e94c03dfd437512ecdd0c96c937be6d7c281e8",
+  "plan_id": "b5642dbeb04d197f7127593835127729b2aa501f1c466c2a04e475be63b5a325",
+  "engine": {
+    "engine": "tuckcore",
+    "certified": false,
+    "backend_abi_version": 1,
+    "worker_protocol_version": 8,
+    "kernels": [
+      "ADR013:gemma3-q8_0+f16:metal"
+    ],
+    "build_id": "tuckmill 0.2.0 (release)"
+  },
+  "workload": {
+    "suite": "standard-v1",
+    "input_tokens": 512,
+    "output_tokens": 256,
+    "repetitions": 3,
+    "prompt_set": "frozen-synthetic-ids",
+    "ignore_eos": true
+  },
+  "cache_state": "cache-uncontrolled",
+  "samples": [
+    {
+      "prompt_id": "std-512-256-r0",
+      "ttft_ms": 930.316125,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 4864.959583,
+      "gap_p95_ms": 15.611833,
+      "gap_max_ms": 16.383458,
+      "footprint_peak_bytes": 1285899728,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 64.81477715917086,
+      "worker_total_ms": 4376.119874999999,
+      "worker_prefill_ms": 441.795416,
+      "worker_decode_ms": 3934.288,
+      "kernel_impl": "metal",
+      "notes": []
+    },
+    {
+      "prompt_id": "std-512-256-r1",
+      "ttft_ms": 342.911041,
+      "committed_tokens": 128,
+      "generated_tokens": 256,
+      "visible_chunks": 128,
+      "total_ms": 4333.384041,
+      "gap_p95_ms": 33.222042,
+      "gap_max_ms": 37.236958,
+      "footprint_peak_bytes": 1285981648,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 63.90796451128076,
+      "worker_total_ms": 4329.173333,
+      "worker_prefill_ms": 339.03662499999996,
+      "worker_decode_ms": 3990.113,
+      "kernel_impl": "metal",
+      "notes": []
+    },
+    {
+      "prompt_id": "std-512-256-r2",
+      "ttft_ms": 355.95491699999997,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 4329.905833,
+      "gap_p95_ms": 16.346583000000003,
+      "gap_max_ms": 17.648958,
+      "footprint_peak_bytes": 1285998032,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 64.17316183999554,
+      "worker_total_ms": 4327.659,
+      "worker_prefill_ms": 354.00725,
+      "worker_decode_ms": 3973.62375,
+      "kernel_impl": "metal",
+      "notes": []
+    }
+  ],
+  "summary": {
+    "ttft_median_ms": 355.95491699999997,
+    "ttft_p95_ms": 930.316125,
+    "throughput_median_tps": 59.07623178049175,
+    "throughput_decode_median_tps": 64.17316183999554,
+    "gap_p95_ms": 33.222042,
+    "completion_rate": 1.0,
+    "footprint_peak_bytes": 1285998032
+  },
+  "performance_class": "interactive",
+  "confidence": "estimated",
+  "slow_mode_accepted": false,
+  "prefill_batch_effective": 128,
+  "caveats": [
+    "suite standard-v1 frozen: frozen workload definition; prompts are synthetic token-id sets derived deterministically from prompt ids, so no private user prompts are collected; standard measurement shape: 512 input / 256 output tokens with exact recorded prompt ids and cache conditions; cache labels are explicit: cold-declared, warm, prefix-hit, or cache-uncontrolled; a first run is not automatically a cold-storage run; reference inputs are compared only through the four-way identity in PRD section 20.1 (R0/R1/T0/T1); draft tokens are never reported as final throughput",
+    "all throughput figures count model tokens from the worker's Done frame: throughput_median_tps is end-to-end (generated tokens / total request time, including TTFT) and throughput_decode_median_tps is (generated - 1) over the worker's first-to-last sampled-token span; ttft_ms, visible_chunks, and the gap percentiles describe the visible stream (user experience), not token production",
+    "experimental backend tuckcore: uncertified kernels; real weights executed, performance and quality unmeasured",
+    "logical read traffic is measured weight bytes read via positioned reads; not physical SSD counters",
+    "footprint sampled from proc_pid_rusage at ~50ms cadence",
+    "cold-start and warm-cache are separate labels; this run's cache state is declared explicitly",
+    "cache state was not controlled or established; treated as uncontrolled",
+    "TuckCore prefix cache disabled: every repetition prefills its full prompt (no cross-request reuse), comparable with engines that do not cache",
+    "ignore-EOS workload: the model's end-of-sequence token did not end generation, so every engine generated the full output count; decode throughput is comparable, output text past EOS is not meaningful"
+  ]
+}

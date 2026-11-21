@@ -49,15 +49,21 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   vs 67.4 tok/s (paired 1.23), time to first token 0.279 vs 0.287 s
   (paired 0.99): unchanged by Gemma 3, the lifecycle work and the
   attention-window kernels.
-- **Gemma 3 1B Q8_0** (one run, f16 KV, ignore-EOS): decode 57.1 vs
-  63.7 tok/s (paired 0.896), time to first token 368 vs 331 ms (paired
-  1.11×). Just under the 90% decode bar, before any tuning.
-- **Qwen3.5-2B Q8_0** (two runs, 3 GiB budget): time to first token
-  0.623-0.625 s vs 0.587-0.588 s (94%), decode 39.3-39.4 vs
-  38.3-40.5 tok/s (paired 0.97-1.03).
-- **Phase 1 bar** (≥ 90% of llama.cpp for decode and prefill): met and
-  reproduced on both models, on this Mac. Prefill is at parity, not a
-  lead, because llama.cpp's own spread covers the difference.
+- **Gemma 3 1B Q8_0** (two runs, f16 KV, ignore-EOS): decode 57.1/65.0 vs
+  63.7/68.4 tok/s (paired medians 0.896 and 0.950; per pair 0.86-1.04),
+  time to first token 368/341 vs 331/291 ms (paired 1.11× and 1.17×).
+  Decode is at the 90% bar; prefill is at 85-90%.
+- **Qwen3.5-2B Q8_0** (three runs, 3 GiB budget): decode 38.4-39.4 vs
+  38.1-40.5 tok/s (paired 0.95-1.03, at parity). Time to first token
+  0.623 s vs 0.587-0.588 s in the two AC runs (paired 1.06×, 94%), and
+  0.829 s vs 0.610 s in the quiet battery run (paired 1.16×, 86%; round 3
+  slowed both engines together).
+- **Phase 1 bar** (≥ 90% of llama.cpp for decode and prefill): decode
+  meets it on the 0.8B (reproduced) and is at parity on the 2B and
+  Gemma 3 1B. Prefill meets it and is reproduced only on the 0.8B; the
+  2B (86-94%) and Gemma 3 (85-90%) are at or just below it. Prefill is
+  at parity, not a lead, because llama.cpp's own spread covers the
+  difference. All numbers are locally-calibrated on one M3 8 GB Mac.
 - **Decode** is at parity or ahead. llama.cpp's own decode in this harness
   varies between runs (about 66-85 tok/s), so this is not stated as a
   lead.
