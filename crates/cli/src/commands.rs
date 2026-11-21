@@ -1317,7 +1317,7 @@ fn verify(
                 TuckmillError::new(
                     ErrorCode::InvalidRequest,
                     format!(
-                        "unknown tuckcore profile {tuckcore_profile:?}; use \"llama-cpu\" or \"oracle-f32\""
+                        "unknown tuckcore profile {tuckcore_profile:?}; use \"llama-cpu\", \"oracle-f32\" or \"metal-f16-act\" (the unified engine's Metal GEMM profile; with --kernels metal the default resolves to it)"
                     ),
                 )
             })?;

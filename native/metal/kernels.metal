@@ -634,6 +634,143 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
     }
 }
 
+/* Batched Q8_0 GEMM with f16 operand tiles: the declared `metal-f16-act`
+ * profile (ADR-010), numerics of llama.cpp's kernel_mul_mm — dequantized
+ * weights and activations are rounded to half when staged, the matrix
+ * multiply runs in half, accumulation stays f32. Everything else (tiling,
+ * fragment layout, summation order, edge handling) is identical to
+ * tm_q8_0_gemm_mma. */
+kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
+                                   device const float *x [[buffer(1)]],
+                                   device float *y [[buffer(2)]],
+                                   constant uint &rows [[buffer(3)]],
+                                   constant uint &cols [[buffer(4)]],
+                                   constant uint &batch [[buffer(5)]],
+                                   constant uint &x_off [[buffer(6)]],
+                                   constant uint &y_off [[buffer(7)]],
+                                   uint tg [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_position_in_threadgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]]) {
+    /* sa: 32 W^T fragments (4 k-blocks x 8 row-blocks), sb: 16 X fragments
+     * (4 k-blocks x 4 token-blocks); 32 halves each. ot: the edge-tile
+     * output stage (float; accumulators never round through it). */
+    threadgroup half sa[TM_MMA_ROWS * 32u];
+    threadgroup half sb[TM_MMA_TOK * 32u];
+    threadgroup float ot[TM_MMA_ROWS * TM_MMA_TOK];
+
+    const uint token_tiles = (batch + TM_MMA_TOK - 1u) / TM_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * TM_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, TM_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * TM_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)blocks * 34u;
+
+    /* W loader: thread t owns 16 quants (half a Q8_0 block) of row t / 2. */
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    /* X loader: thread t owns 8 values of token t / 4. */
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    /* Fragment slots this thread writes. */
+    threadgroup half *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup half *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u; /* first row-block of this SIMD group */
+    const uint sg_t = (sg / 2u) * 2u; /* first token-block */
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    /* Out-of-range rows and tokens load a clamped in-range row; their
+     * results land only in output positions that are never stored. */
+    const device uchar *block = wrow;
+    const device float *xblk = xrow;
+    /* This SIMD group's fragment bases; each k-block of 8 advances them. */
+    const threadgroup half *lsa = sa + 64u * sg_r;
+    const threadgroup half *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, block += 34, xblk += 32) {
+        float wv[16];
+        const float d = (float)(*(const device half *)block);
+        const device packed_char4 *qv = (const device packed_char4 *)(block + 2u + w_k);
+        TM_UNROLL for (uint i = 0; i < 4u; ++i) {
+            const float4 q = float4(char4(qv[i]));
+            wv[4u * i + 0u] = d * q.x;
+            wv[4u * i + 1u] = d * q.y;
+            wv[4u * i + 2u] = d * q.z;
+            wv[4u * i + 3u] = d * q.w;
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* W^T fragment element (k % 8, row % 8); the 16 k values span two
+         * k-blocks of 8. Rounding to half happens here, once per staged
+         * element. */
+        TM_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+        }
+        /* X fragment row (token % 8), 8 contiguous k values. */
+        *(threadgroup half4 *)(sb_dst) = half4(xv0);
+        *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        TM_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_half8x8 ma[4];
+            simdgroup_half8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            TM_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            TM_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            TM_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                TM_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + TM_MMA_ROWS <= rows && tile_batch == TM_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    /* Edge tile: stage [32 tokens x 64 rows], store in bounds only. */
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * TM_MMA_ROWS + (sg_r + i) * 8u,
+                            TM_MMA_ROWS);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tid; idx < TM_MMA_ROWS * TM_MMA_TOK; idx += 128u) {
+        const uint r = idx % TM_MMA_ROWS;
+        const uint b = idx / TM_MMA_ROWS;
+        if (row0 + r < rows && b < tile_batch) {
+            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * TM_MMA_ROWS + r];
+        }
+    }
+}
+
 /* Batched F16 GEMM with the same contract as tm_q8_0_gemm. */
 kernel void tm_f16_gemm(device const half *w [[buffer(0)]],
                         device const float *x [[buffer(1)]],

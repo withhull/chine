@@ -956,8 +956,23 @@ impl Runtime {
                     "reference backend: pinned llama.cpp {} via tm shim; KV precision requested for both sides: {}",
                     tuckmill_llamaref::LLAMA_REVISION, options.kv_precision
                 ),
-                "TuckCore is the scalar FP32 reference (no additional activation quantization); the comparison establishes a numerical envelope for this artifact, configuration, and tolerance policy — not performance and not bit-identity"
-                    .into(),
+                format!(
+                    "TuckCore numerical profile: {} ({}); the comparison establishes a numerical envelope for this artifact, configuration, and tolerance policy — not performance and not bit-identity",
+                    options.tuckcore_profile.as_str(),
+                    match options.tuckcore_profile {
+                        tuckmill_tuckcore::forward::NumericalProfile::OracleF32 => {
+                            "scalar FP32 reference, no additional activation rounding"
+                        }
+                        tuckmill_tuckcore::forward::NumericalProfile::LlamaCpu => {
+                            "mirrors pinned llama.cpp CPU activation quantization"
+                        }
+                        tuckmill_tuckcore::forward::NumericalProfile::MetalF16Act => {
+                            "unified-engine Metal path; batched prefill GEMMs stage operands as \
+                             half with f32 accumulation (llama.cpp kernel_mul_mm numerics, \
+                             ADR-010)"
+                        }
+                    }
+                ),
                 "equivalence speaks to execution paths: weight quality and provenance belong to the artifact itself (synthetic fixtures prove paths, never model quality)"
                     .into(),
             ],

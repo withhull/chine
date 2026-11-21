@@ -227,7 +227,10 @@ enum Cmd {
         tolerance: f64,
         /// TuckCore numerical profile for --reference comparisons:
         /// "llama-cpu" (mirrors pinned llama.cpp CPU kernels; default) or
-        /// "oracle-f32" (scalar FP32 reference, no activation quantization).
+        /// "oracle-f32" (scalar FP32 reference, no activation
+        /// quantization). With --kernels metal, "metal-f16-act" (batched
+        /// prefill GEMMs stage operands as half, llama.cpp kernel_mul_mm
+        /// numerics; the engine's default) or "oracle-f32" apply.
         #[arg(long, default_value = "llama-cpu")]
         tuckcore_profile: String,
         /// KV cache precision for both sides in --reference comparisons:

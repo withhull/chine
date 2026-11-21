@@ -176,6 +176,15 @@ int tm_metal_q8_0_gemm(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x
 int tm_metal_q8_0_gemm_mma(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
                            tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                            uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+/* Same contract and tiling as tm_metal_q8_0_gemm_mma, with f16 operand
+ * tiles (the declared `metal-f16-act` profile, ADR-010): dequantized
+ * weights and activations are rounded to half when staged, the multiply
+ * runs in half, accumulation stays f32. llama.cpp's kernel_mul_mm
+ * numerics; qualified separately against the f32 kernel and the
+ * reference. */
+int tm_metal_q8_0_gemm_mma_f16op(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
+                                 tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
 int tm_metal_f16_gemm(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
                       tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);

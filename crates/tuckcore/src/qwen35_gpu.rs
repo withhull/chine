@@ -39,6 +39,12 @@ pub struct Qwen35Gpu {
     /// token) is open; operator helpers that group internally then just
     /// encode into it, since groups do not nest.
     outer_group: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Declared GEMM operand profile of the loaded model (ADR-010): true
+    /// is metal-f16-act — batched Q8_0 GEMMs stage operands as half with
+    /// f32 accumulation, llama.cpp kernel_mul_mm numerics. Set once at
+    /// load from EngineOptions; read by Matrix::gemm. Decode GEMVs, the
+    /// exact speculative verify and F16-weight matrices are unaffected.
+    pub gemm_f16_operands: bool,
 }
 
 impl Qwen35Gpu {
@@ -53,6 +59,7 @@ impl Qwen35Gpu {
         Ok(Self {
             ctx: MetalContext::open()?,
             outer_group: Default::default(),
+            gemm_f16_operands: false,
         })
     }
 

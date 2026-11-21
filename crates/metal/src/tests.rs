@@ -161,6 +161,43 @@ fn boundary_input(cols: usize, seed: u64) -> Vec<f32> {
         .collect()
 }
 
+/// Boundary weights restricted to the metal-f16-act domain: every
+/// dequantized value (scale x quant, |quant| <= 128) stays inside half
+/// range, so staging rounds it to a finite half. The +-65504 scales of
+/// `boundary_weights` dequantize past half range and are out of profile
+/// domain (real artifact bytes are in domain); products and accumulation
+/// stay f32 in the matrix units, so only the staged operands must fit.
+fn half_domain_weights(rows: usize, cols: usize, seed: u64) -> Vec<u8> {
+    let blocks = cols / 32;
+    let mut rng = Rng(seed);
+    let scales = [
+        1.0f32,
+        -0.5,
+        2f32.powi(-12),
+        448.0,
+        -448.0,
+        5.96e-8,
+        0.0,
+        -0.0,
+        6e-5,
+    ];
+    let mut bytes = Vec::with_capacity(rows * blocks * 34);
+    for _ in 0..rows * blocks {
+        let scale = scales[(rng.next() % scales.len() as u64) as usize];
+        bytes.extend_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
+        for l in 0..32 {
+            let q: i8 = match (rng.next() % 8, l) {
+                (0, _) => -128,
+                (1, _) => 127,
+                (2, _) => 0,
+                _ => (rng.next() % 256) as u8 as i8,
+            };
+            bytes.push(q as u8);
+        }
+    }
+    bytes
+}
+
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
@@ -1247,6 +1284,101 @@ fn q8_0_gemm_mma_matches_the_cpu_reference_within_tolerance() {
 }
 
 #[test]
+fn q8_0_gemm_mma_f16op_matches_the_f32_reference_within_tolerance() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // The metal-f16-act profile (ADR-010): operands round to half when
+    // staged, accumulation stays f32. Data is the half-domain boundary
+    // set (see half_domain_weights). Shapes cover row tails, partial
+    // token tiles, offsets and the real 2B / Gemma 3 projection shapes.
+    // Registered bound 1e-4 x max|reference| (observed 2.9e-6 across these
+    // shapes, 2026-11-21, M3); whole-model envelopes qualify the profile
+    // on real weights.
+    let mut worst_rel = 0f32;
+    let mut worst_at = (0usize, 0usize, 0usize, 0usize);
+    for (rows, cols, batch) in [
+        (16usize, 1024usize, 16usize),
+        (40, 64, 3),
+        (6144, 2048, 32),
+        (2048, 2048, 27),
+        (2048, 6144, 64),
+        (6912, 1152, 128),
+        (1152, 6912, 77),
+        (1024, 1152, 512),
+        (1152, 1024, 7),
+        (256, 1152, 1),
+    ] {
+        let w = half_domain_weights(rows, cols, 11);
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        wb.upload(0, &w).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.q8_0_gemm_mma_f16op(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert!(
+            got[..y_off].iter().all(|v| *v == 0.0),
+            "nothing before y_off"
+        );
+        for b in 0..batch {
+            let cpu = cpu_q8_0_gemv(&w, &x[b * cols..(b + 1) * cols], rows, cols);
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                let rel = (g - cpu[r]).abs() / scale;
+                if rel > worst_rel {
+                    worst_rel = rel;
+                    worst_at = (rows, cols, b, r);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "f16op worst rel diff vs f32 reference: {worst_rel:.3e} at (rows, batch, row) {worst_at:?}"
+    );
+    assert!(
+        worst_rel <= 1e-4,
+        "metal-f16-act drift beyond the registered bound: {worst_rel:.3e}"
+    );
+    assert!(
+        ctx.q8_0_gemm_mma_f16op(
+            &ctx.buffer(64, true).unwrap(),
+            &ctx.buffer(64, true).unwrap(),
+            &ctx.buffer(64, true).unwrap(),
+            1,
+            32,
+            GEMM_MMA_MAX_BATCH + 1,
+            0,
+            0
+        )
+        .is_err(),
+        "batch above the MMA maximum refused"
+    );
+}
+
+#[test]
 fn argmax_matches_the_cpu_greedy_rule_exactly() {
     let Some(ctx) = metal_context() else {
         return;
@@ -1366,7 +1498,23 @@ fn q8_0_gemm_mma_grouped_wall_timing_when_requested() {
     let Some(ctx) = metal_context() else {
         return;
     };
-    for (rows, cols) in [(3584usize, 1024usize), (6144, 1024), (1024, 3584)] {
+    // `TUCKMILL_GEMM_SHAPES=rowsxcols,...` overrides the 0.8B default list
+    // (measurement only; ADR-011 engine notes record the runs).
+    let shapes = std::env::var("TUCKMILL_GEMM_SHAPES")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| {
+                    let (r, c) = p.split_once('x').expect("rowsxcols");
+                    (
+                        r.trim().parse::<usize>().expect("rows"),
+                        c.trim().parse::<usize>().expect("cols"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![(3584usize, 1024usize), (6144, 1024), (1024, 3584)]);
+    for (rows, cols) in shapes {
         let w = boundary_weights(rows, cols, 3);
         let wb = ctx.buffer(w.len(), true).unwrap();
         wb.upload(0, &w).unwrap();
@@ -1375,29 +1523,55 @@ fn q8_0_gemm_mma_grouped_wall_timing_when_requested() {
             let xb = ctx.buffer(cols * batch * 4, true).unwrap();
             xb.upload(0, &f32_bytes(&x)).unwrap();
             let yb = ctx.buffer(rows * batch * 4, true).unwrap();
-            let group = || {
+            let group = |f16op: bool| {
                 ctx.begin_group().unwrap();
                 for _ in 0..16 {
-                    ctx.q8_0_gemm_mma(&wb, &xb, &yb, rows as u32, cols as u32, batch as u32, 0, 0)
+                    if f16op {
+                        ctx.q8_0_gemm_mma_f16op(
+                            &wb,
+                            &xb,
+                            &yb,
+                            rows as u32,
+                            cols as u32,
+                            batch as u32,
+                            0,
+                            0,
+                        )
                         .unwrap();
+                    } else {
+                        ctx.q8_0_gemm_mma(
+                            &wb,
+                            &xb,
+                            &yb,
+                            rows as u32,
+                            cols as u32,
+                            batch as u32,
+                            0,
+                            0,
+                        )
+                        .unwrap();
+                    }
                 }
                 ctx.end_group().unwrap();
                 ctx.fence().unwrap();
             };
-            for _ in 0..3 {
-                group();
+            for f16op in [false, true] {
+                for _ in 0..3 {
+                    group(f16op);
+                }
+                let iters = 20;
+                let t0 = std::time::Instant::now();
+                for _ in 0..iters {
+                    group(f16op);
+                }
+                let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
+                eprintln!(
+                    "ours mul_mat {} {rows:>5}x{cols:<5} tokens {batch:>3}: {:>8.1} us  {:>6.0} GFLOP/s",
+                    if f16op { "f16op" } else { "f32  " },
+                    per * 1e6,
+                    2.0 * (rows * cols * batch) as f64 / per / 1e9
+                );
             }
-            let iters = 20;
-            let t0 = std::time::Instant::now();
-            for _ in 0..iters {
-                group();
-            }
-            let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
-            eprintln!(
-                "ours mul_mat {rows:>5}x{cols:<5} tokens {batch:>3}: {:>8.1} us  {:>6.0} GFLOP/s",
-                per * 1e6,
-                2.0 * (rows * cols * batch) as f64 / per / 1e9
-            );
         }
     }
 }

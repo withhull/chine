@@ -64,6 +64,21 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   2B (86-94%) and Gemma 3 (85-90%) are at or just below it. Prefill is
   at parity, not a lead, because llama.cpp's own spread covers the
   difference. All numbers are locally-calibrated on one M3 8 GB Mac.
+- **GEMM operand profile (2026-11-22, ADR-010/ADR-011):** batched prefill
+  GEMMs now run the declared `metal-f16-act` profile by default — operands
+  staged as half, f32 accumulation, llama.cpp `kernel_mul_mm` numerics.
+  Qualified: `verify --reference` PASS on the 0.8B / 2B / Qwen3-0.6B
+  (max |Δ| 0.34-0.35 under the registered 5e-1 Q8_0 policy, texts equal);
+  the Gemma 3 real-text Metal gate is unchanged (max |Δ| 0.026, top-1
+  equal). Speed, measured in-run: the f16-operand kernel is 2-3.5% faster
+  at every isolated 0.8B/2B/Gemma shape and matches llama.cpp exactly at
+  the 0.8B shape; in the 2B model the GEMM stack's GPU time drops ~4%
+  (646-670 vs 675-796 ms of the 512-token prefill). Whole-prefill wall
+  time was at the noise floor in the same session (the desktop app
+  resident); the request-level number gets recorded by the standard bench
+  rerun on a quiet machine. Opt out per load with
+  `--tuckcore-profile oracle-f32` (with `--kernels metal`); the resolved
+  profile is recorded in every identity, stat and verify record.
 - **Decode** is at parity or ahead. llama.cpp's own decode in this harness
   varies between runs (about 66-85 tok/s), so this is not stated as a
   lead.
@@ -187,7 +202,7 @@ scripts/            build, test, demo, fetch-llama, bench-baseline
 
 ## Verification
 
-`scripts/test.sh` is the gate (506 tests at this revision). It runs
+`scripts/test.sh` is the gate (507 tests at this revision). It runs
 formatting, `clippy -D warnings` and the full suite:
 - adversarial GGUF and Safetensors fixtures;
 - planner math, governor semantics and import fault injection;

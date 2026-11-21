@@ -179,7 +179,15 @@ impl Matrix {
         let ctx = gpu.context();
         let (rows, cols) = (self.out_dim as u32, self.in_dim as u32);
         if !exact && self.type_id == 8 && (2..=GEMM_MMA_MAX_BATCH).contains(&batch) {
-            return ctx.q8_0_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0);
+            // Declared GEMM operand profile (ADR-010): metal-f16-act
+            // stages operands as half (llama.cpp kernel_mul_mm numerics);
+            // oracle-f32 keeps the f32-operand kernel. Both are
+            // tolerance-qualified against the CPU reference.
+            return if gpu.gemm_f16_operands {
+                ctx.q8_0_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0)
+            } else {
+                ctx.q8_0_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0)
+            };
         }
         let mut t0 = 0u32;
         while t0 < batch {
@@ -1713,6 +1721,14 @@ pub struct EngineOptions {
     /// speculative greedy decoding (ADR-012 step 3). Refused for a graph
     /// without an MTP block.
     pub mtp: bool,
+    /// Declared GEMM operand profile (ADR-010): true is metal-f16-act —
+    /// batched Q8_0 GEMMs stage dequantized weights and activations as
+    /// half and multiply in half with f32 accumulation (llama.cpp
+    /// kernel_mul_mm numerics, tolerance-qualified separately). false
+    /// keeps f32 operands (oracle-f32 on the GEMM). Default true; the
+    /// engine's load entry points resolve the request's profile into
+    /// this field and the identity records it.
+    pub gemm_f16_operands: bool,
 }
 
 impl Default for EngineOptions {
@@ -1721,6 +1737,7 @@ impl Default for EngineOptions {
             kv: KvCache::F16,
             prefix_cache: false,
             mtp: false,
+            gemm_f16_operands: true,
         }
     }
 }
@@ -1848,13 +1865,16 @@ impl EngineModel {
 
     /// [`Self::load`] with explicit engine options.
     pub fn load_with(
-        gpu: Qwen35Gpu,
+        mut gpu: Qwen35Gpu,
         graph: ModelGraph,
         src: &dyn WeightSource,
         capacity: usize,
         admitted_gpu_bytes: u64,
         opts: EngineOptions,
     ) -> Result<Self> {
+        // The declared GEMM operand profile rides the GPU handle that
+        // every block's Matrix::gemm already receives (ADR-010).
+        gpu.gemm_f16_operands = opts.gemm_f16_operands;
         let plan = alloc_plan_with(&graph, src, capacity, opts)?;
         let total = plan.total();
         if total > admitted_gpu_bytes {
@@ -2885,9 +2905,11 @@ mod oracle_tests {
     }
 
     /// Machine-local (TUCKMILL_QWEN35_GGUF): on the pinned Q8_0 artifact,
-    /// batched prefill gives bit-identical last-token logits and next
-    /// decode step to sequential decode; prints 512-token prefill time for
-    /// both (measurement, not asserted).
+    /// batched prefill stays within the registered drift of sequential
+    /// decode for the resolved GEMM operand profile (the shipping default
+    /// is metal-f16-act, ADR-010; `TUCKMILL_QWEN35_GEMM_F32=1` restores
+    /// f32 operands); prints 512-token prefill time for both (measurement,
+    /// not asserted).
     #[test]
     fn real_artifact_batched_prefill_matches_sequential_when_available() {
         let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
@@ -2901,15 +2923,25 @@ mod oracle_tests {
         if gpu_or_skip().is_none() {
             return;
         }
+        let gemm_f16_operands = std::env::var("TUCKMILL_QWEN35_GEMM_F32")
+            .map(|v| v != "1")
+            .unwrap_or(true);
+        let engine_opts = EngineOptions {
+            kv: KvCache::F16,
+            prefix_cache: false,
+            mtp: false,
+            gemm_f16_operands,
+        };
         let source = crate::qwen35_forward::ArtifactTensorSource::open(&path).unwrap();
         let capacity = 640usize;
-        let plan = alloc_plan(&qwen35_graph(&source), &source, capacity).unwrap();
-        let model = EngineModel::load(
+        let plan = alloc_plan_with(&qwen35_graph(&source), &source, capacity, engine_opts).unwrap();
+        let model = EngineModel::load_with(
             Qwen35Gpu::open().unwrap(),
             qwen35_graph(&source),
             &source,
             capacity,
             plan.total(),
+            engine_opts,
         )
         .unwrap();
         assert_eq!(model.allocated_bytes(), plan.total());
@@ -2972,15 +3004,32 @@ mod oracle_tests {
             top1(&seq)
         );
         let _ = bits;
-        // Registered: the GPU-vs-oracle logits bound (2e-3, Q35-2C);
-        // observed 3.2e-4 / 3.6e-4 at logit scale 11.1 (ADR-008 Add. 16).
-        assert!(
-            drift(&batched, &seq) <= 2e-3,
-            "last-token logits within 2e-3"
+        // Registered per GEMM operand profile (ADR-010):
+        // - f32 operands (oracle-f32 on the GEMM): 2e-3, the GPU-vs-oracle
+        //   logits bound (Q35-2C); observed 3.2e-4 / 3.6e-4 at logit scale
+        //   11.1 (ADR-008 Add. 16).
+        // - metal-f16-act (shipping default): 1e-2 — operand rounding to
+        //   half, llama.cpp kernel_mul_mm numerics; observed 7.4e-3 /
+        //   4.0e-3 on the pinned 0.8B and 4.8e-3 / 2.3e-3 on the 2B
+        //   (2026-11-22, M3), top-1 equal in every measurement. The
+        //   reference comparison (`verify --reference`) gates the same
+        //   profile against pinned llama.cpp.
+        let bound = if gemm_f16_operands { 1e-2 } else { 2e-3 };
+        eprintln!(
+            "GEMM operand profile: {}",
+            if gemm_f16_operands {
+                "metal-f16-act"
+            } else {
+                "f32 (oracle-f32 on the GEMM)"
+            }
         );
         assert!(
-            drift(&batched_next, &seq_next) <= 2e-3,
-            "next step within 2e-3"
+            drift(&batched, &seq) <= bound,
+            "last-token logits within {bound}"
+        );
+        assert!(
+            drift(&batched_next, &seq_next) <= bound,
+            "next step within {bound}"
         );
         assert_eq!(top1(&batched), top1(&seq), "last-token top-1");
         assert_eq!(top1(&batched_next), top1(&seq_next), "next-step top-1");
@@ -3574,15 +3623,31 @@ mod chunk_core_tests {
     /// next decode step, so recurrent state, convolution history and KV
     /// agree), for partial, single, exact and multi-chunk prompts.
     fn chunk_core_matches_per_token(src: &(impl TensorSource + WeightSource), lens: &[usize]) {
+        // The resolved GEMM operand profile (ADR-010): the shipping default
+        // is metal-f16-act; `TUCKMILL_QWEN35_GEMM_F32=1` restores f32
+        // operands. The register-vs-generic recurrence bound is
+        // profile-dependent: f16 operand rounding amplifies the two
+        // compilations' fast-math difference.
+        let gemm_f16_operands = std::env::var("TUCKMILL_QWEN35_GEMM_F32")
+            .map(|v| v != "1")
+            .unwrap_or(true);
+        let engine_opts = EngineOptions {
+            kv: KvCache::F16,
+            prefix_cache: false,
+            mtp: false,
+            gemm_f16_operands,
+        };
+        let reg_bound = if gemm_f16_operands { 2e-2 } else { 2e-3 };
         let graph = crate::engine::adapters::qwen35(src.config(), src.layout());
         let capacity = lens.iter().max().unwrap() + 8;
-        let plan = alloc_plan(&graph, src, capacity).unwrap();
-        let model = EngineModel::load(
+        let plan = alloc_plan_with(&graph, src, capacity, engine_opts).unwrap();
+        let model = EngineModel::load_with(
             Qwen35Gpu::open().unwrap(),
             graph,
             src,
             capacity,
             plan.total(),
+            engine_opts,
         )
         .unwrap();
         assert_eq!(model.allocated_bytes(), plan.total(), "ledger == plan");
@@ -3600,8 +3665,11 @@ mod chunk_core_tests {
             assert_eq!(bits(&b_next), bits(&a_next), "len {len}: next decode step");
             // The register-resident recurrence vs the generic device-memory
             // kernel: same source arithmetic, but separately compiled under
-            // fast math, so equal within the registered GPU logits bound
-            // (2e-3), not bitwise.
+            // fast math, so equal within the profile-registered logits
+            // bound, not bitwise: 2e-3 with f32 GEMM operands;
+            // 2e-2 with metal-f16-act, where operand rounding amplifies
+            // the two compilations' difference — observed 6.8e-3 / 7.0e-3 on
+            // the pinned 0.8B and 1.07e-2 / 6.8e-3 on the 2B (2026-11-22).
             model.context().set_gdn_chunk_generic(true);
             let (c_logits, c_next, c_ms) = run(&model, &prompt);
             model.context().set_gdn_chunk_generic(false);
@@ -3612,9 +3680,17 @@ mod chunk_core_tests {
                     .fold(0f32, f32::max)
             };
             let (dl, dn) = (drift(&b_logits, &c_logits), drift(&b_next, &c_next));
+            eprintln!(
+                "len {len} ({}): register vs generic {dl:e} / {dn:e}",
+                if gemm_f16_operands {
+                    "metal-f16-act"
+                } else {
+                    "f32 gemm"
+                }
+            );
             assert!(
-                dl <= 2e-3 && dn <= 2e-3,
-                "len {len}: register vs generic {dl:e} / {dn:e}"
+                dl <= reg_bound && dn <= reg_bound,
+                "len {len}: register vs generic {dl:e} / {dn:e} (bound {reg_bound:e})"
             );
             if len >= 256 {
                 eprintln!(
@@ -3712,6 +3788,7 @@ mod qwen3_tests {
                     kv,
                     prefix_cache: false,
                     mtp: false,
+                    gemm_f16_operands: false,
                 },
             )
             .unwrap();
@@ -3732,6 +3809,7 @@ mod qwen3_tests {
                     kv,
                     prefix_cache: false,
                     mtp: false,
+                    gemm_f16_operands: false,
                 },
             )
             .unwrap();
@@ -3811,28 +3889,21 @@ mod qwen3_real_tests {
         let source = super::super::GgufWeights::with_inspection(&file, &insp).unwrap();
         let capacity = 640usize;
         let kv = KvCache::F16;
-        let plan = alloc_plan_with(
-            &graph,
-            &source,
-            capacity,
-            EngineOptions {
-                kv,
-                prefix_cache: false,
-                mtp: false,
-            },
-        )
-        .unwrap();
+        // The shipping default: metal-f16-act GEMM operands (ADR-010).
+        let engine_opts = EngineOptions {
+            kv,
+            prefix_cache: false,
+            mtp: false,
+            gemm_f16_operands: true,
+        };
+        let plan = alloc_plan_with(&graph, &source, capacity, engine_opts).unwrap();
         let model = EngineModel::load_with(
             Qwen35Gpu::open().unwrap(),
             graph,
             &source,
             capacity,
             plan.total(),
-            EngineOptions {
-                kv,
-                prefix_cache: false,
-                mtp: false,
-            },
+            engine_opts,
         )
         .unwrap();
         let prompt: Vec<u32> = (0..512u32).map(|i| 1000 + (i * 7919) % 90_000).collect();
@@ -3958,6 +4029,7 @@ mod prefix_cache_tests {
             kv: KvCache::F16,
             prefix_cache: true,
             mtp: false,
+            gemm_f16_operands: false,
         };
         let plan = alloc_plan_with(&graph, source, capacity, on).unwrap();
         let off_plan = alloc_plan_with(&graph, source, capacity, EngineOptions::default()).unwrap();
@@ -4317,6 +4389,16 @@ mod mtp_tests {
             return;
         }
         let source = ArtifactTensorSource::open(&path).unwrap();
+        // Speculation needs the artifact's own MTP block; the 2B has none,
+        // and an `mtp: true` load of it is a typed refusal. This gate is for
+        // the pinned 0.8B.
+        if crate::engine::adapters::qwen35(source.config(), source.layout())
+            .mtp
+            .is_none()
+        {
+            eprintln!("skipping: artifact has no MTP block (speculation is refused for it)");
+            return;
+        }
         let prompts: Vec<Vec<u32>> = [7usize, PREFILL_BATCH + 40]
             .iter()
             .map(|&len| {

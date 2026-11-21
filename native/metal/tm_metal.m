@@ -76,6 +76,7 @@ struct tm_metal_ctx {
     id<MTLComputePipelineState> pso_f16row;
     id<MTLComputePipelineState> pso_q8gemm;
     id<MTLComputePipelineState> pso_q8gemm_mma;
+    id<MTLComputePipelineState> pso_q8gemm_mma_f16op;
     id<MTLComputePipelineState> pso_f16gemm;
     id<MTLComputePipelineState> pso_q35_conv;
     id<MTLComputePipelineState> pso_q35_conv_shift;
@@ -376,6 +377,7 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_f16row = tm_pipeline(ctx, @"tm_f16_row_f32", &error);
         ctx->pso_q8gemm = tm_pipeline(ctx, @"tm_q8_0_gemm", &error);
         ctx->pso_q8gemm_mma = tm_pipeline(ctx, @"tm_q8_0_gemm_mma", &error);
+        ctx->pso_q8gemm_mma_f16op = tm_pipeline(ctx, @"tm_q8_0_gemm_mma_f16op", &error);
         ctx->pso_f16gemm = tm_pipeline(ctx, @"tm_f16_gemm", &error);
         ctx->pso_q35_conv = tm_pipeline(ctx, @"tm_qwen35_conv_step", &error);
         ctx->pso_q35_conv_shift = tm_pipeline(ctx, @"tm_qwen35_conv_shift", &error);
@@ -407,7 +409,8 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_f16f32 == nil ||
             ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_f16gemv == nil ||
             ctx->pso_q8row == nil || ctx->pso_rmsnorm == nil || ctx->pso_silu == nil ||
-            ctx->pso_f16row == nil || ctx->pso_q8gemm == nil || ctx->pso_q8gemm_mma == nil || ctx->pso_f16gemm == nil ||
+            ctx->pso_f16row == nil || ctx->pso_q8gemm == nil || ctx->pso_q8gemm_mma == nil ||
+            ctx->pso_q8gemm_mma_f16op == nil || ctx->pso_f16gemm == nil ||
             ctx->pso_q35_conv == nil || ctx->pso_q35_conv_shift == nil ||
             ctx->pso_q35_l2norm == nil || ctx->pso_q35_beta_decay == nil ||
             ctx->pso_q35_gdn_step == nil || ctx->pso_q35_gated_norm == nil ||
@@ -463,6 +466,7 @@ void tm_metal_destroy(tm_metal_ctx *ctx) {
         [ctx->pso_f16gemm release];
         [ctx->pso_q8gemm release];
         [ctx->pso_q8gemm_mma release];
+        [ctx->pso_q8gemm_mma_f16op release];
         [ctx->pso_f16row release];
         [ctx->pso_silu release];
         [ctx->pso_rmsnorm release];
@@ -1329,6 +1333,22 @@ int tm_metal_q8_0_gemm_mma(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffe
     return tm_gemm_dispatch_rows(ctx, ctx->pso_q8gemm_mma, w, w_need, x, y, rows, cols, batch,
                                  x_off, y_off, 64, 128, TM_METAL_GEMM_MMA_MAX_BATCH, 32, err,
                                  err_cap, "q8_0_gemm_mma");
+}
+
+int tm_metal_q8_0_gemm_mma_f16op(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
+                                 tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 32u) != 0u || batch == 0 || batch > TM_METAL_GEMM_MMA_MAX_BATCH) {
+        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q8_0_gemm_mma_f16op: cols %u (positive multiple of 32), batch %u (1..=%u)",
+                                                   cols, batch, TM_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 32u) * 34u;
+    /* Same 64-row x 32-token tiles as tm_q8_0_gemm_mma; only the staged
+     * operand precision differs (metal-f16-act, ADR-010). */
+    return tm_gemm_dispatch_rows(ctx, ctx->pso_q8gemm_mma_f16op, w, w_need, x, y, rows, cols,
+                                 batch, x_off, y_off, 64, 128, TM_METAL_GEMM_MMA_MAX_BATCH, 32,
+                                 err, err_cap, "q8_0_gemm_mma_f16op");
 }
 
 int tm_metal_q8_0_gemm(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,

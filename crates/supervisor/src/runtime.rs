@@ -3043,6 +3043,7 @@ mod tests {
                 kv: tuckmill_tuckcore::engine::metal::KvCache::F32,
                 prefix_cache: true,
                 mtp: false,
+                gemm_f16_operands: true,
             },
         )
         .unwrap();

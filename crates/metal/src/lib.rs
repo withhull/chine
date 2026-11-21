@@ -281,6 +281,19 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
+        pub fn tm_metal_q8_0_gemm_mma_f16op(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
         pub fn tm_metal_f16_gemm(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
@@ -2343,6 +2356,50 @@ impl MetalContext {
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
                 imp::tm_metal_q8_0_gemm_mma(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// [`Self::q8_0_gemm_mma`] with f16 operand tiles: the declared
+    /// `metal-f16-act` profile (ADR-010) — dequantized weights and
+    /// activations are rounded to half when staged, the matrix multiply
+    /// runs in half, accumulation stays f32 (llama.cpp `kernel_mul_mm`
+    /// numerics). Tolerance-qualified separately against the f32
+    /// reference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn q8_0_gemm_mma_f16op(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q8_0_gemm_mma_f16op", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::tm_metal_q8_0_gemm_mma_f16op(
                     ctx,
                     wc,
                     xc,

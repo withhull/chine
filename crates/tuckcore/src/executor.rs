@@ -119,6 +119,9 @@ struct EngineLoaded {
     kv: KvCache,
     /// Kernel identity reported in records.
     kernel_id: String,
+    /// Resolved numerical profile of the engine's GEMM operands
+    /// (metal-f16-act default, oracle-f32 opt-out), reported in stats.
+    numerical_profile: &'static str,
     tokenizer: DecodeVocab,
     eos_token_id: Option<u32>,
     context_total: u64,
@@ -269,14 +272,29 @@ impl InferenceBackend for TuckCore {
             cache_bytes: opts.weight_cache_bytes.unwrap_or(DEFAULT_CACHE_BYTES),
         };
         policy.validate()?;
+        let kernels = opts.kernels.unwrap_or(KernelSelection::Auto).resolve()?;
+        let metal_mode = kernels == ResolvedKernels::Metal;
+        // Engine (Metal) loads default to the declared metal-f16-act
+        // profile (ADR-010; default changed by recorded decision, ADR-011
+        // engine note 2026-11-22): batched prefill GEMMs stage operands as
+        // half, llama.cpp kernel_mul_mm numerics. CPU loads stay
+        // oracle-f32. An explicit value is never silently substituted.
         let profile = match opts.numerical_profile.as_deref() {
-            None | Some("oracle-f32") => NumericalProfile::OracleF32,
+            None => {
+                if metal_mode {
+                    NumericalProfile::MetalF16Act
+                } else {
+                    NumericalProfile::OracleF32
+                }
+            }
+            Some("oracle-f32") => NumericalProfile::OracleF32,
             Some("llama-cpu") => NumericalProfile::LlamaCpu,
+            Some("metal-f16-act") => NumericalProfile::MetalF16Act,
             Some(other) => {
                 return Err(TuckmillError::new(
                     ErrorCode::InvalidRequest,
                     format!(
-                        "unknown numerical profile {other:?}; use \"oracle-f32\" or \"llama-cpu\""
+                        "unknown numerical profile {other:?}; use \"oracle-f32\", \"llama-cpu\" or \"metal-f16-act\""
                     ),
                 ))
             }
@@ -290,8 +308,6 @@ impl InferenceBackend for TuckCore {
             enabled: profile_enabled,
             ..Default::default()
         };
-        let kernels = opts.kernels.unwrap_or(KernelSelection::Auto).resolve()?;
-        let metal_mode = kernels == ResolvedKernels::Metal;
         let storage_selection = opts.storage.unwrap_or(StorageSelection::Auto);
         if !metal_mode && opts.prefill_batch.is_some() {
             return Err(TuckmillError::new(
@@ -305,12 +321,24 @@ impl InferenceBackend for TuckCore {
                 "storage selection applies to CPU weight streaming; the Metal path keeps weights resident on the GPU",
             ));
         }
-        if metal_mode && profile != NumericalProfile::OracleF32 {
+        if metal_mode
+            && !matches!(
+                profile,
+                NumericalProfile::OracleF32 | NumericalProfile::MetalF16Act
+            )
+        {
             return Err(TuckmillError::new(
                 ErrorCode::UnsupportedArchitecture,
-                "the Metal path implements the oracle-f32 numerical profile only; the llama-cpu activation-quantization profile is CPU-only",
+                "the Metal path implements the oracle-f32 and metal-f16-act numerical profiles; the llama-cpu activation-quantization profile is CPU-only",
             )
-            .with_action("Select --numerical-profile oracle-f32 (the default) for --kernels metal."));
+            .with_action("Select --numerical-profile metal-f16-act (the default) or oracle-f32 for --kernels metal."));
+        }
+        if !metal_mode && profile == NumericalProfile::MetalF16Act {
+            return Err(TuckmillError::new(
+                ErrorCode::UnsupportedArchitecture,
+                "metal-f16-act is the unified engine's Metal GEMM profile; the CPU kernels execute oracle-f32 or llama-cpu",
+            )
+            .with_action("Select --kernels metal, or drop the metal-f16-act profile."));
         }
         let load_start = Instant::now();
         let kv_precision = match opts.kv_precision.as_deref() {
@@ -1303,6 +1331,22 @@ const GEMMA3_ENGINE_KERNEL_ID: &str = "ADR013:gemma3-q8_0+f16:metal";
 
 /// Option checks shared by every unified-engine load: resident plans only,
 /// and no CPU-streaming options.
+/// Resolved GEMM operand profile for engine (Metal) loads: true is the
+/// declared metal-f16-act default; "oracle-f32" restores f32 operands.
+/// Unknown or CPU-only values were already refused at load entry.
+fn engine_gemm_f16_operands(opts: &TuckCoreOptions) -> Result<bool> {
+    match opts.numerical_profile.as_deref() {
+        None | Some("metal-f16-act") => Ok(true),
+        Some("oracle-f32") => Ok(false),
+        Some(other) => Err(TuckmillError::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "the unified engine's GEMM operand profile is metal-f16-act (default) or oracle-f32; got {other:?}"
+            ),
+        )),
+    }
+}
+
 fn check_resident_engine_options(plan: &ExecutionPlan, opts: &TuckCoreOptions) -> Result<()> {
     if plan.mode != ExecutionMode::Resident {
         return Err(TuckmillError::new(
@@ -1420,6 +1464,7 @@ impl TuckCore {
             KvCache::F16,
             opts.prefix_cache.unwrap_or(true),
             opts.speculative.unwrap_or(false),
+            engine_gemm_f16_operands(opts)?,
             HYBRID_KERNEL_ID,
             ctx,
         )
@@ -1459,6 +1504,7 @@ impl TuckCore {
             kv,
             opts.prefix_cache.unwrap_or(true),
             opts.speculative.unwrap_or(false),
+            engine_gemm_f16_operands(opts)?,
             QWEN3_ENGINE_KERNEL_ID,
             ctx,
         )
@@ -1506,6 +1552,7 @@ impl TuckCore {
             kv,
             opts.prefix_cache.unwrap_or(true),
             opts.speculative.unwrap_or(false),
+            engine_gemm_f16_operands(opts)?,
             GEMMA3_ENGINE_KERNEL_ID,
             ctx,
         )
@@ -1525,6 +1572,7 @@ impl TuckCore {
         kv: KvCache,
         prefix_cache: bool,
         speculative: bool,
+        gemm_f16_operands: bool,
         kernel_id: &str,
         ctx: EngineLoadContext,
     ) -> Result<String> {
@@ -1539,7 +1587,15 @@ impl TuckCore {
             kv,
             prefix_cache,
             mtp: speculative,
+            gemm_f16_operands,
         };
+        // The identity records the resolved GEMM operand profile, so every
+        // later record is self-documenting (ADR-010).
+        let kernel_id = format!(
+            "{kernel_id}:{}",
+            if gemm_f16_operands { "f16op" } else { "f32op" }
+        );
+        let kernel_id = kernel_id.as_str();
         let alloc = engine_metal::alloc_plan_with(&graph, source, capacity, engine_opts)?;
         let reserved = &plan.budget.reservation_breakdown;
         for (class, need, have) in [
@@ -1626,6 +1682,11 @@ impl TuckCore {
             session_kv_bytes: Arc::new(AtomicU64::new(0)),
             last_prefix_hit: AtomicU64::new(0),
             prefix_cache,
+            numerical_profile: if gemm_f16_operands {
+                NumericalProfile::MetalF16Act.as_str()
+            } else {
+                NumericalProfile::OracleF32.as_str()
+            },
             counters: ctx.counters,
         });
         crate::release_freed_heap();
@@ -1689,7 +1750,7 @@ impl TuckCore {
             gpu_allocated_bytes: Some(hybrid.model.allocated_bytes()),
             prefill_batch: Some(engine_metal::PREFILL_BATCH as u32),
             kernel_impl: Some(ResolvedKernels::Metal.as_str().to_string()),
-            numerical_profile: Some(NumericalProfile::OracleF32.as_str().to_string()),
+            numerical_profile: Some(hybrid.numerical_profile.to_string()),
             profile: Some(serde_json::json!({
                 "prefix_cache": hybrid.prefix_cache,
                 "last_prefix_hit_tokens": hybrid.last_prefix_hit.load(Ordering::Relaxed),
@@ -2081,7 +2142,9 @@ mod tests {
         );
         assert_eq!(
             engine.identity().kernels,
-            vec![HYBRID_KERNEL_ID.to_string()]
+            // The default engine load resolves the metal-f16-act GEMM
+            // profile, recorded in the identity (ADR-010).
+            vec![format!("{HYBRID_KERNEL_ID}:f16op")]
         );
 
         // The device ledger equals the preflight, and every class is

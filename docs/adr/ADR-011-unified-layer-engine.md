@@ -551,3 +551,73 @@ three passes each; full prefill ~330 ms):
     - Qwen3.5 logits vs the oracle: 2.78e-4 -> 2.71e-4;
     - `verify --reference` vs pinned llama.cpp: PASS (max 0.349, top-1
       100%, generated texts equal).
+
+## Engine note (2026-11-22): the metal-f16-act GEMM operand profile is the engine default
+
+- **Decision (product, recorded per ADR-010).** Batched prefill Q8_0 GEMMs
+  on the engine now stage dequantized weights and activations as half and
+  multiply in half with f32 accumulation — llama.cpp `kernel_mul_mm`
+  numerics, the profile ADR-010 pre-declared as `metal-f16-act`. ADR-011's
+  own measurement had attributed the last ~6% of the GEMM gap to exactly
+  this operand precision (an f16-operand build of the kernel matched
+  llama.cpp exactly at the 0.8B shapes); the product owner chose it as the
+  default on 2026-11-22. Opt-out: `numerical_profile: "oracle-f32"` (f32
+  operands, the prior numerics). The resolved profile is recorded in the
+  kernel identity (`…:metal:f16op` / `:f32op`), in stats
+  (`numerical_profile`) and in every `verify` caveat; nothing is silently
+  substituted. Decode GEMVs, the exact speculative verify, F16-weight
+  matrices and every CPU path are unchanged.
+- **Kernel.** `tm_q8_0_gemm_mma_f16op` (`native/metal/kernels.metal`):
+  same 64x32 fragment tiling, layout, summation order and edge handling as
+  `tm_q8_0_gemm_mma`; sa/sb stage as half, the edge output stage keeps its
+  own f32 buffer (accumulators never round through it).
+- **Qualification (all on this M3 8 GB).**
+  - Kernel vs the f32 CPU reference, half-domain boundary data (see
+    `half_domain_weights`: the +-65504 block scales of the f32 kernel's
+    boundary set dequantize past half range and are out of profile domain;
+    real artifact bytes are in domain): worst rel diff 2.9e-6, registered
+    bound 1e-4.
+  - Whole-model drift, batched prefill vs sequential f32 decode,
+    profile-registered bound 1e-2 (the f32 profile keeps its 2e-3):
+    0.8B 7.4e-3 / 4.0e-3 and 2B 4.8e-3 / 2.3e-3, top-1 equal on both.
+  - Register-vs-generic recurrence bound re-registered per profile: 2e-2
+    under metal-f16-act (observed 6.8e-3 / 7.0e-3 on the 0.8B and
+    1.07e-2 / 6.8e-3 on the 2B — operand rounding amplifies the two
+    compilations' fast-math difference), 2e-3 with f32 operands
+    (observed <= 2.0e-3).
+  - `verify --reference` vs pinned llama.cpp (registered Q8_0 policy
+    5e-1, `--kernels metal`, f16 KV): 0.8B PASS max 0.34; 2B PASS max
+    0.337, top-5 overlap 1.00; Qwen3-0.6B PASS max 0.349; generated texts
+    equal on all three.
+  - Gemma 3 is unchanged by the profile: the comparison scores through
+    per-token decode, and both profiles give byte-identical verify
+    numbers (a pre-existing, recorded fact — the frozen-id CPU-side
+    comparison fails Gemma's large logit scale under both profiles, which
+    is why ADR-013 gates Gemma on the real-text Metal comparison
+    instead). That gate is unchanged under metal-f16-act: max |diff|
+    0.006-0.026 over 2-688 tokens and windowed decode, top-1 equal at
+    every length, matching the ADR-013 record.
+  - Fixture bit-identity gates are unaffected (fixture weights are F16,
+    per-row path); MTP speculative greedy stays token-identical on the
+    pinned 0.8B (the verify pass is exact per-row GEMV arithmetic).
+- **Speed, measured (in-run A/B, interleaved).** Isolated GEMM at
+  128-token batches: the f16-operand kernel is 2-3.5% faster than the f32
+  kernel at every measured 0.8B/2B/Gemma shape, and matches llama.cpp
+  exactly at the 0.8B shape (3584x1024: 452.3 vs 451.4 us, same window),
+  replicating the earlier prototype finding. In the 2B model (GEMM is
+  78-79% of prefill GPU time): GEMM GPU time 646-670 vs 675-796 ms
+  (~4%); whole-prefill wall time is at the noise floor (754 vs 749 ms
+  median interleaved) because 4% x 78% share is ~3%, inside the +-2-3%
+  process noise with the desktop app resident. The request-level number is
+  recorded by the standard bench rerun on a quiet machine, as before.
+- **Tried and not kept:** the pipelined block-load variant (raw bytes of
+  block N+1 prefetched into registers before the staging barrier, the
+  other structure ADR-011 recorded in llama's kernel) — no consistent win
+  at 128-token chunks under load noise; deleted.
+- **Residual, honestly recorded:** at cols >= 1152 (the 2B's 2048-col and
+  Gemma's 1152/6912-col shapes) our kernel at f16 operands remains 2-5%
+  behind llama's in the same measurement window, while the 1024-col 0.8B
+  shapes match exactly. Unexplained; llama's `kernel_mul_mm` pipeline
+  carries shape-specialization constants (`bci/bco/ne12/ne13/r2/r3`) that
+  our ABI does not. A 128-row tile is a known dead end (register spill,
+  the variant table above). Follow-up needs a quiet machine.

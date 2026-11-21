@@ -291,6 +291,14 @@ pub enum NumericalProfile {
     /// per block. This is the profile under which TuckCore and llama.cpp can
     /// be compared as the same declared numerical contract.
     LlamaCpu,
+    /// The declared `metal-f16-act` profile (ADR-010): on the unified
+    /// engine's Metal path, batched prefill GEMMs stage dequantized weights
+    /// and activations as half and multiply in half with f32 accumulation —
+    /// llama.cpp's `kernel_mul_mm` numerics. Applies to the Q8_0
+    /// matrix-unit GEMM only; per-row GEMVs, the exact speculative verify
+    /// and every CPU path stay `oracle-f32`. New default for engine loads
+    /// (recorded decision, ADR-011 engine note 2026-11-22).
+    MetalF16Act,
 }
 
 impl NumericalProfile {
@@ -298,6 +306,7 @@ impl NumericalProfile {
         match s {
             "oracle-f32" => Some(Self::OracleF32),
             "llama-cpu" => Some(Self::LlamaCpu),
+            "metal-f16-act" => Some(Self::MetalF16Act),
             _ => None,
         }
     }
@@ -306,6 +315,7 @@ impl NumericalProfile {
         match self {
             Self::OracleF32 => "oracle-f32",
             Self::LlamaCpu => "llama-cpu",
+            Self::MetalF16Act => "metal-f16-act",
         }
     }
 }
