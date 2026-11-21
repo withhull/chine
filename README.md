@@ -56,11 +56,13 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   llama.cpp, whose decode swings 61-76 tok/s across runs; TuckCore is
   steady at 65.0 ± 0.2 in every run), time to first token
   368/341/330/326 vs 331/291/290/289 ms (paired 1.11×, 1.17×, 1.14×,
-  1.13×). Prefill is at **~88.5%** after the FFN tuning (was 85-90%):
-  the GEMM kernel stack closed to 1.6-1.9% behind llama, and the
-  remaining gap is the non-GEMM stack and host dispatch (~21% of
-  prefill) — fused GeGLU/norm kernels are the recorded next lever, not
-  further GEMM tuning.
+  1.13×). Prefill is at **~88.5%** in the last recorded run, with two
+  more cuts landed since: the fused post-block norm + residual add
+  (bit-identical via an optnone call boundary; -40% per row-set at
+  1152-wide chunks) and the merged Q/K norms (one launch, bit-equal) —
+  the non-GEMM norm stack dropped from ~30 ms to ~10 ms in the
+  ungrouped profile. The next quiet bench run records whether the bar
+  is crossed; kernel arithmetic projects ~6-7 ms off the 326 ms TTFT.
 - **Qwen3.5-2B Q8_0** (four runs, 3 GiB budget; the fourth with the
   f16-operand GEMM profile): decode 38.4-39.8 vs 38.1-40.7 tok/s (paired
   0.956-1.030, at parity). Time to first token 0.623 s vs 0.587-0.588 s
