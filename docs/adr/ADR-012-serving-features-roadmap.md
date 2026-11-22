@@ -93,6 +93,56 @@ honest labels, and the unified engine.
   spend effort on dense Qwen3, an older family. Steps 2-3 target Qwen3.5
   and newer families.
 
+## Step 1 addendum (2026-11-22): chat for Gemma 3
+
+- **Pinned template.** Both pinned Gemma 3 1B artifacts (Q8_0 and Q4_0)
+  carry byte-identical `tokenizer.chat_template` bytes (1532, SHA-256
+  `7de1c58e…88dd3c4`, stored verbatim at
+  `crates/manifest/src/templates/gemma3.jinja`) and are recognized by
+  exact match as `gemma3-turns`.
+- **Renderer.** `ChatTemplate::Gemma3` in `crates/supervisor/src/bundle.rs`
+  implements the turns template's semantics for the text subset:
+  the template emits the BOS spelling itself (`{{ bos_token }}`), and
+  chat encoding never adds a second one (llama.cpp's tokenizer adds
+  the model-default BOS for Gemma, so the single-BOS invariant is
+  double-checked: the served prompt's token ids begin `2, 105, …`);
+  a leading system message is consumed as a prefix glued onto the
+  first turn's content (`content + '\n\n'`); the loop alternates
+  strictly with the template's own refusal text (a system message
+  entering the loop at an odd index renders as a system turn, exactly
+  as the template's guard allows); assistant turns are renamed
+  `model`; every content is `trim`-filtered; the generation prompt
+  appends the bare `model` header (a system-only conversation legally
+  renders to just that).
+- **Goldens.** `scripts/gemma3_chat_goldens.py` (committed; reproduces
+  the committed JSON byte-for-byte) renders 16 conversations with
+  Jinja2 3.1.6 as Hugging Face applies chat templates; token ids come
+  from pinned llama.cpp `llama-tokenize`, which adds Gemma's
+  model-default BOS itself, so the template's `<bos>` spelling is
+  stripped before tokenizing — every golden carries exactly one
+  id-2 BOS.
+- **Verified:**
+  - the renderer reproduces all 12 prompts byte for byte and all 4
+    refusals with the template's own messages (three alternation
+    raises, one empty-list raise);
+  - the reference-first encoder reproduces the golden token ids on
+    both pins (the parity gate accepts either
+    `CHINE_GEMMA3_GGUF`/`CHINE_GEMMA3_Q40_GGUF`);
+  - independently, `llama-server b11695 --jinja` on the pin returns
+    our rendered prompts exactly (via `/apply-template`, which
+    strips the BOS spelling from display) and its `/tokenize` on the
+    bos-ful prompt yields the same ids, one BOS;
+  - `/v1/chat/completions` on the real Q8_0 pin (unified engine,
+    Metal) answers "Paris" for the capital-of-France conversation
+    with `prompt_tokens: 21` — exactly the golden conversation's
+    token count, i.e. the served prompt is the golden prompt; the
+    with-system conversation reports 17, also the golden count; an
+    assistant-first conversation is refused with the template's own
+    alternation message as a typed `InvalidRequest`.
+- **Not included (refused, never approximated):** image content (the
+  template's `<start_of_image>` branch) and any other declared
+  template that is not the pinned bytes.
+
 ## Step 2 record (2026-10-27): prefix cache
 
 - **Design: bit-identical by construction.**

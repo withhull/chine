@@ -1,0 +1,483 @@
+{
+ "source": "pinned Gemma 3 1B GGUF chat template (both pins carry byte-identical template bytes)",
+ "templates": [
+  {
+   "artifact": "gemma-3-1b-it-Q8_0.gguf / gemma-3-1b-it-Q4_0.gguf",
+   "bytes": 1532,
+   "sha256": "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+  }
+ ],
+ "method": "prompts rendered with Jinja2 3.1.6 as Hugging Face applies chat templates (ImmutableSandboxedEnvironment, trim_blocks, lstrip_blocks, loopcontrols, raise_exception), bos_token='<bos>', add_generation_prompt=True; token ids from pinned llama.cpp b11695 llama-tokenize, which adds the model-default BOS itself, so the template's leading <bos> spelling is stripped before tokenizing (exactly one id-2 BOS per prompt); refusals record the template's own raise message",
+ "conversations": [
+  {
+   "id": "single_user",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello, world!"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nHello, world!<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    9259,
+    236764,
+    1902,
+    236888,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "with_system",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nYou are a helpful assistant.\n\nHi<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    3048,
+    659,
+    496,
+    11045,
+    16326,
+    236761,
+    108,
+    10979,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "capital_of_france",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What is the capital of France? Answer in one word."
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nWhat is the capital of France? Answer in one word.<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    3689,
+    563,
+    506,
+    5279,
+    529,
+    7001,
+    236881,
+    25685,
+    528,
+    886,
+    3658,
+    236761,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "multi_turn_with_system",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are terse."
+    },
+    {
+     "role": "user",
+     "content": "Name a red fruit."
+    },
+    {
+     "role": "assistant",
+     "content": "Apple."
+    },
+    {
+     "role": "user",
+     "content": "And a green one?"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nYou are terse.\n\nName a red fruit.<end_of_turn>\n<start_of_turn>model\nApple.<end_of_turn>\n<start_of_turn>user\nAnd a green one?<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    3048,
+    659,
+    17514,
+    236761,
+    108,
+    1567,
+    496,
+    2604,
+    9479,
+    236761,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    31319,
+    236761,
+    106,
+    107,
+    105,
+    2364,
+    107,
+    3133,
+    496,
+    3826,
+    886,
+    236881,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "multi_turn_no_system",
+   "messages": [
+    {
+     "role": "user",
+     "content": "One."
+    },
+    {
+     "role": "assistant",
+     "content": "Two."
+    },
+    {
+     "role": "user",
+     "content": "Three?"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nOne.<end_of_turn>\n<start_of_turn>model\nTwo.<end_of_turn>\n<start_of_turn>user\nThree?<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    4906,
+    236761,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    11634,
+    236761,
+    106,
+    107,
+    105,
+    2364,
+    107,
+    19765,
+    236881,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "trailing_assistant",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Say hi."
+    },
+    {
+     "role": "assistant",
+     "content": "Hi there!"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nSay hi.<end_of_turn>\n<start_of_turn>model\nHi there!<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    37889,
+    5631,
+    236761,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    10979,
+    993,
+    236888,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "content_trim",
+   "messages": [
+    {
+     "role": "user",
+     "content": "   padded content \n"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\npadded content<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    125433,
+    3004,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "system_prefix_join",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief.\n"
+    },
+    {
+     "role": "user",
+     "content": "  2+2? "
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nBe brief.\n\n\n2+2?<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    3912,
+    8652,
+    236761,
+    109,
+    236778,
+    236862,
+    236778,
+    236881,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "unicode_content",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Caf\u00e9 in Z\u00fcrich?"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nCaf\u00e9 in Z\u00fcrich?<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    160319,
+    236859,
+    528,
+    116315,
+    236881,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "empty_assistant_turn",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Ping"
+    },
+    {
+     "role": "assistant",
+     "content": ""
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\nPing<end_of_turn>\n<start_of_turn>model\n<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    129435,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "long_multi_turn",
+   "messages": [
+    {
+     "role": "user",
+     "content": "a"
+    },
+    {
+     "role": "assistant",
+     "content": "b"
+    },
+    {
+     "role": "user",
+     "content": "c"
+    },
+    {
+     "role": "assistant",
+     "content": "d"
+    },
+    {
+     "role": "user",
+     "content": "e"
+    }
+   ],
+   "prompt": "<bos><start_of_turn>user\na<end_of_turn>\n<start_of_turn>model\nb<end_of_turn>\n<start_of_turn>user\nc<end_of_turn>\n<start_of_turn>model\nd<end_of_turn>\n<start_of_turn>user\ne<end_of_turn>\n<start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    2364,
+    107,
+    236746,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    236763,
+    106,
+    107,
+    105,
+    2364,
+    107,
+    236755,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    236753,
+    106,
+    107,
+    105,
+    2364,
+    107,
+    236744,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "system_only",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    }
+   ],
+   "prompt": "<bos><start_of_turn>model\n",
+   "tokens": [
+    2,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "id": "error_empty_messages",
+   "messages": [],
+   "error": "list object has no element 0"
+  },
+  {
+   "id": "error_assistant_first",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "Hi"
+    }
+   ],
+   "error": "Conversation roles must alternate user/assistant/user/assistant/..."
+  },
+  {
+   "id": "error_consecutive_users",
+   "messages": [
+    {
+     "role": "user",
+     "content": "One"
+    },
+    {
+     "role": "user",
+     "content": "Two"
+    }
+   ],
+   "error": "Conversation roles must alternate user/assistant/user/assistant/..."
+  },
+  {
+   "id": "error_system_mid_conversation",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello"
+    },
+    {
+     "role": "system",
+     "content": "Be brief."
+    }
+   ],
+   "error": "Conversation roles must alternate user/assistant/user/assistant/..."
+  }
+ ]
+}

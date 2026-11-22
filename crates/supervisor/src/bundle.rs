@@ -22,6 +22,7 @@ use std::path::Path;
 
 use chine_backend::SamplingPolicy;
 use chine_manifest::chat::{
+    GEMMA3_BOS, GEMMA3_CHAT_TEMPLATE, GEMMA3_END_OF_TURN, GEMMA3_START_OF_TURN,
     QWEN35_CHAT_TEMPLATE_0_8B, QWEN35_CHAT_TEMPLATE_2B, QWEN35_THINK_END, QWEN35_THINK_START,
     QWEN3_CHAT_TEMPLATE, QWEN3_IM_END, QWEN3_IM_START,
 };
@@ -74,6 +75,8 @@ pub enum ChatTemplate {
     Qwen3,
     /// Qwen3.5 (both pinned revisions: 0.8B and 2B).
     Qwen35,
+    /// Gemma 3 turns (both pinned artifacts carry identical bytes).
+    Gemma3,
 }
 
 impl ChatTemplate {
@@ -83,6 +86,8 @@ impl ChatTemplate {
             Some(ChatTemplate::Qwen3)
         } else if declared == QWEN35_CHAT_TEMPLATE_0_8B || declared == QWEN35_CHAT_TEMPLATE_2B {
             Some(ChatTemplate::Qwen35)
+        } else if declared == GEMMA3_CHAT_TEMPLATE {
+            Some(ChatTemplate::Gemma3)
         } else {
             None
         }
@@ -92,6 +97,7 @@ impl ChatTemplate {
         match self {
             ChatTemplate::Qwen3 => "qwen3-chatml",
             ChatTemplate::Qwen35 => "qwen35-chatml",
+            ChatTemplate::Gemma3 => "gemma3-turns",
         }
     }
 
@@ -102,6 +108,7 @@ impl ChatTemplate {
         match self {
             ChatTemplate::Qwen3 => Ok(render_qwen3(messages)),
             ChatTemplate::Qwen35 => render_qwen35(messages),
+            ChatTemplate::Gemma3 => render_gemma3(messages),
         }
     }
 }
@@ -284,6 +291,56 @@ fn split_reasoning(content: &str) -> (String, String) {
         .to_string();
     let content = after.trim_start_matches('\n').to_string();
     (reasoning, content)
+}
+
+/// Render the pinned Gemma 3 template with its canonical Jinja2 semantics
+/// for the supported message subset (string content; no images). The
+/// template indexes `messages[0]` first, so an empty list is refused; a
+/// leading system message is consumed as a prefix glued onto the first
+/// turn's content (the loop must then start with a user turn); the loop
+/// alternates strictly with the template's own refusal, and an assistant
+/// turn is renamed `model`. Every content is `trim`-filtered; the
+/// generation prompt appends the bare `model` header. Golden-tested
+/// against Jinja2 renderings of the pinned template.
+fn render_gemma3(messages: &[ChatMessageSpec]) -> Result<String> {
+    let Some(first) = messages.first() else {
+        return Err(template_refusal("list object has no element 0"));
+    };
+    let (prefix, loop_messages) = if first.role == ChatRole::System {
+        (format!("{}\n\n", first.content), &messages[1..])
+    } else {
+        (String::new(), messages)
+    };
+    let mut out = String::from(GEMMA3_BOS);
+    for (index, m) in loop_messages.iter().enumerate() {
+        // The template's exact guard: (role == 'user') != (index even).
+        // A system message entering the loop at an odd index renders as a
+        // system turn (both sides of the guard are false); at an even
+        // index the guard raises, exactly as the template does.
+        let is_user = m.role == ChatRole::User;
+        if is_user != (index % 2 == 0) {
+            return Err(template_refusal(
+                "Conversation roles must alternate user/assistant/user/assistant/...",
+            ));
+        }
+        let role = match m.role {
+            ChatRole::Assistant => "model",
+            ChatRole::System => "system",
+            ChatRole::User => "user",
+        };
+        out.push_str(GEMMA3_START_OF_TURN);
+        out.push_str(role);
+        out.push('\n');
+        if index == 0 {
+            out.push_str(&prefix);
+        }
+        out.push_str(py_strip(&m.content));
+        out.push_str(GEMMA3_END_OF_TURN);
+        out.push('\n');
+    }
+    out.push_str(GEMMA3_START_OF_TURN);
+    out.push_str("model\n");
+    Ok(out)
 }
 
 /// A model artifact's qualified input contract.
@@ -712,6 +769,99 @@ mod tests {
                 .collect();
             assert_eq!(tokens, expected, "conversation {id:?} token ids");
         }
+    }
+
+    /// ADR-012 step 1 (Gemma): both pinned artifacts carry byte-identical
+    /// template bytes, recognized exactly, and the renderer reproduces the
+    /// Jinja2 goldens (prompts and the template's own refusals) for every
+    /// conversation.
+    #[test]
+    fn gemma3_renderer_matches_the_jinja2_goldens() {
+        assert_eq!(
+            chine_manifest::ids::sha256_hex(GEMMA3_CHAT_TEMPLATE.as_bytes()),
+            "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4",
+            "pinned template bytes"
+        );
+        assert_eq!(
+            ChatTemplate::recognize(GEMMA3_CHAT_TEMPLATE),
+            Some(ChatTemplate::Gemma3)
+        );
+        let goldens: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/data/gemma3_chat_goldens.json")).unwrap();
+        let conversations = goldens["conversations"].as_array().unwrap();
+        assert!(conversations.len() >= 16);
+        for conv in conversations {
+            let id = conv["id"].as_str().unwrap();
+            let messages: Vec<ChatMessageSpec> = conv["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    spec(
+                        ChatRole::parse(m["role"].as_str().unwrap()).unwrap(),
+                        m["content"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            let rendered = ChatTemplate::Gemma3.render(&messages);
+            match conv["error"].as_str() {
+                Some(expected) => {
+                    let err = rendered.expect_err(id);
+                    assert_eq!(err.code(), ErrorCode::InvalidRequest, "{id}");
+                    assert!(err.to_string().contains(expected), "{id}: {err}");
+                }
+                None => assert_eq!(
+                    rendered.unwrap(),
+                    conv["prompt"].as_str().unwrap(),
+                    "conversation {id:?} must render exactly like Jinja2"
+                ),
+            }
+        }
+    }
+
+    /// ADR-012 step 1 (Gemma): the pinned reference's token ids for every
+    /// golden conversation, including the single template-emitted BOS.
+    #[test]
+    fn gemma3_reference_token_ids_are_reproduced_when_the_pinned_library_is_configured() {
+        let gguf = ["CHINE_GEMMA3_GGUF", "CHINE_GEMMA3_Q40_GGUF"]
+            .iter()
+            .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()));
+        let (Ok(_lib), Some(gguf)) = (std::env::var("CHINE_LLAMA_LIB"), gguf) else {
+            eprintln!("skipping: set CHINE_LLAMA_LIB and CHINE_GEMMA3_GGUF (or _Q40_)");
+            return;
+        };
+        let path = std::path::PathBuf::from(gguf);
+        let bundle = ModelBundle::open_path(&path, &Id::new("a".repeat(64)).unwrap()).unwrap();
+        assert_eq!(bundle.template.map(|t| t.id()), Some("gemma3-turns"));
+        let goldens: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/data/gemma3_chat_goldens.json")).unwrap();
+        let mut checked = 0;
+        for conv in goldens["conversations"].as_array().unwrap() {
+            let Some(expected) = conv["tokens"].as_array() else {
+                continue;
+            };
+            let id = conv["id"].as_str().unwrap();
+            let messages: Vec<ChatMessageSpec> = conv["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    spec(
+                        ChatRole::parse(m["role"].as_str().unwrap()).unwrap(),
+                        m["content"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            let rendered = bundle.render_chat(&messages).unwrap();
+            let tokens = bundle.encode(&rendered, false).unwrap();
+            let expected: Vec<u32> = expected
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect();
+            assert_eq!(tokens, expected, "conversation {id:?} token ids");
+            checked += 1;
+        }
+        assert!(checked >= 12, "expected token goldens to be present");
     }
 
     #[test]

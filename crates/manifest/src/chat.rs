@@ -122,3 +122,23 @@ pub const QWEN35_CHAT_TEMPLATE_0_8B: &str = include_str!("templates/qwen35-0.8b.
 /// differs from the 0.8B revision only inside the tool-call branch, which
 /// is outside the supported request subset, so both share one renderer.
 pub const QWEN35_CHAT_TEMPLATE_2B: &str = include_str!("templates/qwen35-2b.jinja");
+
+/// Special-token spellings the Gemma 3 turns template emits; tokenization
+/// must map these to their real vocabulary ids, never SentencePiece-split
+/// them. The template emits the BOS spelling itself (`{{ bos_token }}`), so
+/// chat encoding never adds a second one (the reference encoder's
+/// add-special path is off for chat in `RequestSpec::chat`).
+pub const GEMMA3_BOS: &str = "<bos>";
+pub const GEMMA3_START_OF_TURN: &str = "<start_of_turn>";
+pub const GEMMA3_END_OF_TURN: &str = "<end_of_turn>";
+
+/// The exact `tokenizer.chat_template` carried by both pinned Gemma 3 1B
+/// artifacts (Q8_0 and Q4_0 carry byte-identical templates, 1532 bytes,
+/// SHA-256
+/// `7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4`).
+/// Recognition is byte-exact: the renderer in the supervisor implements
+/// this template's semantics for the supported message subset (string
+/// content; system consumed as a prefix on the first user turn; strict
+/// user/assistant alternation with the template's own refusal; no images),
+/// and refuses anything that does not match this revision.
+pub const GEMMA3_CHAT_TEMPLATE: &str = include_str!("templates/gemma3.jinja");

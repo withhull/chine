@@ -183,7 +183,7 @@ ambition — the tier table above is the scope.
 | Governor: Normal / Constrained / Paused / Draining / Failed, driven by real memory-pressure and thermal signals | ✅ |
 | Qwen3.5 hybrid on Metal (unified engine): Gated DeltaNet and gated attention, packed f16 KV, batched prefill, device greedy sampling | ✅ experimental; chat and raw completion (pinned 0.8B and 2B templates, text-only subset, thinking off by default) |
 | Dense Qwen3 on Metal (unified engine): f32 or packed f16 KV, batched prefill, device greedy sampling | ✅ experimental; qualified on the pinned Qwen3-0.6B (CPU oracle and llama.cpp envelopes) |
-| Gemma 3 text on Metal (unified engine, ADR-013): sliding-window attention, sandwich norms, GeGLU; raw completion | ✅ experimental; logits match pinned llama.cpp Metal (max diff ≤ 0.022–0.026 on the Q8_0 pin, ≤ 0.0114 on the Q4_0 pin); chat template not yet recognized |
+| Gemma 3 text on Metal (unified engine, ADR-013): sliding-window attention, sandwich norms, GeGLU; raw completion + chat (`gemma3-turns` template recognized, `/v1/chat/completions` gated) | ✅ experimental; logits match pinned llama.cpp Metal (max diff ≤ 0.022–0.026 on the Q8_0 pin, ≤ 0.0114 on the Q4_0 pin); chat renders byte-exactly like Jinja2 and answers on the real pin (image content refused) |
 | Dense Qwen3 on CPU: scalar f32 oracle and NEON Q8_0/F16 kernels, bounded weight streaming | ✅ experimental |
 | Formats executed | CPU: F32, F16, BF16, Q8_0, Q4_0, Q4_1. Metal: F16, Q8_0, Q4_0, Q4_1. K-quants and IQ formats are refused with a typed error |
 | GPU partial residency and streaming, MoE execution, compressed (Bonsai) execution | ⛔ Phases 2–3 |
