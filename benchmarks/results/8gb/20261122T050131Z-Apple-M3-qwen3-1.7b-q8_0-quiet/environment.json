@@ -1,0 +1,19 @@
+{
+  "schema": "chine-baseline-env-v1",
+  "started_utc": "20261122T050131Z",
+  "tier": "8gb",
+  "chip": "Apple M3",
+  "memory_bytes": 8589934592,
+  "macos": "27.0.1 (26A434)",
+  "power_source": "AC Power",
+  "chine_commit": "2a21431b5f6d52a10e9a1beb7e2306561d015ebb",
+  "chine_tree_dirty": false,
+  "llama_cpp": "b11695 (pinned, scripts/fetch-llama.sh)",
+  "artifact": "Qwen3-1.7B-Q8_0.gguf",
+  "artifact_bytes": 1834426016,
+  "artifact_sha256": "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+  "memory_budget": "4GiB",
+  "kv_precision": "f16",
+  "ignore_eos": true,
+  "shape": {"input": 512, "output": 256, "repetitions": 3, "context": 2048, "rounds": 3}
+}
