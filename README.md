@@ -1,122 +1,103 @@
 # Tuckmill
 
-Tuckmill is a Mac-native local inference framework for Apple Silicon, from
-8 GB MacBook Airs to high-memory Macs. It runs the model you chose, with its
-own computation and numerical profile, as fast as each Mac allows, and
-labels every number it shows (`estimated`, `locally-calibrated` or
-`certified`).
+Local inference for Apple Silicon — 8 GB MacBook Airs through high-memory
+Macs — built around one engine this project owns end to end.
 
-Positioning and goals: [ADR-006](docs/adr/ADR-006-positioning-and-memory-tiers.md).
+- **One unified Metal engine runs every supported family** (ADR-011). A
+  small adapter describes a model as a typed graph — which tensors are
+  which projections, the attention window, the activation — and the
+  engine executes it from shared blocks: matrix-unit Q8_0/F16 GEMMs,
+  chunk attention with or without sliding windows, Gated DeltaNet
+  recurrence, RMSNorm, GeGLU, sampling. There is no per-model forward
+  pass and no vendored foreign engine on this path.
+- **llama.cpp b11695 is pinned as both oracle and baseline**
+  (`scripts/fetch-llama.sh`, loaded at runtime, never vendored). Every
+  comparison runs under identity rules — identical artifact, token IDs,
+  declared numerical profile and cache state — and every displayed
+  number is labeled `estimated`, `locally-calibrated` or `certified`
+  (ADR-001, [docs/claims.md](docs/claims.md)).
+- **The model you chose runs with its own computation.** No dropped
+  experts, no precision substitution, no truncated context. The
+  numerical profile is declared per load and recorded in every
+  identity, stat and verify record (ADR-010).
+
 Product contract: [ADR-001](docs/adr/ADR-001-product-contract.md).
+Positioning and memory tiers: [ADR-006](docs/adr/ADR-006-positioning-and-memory-tiers.md).
 
 ## Status
 
-Engineering build; nothing is certified. Evidence lives in
-[docs/certification-matrix.md](docs/certification-matrix.md), and allowed
-statements in [docs/claims.md](docs/claims.md).
+Engineering build; nothing is certified. The full state, with evidence
+per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 
-- **Orchestration**: implemented and tested. This covers inspect, import,
-  pack, plan (`R + U + H <= B` admission), an isolated worker, an
-  OpenAI-style `/v1/chat/completions` endpoint with SSE, `verify
-  --reference` against pinned llama.cpp, and labeled bench records.
-- **TuckCore executor**:
-  - **Unified engine (ADR-011):** an adapter describes a model as a typed
-    graph, and one Metal engine runs it from shared blocks. Qwen3.5 0.8B
-    and 2B (Q8_0) and Gemma 3 1B (Q8_0, ADR-013) are served this way, with
-    batched prefill and pipelined greedy decoding on the GPU.
-  - **Dense Qwen3:** served by the same engine on Metal (f32 or f16 KV);
-    the CPU path (scalar and NEON, with bounded weight streaming) stays
-    as the CPU executor and arithmetic oracle.
-- **Reference backend**: pinned llama.cpp b11695 (`--engine llama`). It is
-  loaded at runtime, never vendored, and is both the comparison oracle and
-  the speed baseline.
+- **Orchestration**: implemented and tested — inspect, import, pack, plan
+  (`R + U + H ≤ B` admission), an isolated worker, an OpenAI-style
+  `/v1/chat/completions` endpoint with SSE, `verify --reference` against
+  pinned llama.cpp, labeled bench records.
+- **TuckCore executor**: Qwen3.5 0.8B and 2B, Gemma 3 1B (ADR-013) and
+  dense Qwen3 all run on the unified Metal engine with batched prefill
+  and pipelined greedy decoding. The CPU path (scalar + NEON, bounded
+  weight streaming) stays as the CPU executor and arithmetic oracle.
 - **Not built yet**: GPU partial residency and streaming, MoE execution,
-  K-quant kernels, speculative sampling (greedy speculation is built).
-- **Hardware exercised**: one MacBook Air M3 8 GB. Other tiers are pending.
+  K-quant kernels, speculative sampling (greedy MTP speculation is
+  built).
+- **Hardware exercised**: one MacBook Air M3 8 GB. Other tiers are
+  pending; all numbers below are locally-calibrated on that machine.
 
-### Measured against llama.cpp (Qwen3.5-0.8B Q8_0, M3 8 GB)
+## Measured against pinned llama.cpp (M3 8 GB, 512 tokens in / 256 out, ABBA)
 
-Identity-matched harness (`scripts/bench-baseline.sh`): same artifact, same
-prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
-`d95ecc1`, locally-calibrated:
+| Model (Q8_0) | Decode, paired | First token, paired |
+| --- | --- | --- |
+| Qwen3.5-0.8B | 0.99–1.26× (two idle runs + a rerun; 84.2–84.3 vs 66.8–84.7 tok/s) | 94–106% — parity |
+| Qwen3.5-2B (3 GiB budget) | 0.956–1.030 across four runs — parity | 94% with f32-operand GEMMs, **98%** on the f16-operand profile (0.601 vs 0.587 s, quiet AC run) |
+| Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
+| Gemma 3 1B (f16 KV, ignore-EOS) | 0.857–0.950 — llama.cpp swings 61–76 tok/s between runs; TuckCore is steady at 65.0 ± 0.2 in every run ever recorded | 85–90%; ~88.5% in the latest (326 vs 289 ms) |
 
-| | TuckCore | llama.cpp Metal | Ratio |
-| --- | --- | --- | --- |
-| Time to first token | 0.272 s (both runs) | 0.269-0.300 s | 94-106% of llama.cpp per pair |
-| Decode | 84.2-84.3 tok/s | 66.8-84.7 tok/s | 0.99-1.26× per pair |
+The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Decode
+meets it on the 0.8B (reproduced) and is at parity on the 2B and Gemma
+3. Prefill is met and reproduced on the 0.8B, met at 98% on the 2B
+(reproduction pending), and just below on Gemma 3 — llama.cpp's own
+first-token spread (0.269–0.300 s on the 0.8B) is as wide as several of
+these margins, so parity is stated where a lead is not established.
 
-- **Rerun at `ab44d68`** (0.8B, idle Mac, pressure normal): decode 82.4
-  vs 67.4 tok/s (paired 1.23), time to first token 0.279 vs 0.287 s
-  (paired 0.99): unchanged by Gemma 3, the lifecycle work and the
-  attention-window kernels.
-- **Gemma 3 1B Q8_0** (four runs, f16 KV, ignore-EOS; the last two with
-  the f16-operand GEMM profile, the newest after the FFN edge-stage
-  tuning): decode 57.1/65.0/65.0/65.1 vs 63.7/68.4/75.9/75.6 tok/s
-  (paired medians 0.896, 0.950, 0.857, 0.860 — the ratio tracks
-  llama.cpp, whose decode swings 61-76 tok/s across runs; TuckCore is
-  steady at 65.0 ± 0.2 in every run), time to first token
-  368/341/330/326 vs 331/291/290/289 ms (paired 1.11×, 1.17×, 1.14×,
-  1.13×). Prefill is at **~88.5%** in the last recorded run, with two
-  more cuts landed since: the fused post-block norm + residual add
-  (bit-identical via an optnone call boundary; -40% per row-set at
-  1152-wide chunks) and the merged Q/K norms (one launch, bit-equal).
-  The acceptance run for them (paired 1.13×, ~88.5%) shows the bar is
-  **not crossed**: ungrouped-profile projections have failed twice —
-  the fused norms save only ~1 ms in the grouped production encoder.
-  The grouped-regime ablation (2026-11-22) settles why: the grouped
-  prefill is **~85% GEMM** — attention ≤ 11.9%, GeGLU ≤ 3.4%, norms
-  ≤ 3.7%, skeleton ~1.4% — so the earlier "21% non-GEMM stack" was the
-  ungrouped profiler's per-dispatch overhead. Per-shape GEMM tuning is
-  bounded at ~1.5% of prefill; the recorded next lever is
-  node-concurrent encoding (llama.cpp overlaps the independent q/k/v
-  and gate/up GEMMs; the unified engine's encoder is serial).
-- **Qwen3.5-2B Q8_0** (four runs, 3 GiB budget; the fourth with the
-  f16-operand GEMM profile): decode 38.4-39.8 vs 38.1-40.7 tok/s (paired
-  0.956-1.030, at parity). Time to first token 0.623 s vs 0.587-0.588 s
-  in the two AC runs with f32 operands (paired 1.06×, 94%), 0.829 s vs
-  0.610 s in the quiet battery run (1.16×, 86%), and **0.601 s vs
-  0.587 s in the quiet AC run on the f16-operand profile (1.02×, 98%)**.
-- **Phase 1 bar** (≥ 90% of llama.cpp for decode and prefill): decode
-  meets it on the 0.8B (reproduced) and is at parity on the 2B and
-  Gemma 3 1B. Prefill meets it and is reproduced on the 0.8B; on the 2B
-  it is **met at 98% in the first f16-operand run** (reproduction
-  pending); Gemma 3 stays at 85-90%. Prefill is at parity, not a lead,
-  because llama.cpp's own spread covers the difference. All numbers are
-  locally-calibrated on one M3 8 GB Mac.
-- **GEMM operand profile (2026-11-22, ADR-010/ADR-011):** batched prefill
-  GEMMs now run the declared `metal-f16-act` profile by default — operands
-  staged as half, f32 accumulation, llama.cpp `kernel_mul_mm` numerics.
-  Qualified: `verify --reference` PASS on the 0.8B / 2B / Qwen3-0.6B
-  (max |Δ| 0.34-0.35 under the registered 5e-1 Q8_0 policy, texts equal);
-  the Gemma 3 real-text Metal gate is unchanged (max |Δ| 0.026, top-1
-  equal). Speed: the f16-operand kernel is 2-3.5% faster at every
-  isolated 0.8B/2B/Gemma shape and matches llama.cpp exactly at the 0.8B
-  shape; in the 2B model the GEMM stack's GPU time drops ~4%. The
-  request-level quiet bench run records it: 2B prefill 94% → **98%**
-  (`…-qwen35-2b-q8_0-f16op-quiet`, AC, all rounds valid, zero swap),
-  decode at parity 0.980. FFN-shape tuning (2026-11-22): the kernel's
-  static 8 KB edge stage cost every full-tile group resident slots —
-  replaced by per-SIMD-group 256 B stages, Gemma's FFN shapes went from
-  5% behind llama to 1.8-1.9% with the small attention shapes ahead of
-  it, and Gemma's in-process 512-token prefill dropped 9.5%
-  (411 → ~373 ms, GEMM GPU time 337 → 308-311 ms); numerics unchanged
-  (reference gate identical, kernel drift 2.9e-6). Opt out per load with
-  `--tuckcore-profile oracle-f32` (with `--kernels metal`); the resolved
-  profile is recorded in every identity, stat and verify record.
-- **Decode** is at parity or ahead. llama.cpp's own decode in this harness
-  varies between runs (about 66-85 tok/s), so this is not stated as a
-  lead.
+**GEMM operand profile (`metal-f16-act`, ADR-010/ADR-011).** Batched
+prefill GEMMs stage dequantized weights and activations as half and
+multiply in half with f32 accumulation — llama.cpp `kernel_mul_mm`
+numerics. This is the default; `--tuckcore-profile oracle-f32` (with
+`--kernels metal`) restores f32 operands. Qualified: `verify
+--reference` PASS on the 0.8B / 2B / Qwen3-0.6B (max |Δ| 0.34–0.35
+under the registered 5e-1 Q8_0 policy, generated texts equal); the
+Gemma 3 real-text Metal gate is unchanged (max |Δ| 0.026, top-1 equal
+at every length). The resolved profile appears in every record.
+
+**Where Gemma prefill stands, and what the record says to do next.**
+The grouped-regime ablation (ADR-011 note, 2026-11-22) measured the
+production encoder directly: the 512-token prefill is **~85% GEMM**
+(303.0/357.9 and 314.7/370.7 ms across two passes); attention ≤ 11.9%,
+GeGLU ≤ 3.4%, all norms ≤ 3.7%, host skeleton ~1.4%. The isolated FFN
+kernels are 1.6–1.9% behind llama's and the small attention shapes are
+ahead of it, which bounds further per-shape kernel tuning at ~1.5% of
+prefill. The remaining lever with real size is **node-concurrent
+encoding**: llama.cpp dispatches the independent q/k/v and gate/up GEMMs
+concurrently for a further ~5%+, while this engine's encoder is strictly
+serial. That — not more kernel work — is the recorded next step.
+
+**Beyond decode and prefill:**
+
+- **MTP speculative greedy** (`--speculative`, ADR-012): the artifact's
+  own MTP head drafts one token, the engine verifies with its exact
+  decode arithmetic, output is token-identical to plain greedy. 0.8B
+  decode 98–101 vs 76–78 tok/s plain, TTFT +4% (indicative). The 2B has
+  no MTP block and is refused.
+- **Prefix cache** (ADR-012): a request that extends the previous
+  request's prefix resumes from a snapshot at a chunk boundary,
+  bit-identical to a cold prefill. A 984-token chat: 0.87–0.93 s cold vs
+  0.33–0.37 s on a hit (0.8B, indicative). Off in `bench`.
 - **Cold first request** (worker start, full-payload identity check, GPU
-  upload, first prefill): 1.13-1.26 s vs llama.cpp's 0.75-1.40 s in the
+  upload, first prefill): 1.13–1.26 s vs llama.cpp's 0.75–1.40 s in the
   same harness (0.8B).
-- **Remaining prefill difference:** f16 vs f32 operand precision. TuckCore
-  keeps f32 (ADR-011).
-- **Dense Qwen3-0.6B Q8_0** (at `4b7d2ae`, f16 KV on both engines): time
-  to first token 0.254 s vs 0.212 s (83%). Decode isn't measurable in this
-  harness yet: the frozen prompt ends in EOS after 1-2 tokens on both
-  engines.
-- **Not measured:** other models, contexts and memory tiers. Records are in
-  [benchmarks/results/](benchmarks/results/).
+- **Not measured:** other models, contexts and memory tiers. Records are
+  in [benchmarks/results/](benchmarks/results/), each with the command,
+  conditions and a validity check per round.
 
 ## Quickstart
 
@@ -133,28 +114,36 @@ tuckmill inspect model.gguf                        # validate without loading we
 tuckmill import model.gguf --alias my-model        # atomic, resumable, verified
 tuckmill plan my-model                             # admission, mode, assumptions
 tuckmill run my-model --prompt "..." --engine tuckcore --kernels metal
-tuckmill verify my-model --reference               # TuckCore vs llama.cpp logits
+tuckmill run my-model --prompt "..." --speculative     # MTP greedy, opt-in
+tuckmill verify my-model --reference              # TuckCore vs llama.cpp logits
 tuckmill bench my-model --engine tuckcore          # labeled benchmark record
-tuckmill serve --engine tuckcore --kernels metal   # loopback API (127.0.0.1:8378); --keep-alive 5m
+tuckmill serve --engine tuckcore --kernels metal   # loopback API on 127.0.0.1:8378
 scripts/bench-baseline.sh model.gguf               # ABBA: TuckCore vs llama.cpp
 ```
 
-The default process budget is a quarter of unified memory, at least 2 GiB
-and at most 24 GiB. `--memory-budget` overrides it.
+`serve` accepts `--keep-alive 5m` (or `0`, or `forever`), per-request
+`keep_alive`/`ttl`, `--max-loaded-models N` within the budget, and
+`POST /control/load` / `/control/unload`; idle models are released under
+real macOS memory pressure. The default process budget is a quarter of
+unified memory, at least 2 GiB and at most 24 GiB; `--memory-budget`
+overrides it.
 
 ## Execution strategy by memory tier
 
-There is one engine, and the planner chooses a strategy per model and per
-Mac by admission (`R + U + H <= B`). Execution is resident-first: when the
-weights fit, they load once and stay resident. Streaming is a strategy for
-constrained machines, not the architecture.
+One engine; the planner picks a strategy per model and per Mac by
+admission (`R + U + H ≤ B`). Execution is resident-first: weights load
+once and stay resident when they fit. Streaming is a strategy for
+constrained machines, not the architecture (ADR-006).
 
 | Unified memory | Strategy | State |
 | --- | --- | --- |
 | 8 GB | Compact weights, strict budgeting, selective streaming | budgeting and admission ✅; resident Metal ✅ (≤ 2B); CPU block streaming ✅ (dense Qwen3); GPU streaming ⛔ Phase 2 |
 | 16–24 GB | Hybrid resident and streamed execution, adaptive caching | ⛔ Phases 2–3 |
-| 32–48 GB | Larger resident models, fast prefill, speculative decoding | resident Metal ✅ (small models); speculation ⛔ Phase 4 |
+| 32–48 GB | Larger resident models, fast prefill, speculative decoding | resident Metal ✅ (small models); speculation ✅ experimental (MTP greedy) |
 | 64–128 GB+ | Maximum resident execution, batching, low-latency decoding | ⛔ Phases 1, 4 |
+
+8 GB is the minimum tier this must handle correctly, not the product's
+ambition — the tier table above is the scope.
 
 ## What works today
 
@@ -165,17 +154,14 @@ constrained machines, not the architecture.
 | `import` / `pack`: resumable chunked-digest imports, atomic publish, lossless packer with per-tile checksums | ✅ |
 | `plan`: `R + U + H ≤ B` admission, KV math, mode selection, typed infeasibility, recorded assumptions | ✅ |
 | `run` / `serve`: isolated worker, framed protocol, streaming, cancellation, bounded queue, loopback HTTP with bearer auth and SSE | ✅ |
-| `verify`: resident vs streamed, and TuckCore vs llama.cpp, on identical token IDs with registered tolerances | ✅ |
+| `verify`: resident vs streamed, and TuckCore vs llama.cpp on identical token IDs with registered tolerances | ✅ |
 | `bench`: standard-v1 records with cache-state labels and caveats | ✅ |
 | Governor: Normal / Constrained / Paused / Draining / Failed, driven by real memory-pressure and thermal signals | ✅ |
 | Qwen3.5 hybrid on Metal (unified engine): Gated DeltaNet and gated attention, packed f16 KV, batched prefill, device greedy sampling | ✅ experimental; chat and raw completion (pinned 0.8B and 2B templates, text-only subset, thinking off by default) |
-| Prefix cache (unified engine, ADR-012): a prompt that extends the previous request's prefix resumes from a snapshot, bit-identical to a cold prefill | ✅ experimental; 984-token chat 0.87-0.93 s cold vs 0.33-0.37 s on a hit (0.8B, indicative); off in `bench` |
-| Model lifecycle (ADR-012): `serve --keep-alive 5m` and per-request `keep_alive` / `ttl`; `--max-loaded-models N` within the budget (least recently used leaves first); `POST /control/load` and `/control/unload`; idle models released under macOS memory pressure | ✅ experimental |
-| MTP speculative greedy decoding (unified engine, ADR-012): `--speculative` drafts with the artifact's MTP head and verifies with the decode arithmetic, token-identical to plain greedy | ✅ experimental; 0.8B decode 98-101 vs 76-78 tok/s plain, TTFT +4% (`bench` 512/256, ignore-EOS, indicative); the 2B has no MTP block |
-| Gemma 3 text on Metal (unified engine, ADR-013): sliding-window attention, sandwich norms, GeGLU; raw completion | ✅ experimental; logits match pinned llama.cpp Metal (max diff ≤ 0.022); chat template not yet recognized |
 | Dense Qwen3 on Metal (unified engine): f32 or packed f16 KV, batched prefill, device greedy sampling | ✅ experimental; qualified on the pinned Qwen3-0.6B (CPU oracle and llama.cpp envelopes) |
-| Dense Qwen3 on CPU: scalar f32 oracle and NEON Q8_0/F16 kernel, bounded weight streaming | ✅ experimental |
-| Formats executed | CPU: F32, F16, BF16, Q8_0, Q4_0, Q4_1. Metal: Q8_0, F16. K-quants and IQ formats are refused |
+| Gemma 3 text on Metal (unified engine, ADR-013): sliding-window attention, sandwich norms, GeGLU; raw completion | ✅ experimental; logits match pinned llama.cpp Metal (max diff ≤ 0.022–0.026); chat template not yet recognized |
+| Dense Qwen3 on CPU: scalar f32 oracle and NEON Q8_0/F16 kernels, bounded weight streaming | ✅ experimental |
+| Formats executed | CPU: F32, F16, BF16, Q8_0, Q4_0, Q4_1. Metal: Q8_0, F16. K-quants and IQ formats are refused with a typed error |
 | GPU partial residency and streaming, MoE execution, compressed (Bonsai) execution | ⛔ Phases 2–3 |
 
 ## Architecture
@@ -193,11 +179,11 @@ InferenceBackend interface (ADR-005)
    └── reference-test   synthetic pipeline engine (disclosed)
 ```
 
-- **Supervisor** (`crates/supervisor`): never computes tensors. It stays
+- **Supervisor** (`crates/supervisor`): never computes tensors; stays
   responsive when a worker fails and fabricates nothing.
 - **Planner** (`crates/planner`): prices memory and latency from artifact
-  metadata and device measurements. Projections stay `estimated` until they
-  are measured.
+  metadata and device measurements; projections stay `estimated` until
+  they are measured.
 - **Store** (`crates/store`): keeps data under
   `~/Library/Application Support/Tuckmill` (override with
   `TUCKMILL_DATA_DIR`), installs atomically and never deletes sources.
@@ -226,14 +212,20 @@ scripts/            build, test, demo, fetch-llama, bench-baseline
 
 ## Verification
 
-`scripts/test.sh` is the gate (507 tests at this revision). It runs
-formatting, `clippy -D warnings` and the full suite:
+`scripts/test.sh` is the gate (511 tests at this revision) and the same
+gate CI runs on a macOS runner. It covers formatting,
+`clippy -D warnings`, and:
+
 - adversarial GGUF and Safetensors fixtures;
 - planner math, governor semantics and import fault injection;
 - worker protocol and HTTP/SSE;
 - CLI end-to-end runs with an isolated worker, crash injection and
   cancellation;
-- Metal kernels and engine blocks qualified against the CPU oracle.
+- Metal kernels and engine blocks qualified against the CPU oracle, with
+  bit-identity gates between chunk and per-token execution paths. Those
+  gates assert exact bits on physical Apple GPUs; a CI runner's
+  paravirtualized GPU compiles fast-math differently, so there the
+  recorded contract is the drift-bounded form with top-1 equality.
 
 GPU and isolated-worker tests are mandatory: a missing device or worker
 binary fails the gate instead of skipping. Real-weight comparisons against
@@ -242,11 +234,10 @@ toolchain that CI also uses.
 
 Comparisons follow the four-way identity rules in
 [benchmarks/README.md](benchmarks/README.md): identical artifacts, token
-IDs, numerical profiles and declared cache state. Nothing is claimed until
-the measurement is in the record.
+IDs, numerical profiles and declared cache state. Nothing is claimed
+until the measurement is in the record.
 
 ## License
 
-Provisional: open-source core (Apache-2.0). The final licensing decision and
-naming clearance are outstanding. Importing a model is not a license review;
-model weights carry their own licenses.
+Apache-2.0 (see [LICENSE](LICENSE)). Importing a model is not a license
+review: model weights carry their own licenses.
