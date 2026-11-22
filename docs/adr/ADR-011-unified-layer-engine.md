@@ -902,3 +902,27 @@ three passes each; full prefill ~330 ms):
   from `seq_t` and `window`), so a given position's reduction order is
   identical in chunked prefill and per-token decode - the bit-identity
   gates keep their exact-bit assertions unchanged.
+- **The shipped shape is llama.cpp's own split, and the acceptance
+  number is measured (2026-11-22).** Split-K serves n = 1 (decode);
+  n > 1 keeps the one-group-per-row kernel, so prefill cost and its
+  record are unchanged (the isolated n=128-at-full-slices case was
+  1686 us vs ~230 us - a bench prefill regression that this split
+  avoids entirely). Where the two kernels' reduction orders meet in a
+  comparison, the gates stay exact-bit; where they cross modes, they
+  are drift-registered per the metal-f16-act precedent (1e-2 x
+  max|logits|, top-1 equal, enforced on every GPU, drift printed:
+  5.96e-8 unit cross-kernel, <= 7.6e-4 gemma3 fixture, MTP state
+  token-identity exact). Acceptance, quiet machine, app closed, zero
+  swap, clean tree `118a711`
+  (`20261122T022842Z-…-gemma3-1b-splitk-quiet3`): decode
+  **74.13/74.21/74.22 tok/s** - the 65.0 ± 0.2 steady of every prior
+  run moved +14.2%, exceeding the ~71.5 projection from the -60%
+  in-engine attention cost - paired median **1.067** (0.977 / 1.197 /
+  1.067; >= 0.9 against llama.cpp's fastest round of the three). For
+  the first time on Gemma 3 the decode pair is at-or-ahead; prefill
+  unchanged at 324 vs 290 ms (paired 1.12x, ~89%, the >= 90% bar
+  still open and bounded at ~1.5% by the grouped ablation). Two
+  same-code runs under active-session load
+  (`…-splitk-quiet`, `…-splitk-quiet2`) are recorded as evidence of the
+  load's effect, not acceptance: both engines ~20-25% below quiet,
+  llama.cpp hit hardest, paired decode 1.033/1.031.

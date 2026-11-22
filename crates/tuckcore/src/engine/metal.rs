@@ -1299,8 +1299,9 @@ impl AttentionBlock {
             s.rope_dims as u32,
         )?;
         match self.kv {
-            // Sliding-window layers run the chunk kernels with n = 1 (the
-            // kernel prefill uses), with their window.
+            // Sliding-window decode goes through the chunk ABI (the only
+            // one that carries `window`); at n = 1 the native dispatch
+            // routes it to the split-K kernels (ADR-011 note 2026-11-22).
             KvCache::F16 if s.window.is_some() => {
                 ctx.qwen35_kv_store_chunk(
                     &self.k,
@@ -1356,8 +1357,11 @@ impl AttentionBlock {
                     1.0 / (s.head_dim as f32).sqrt(),
                 )?;
             }
-            // f32 KV runs the chunk kernels with n = 1, so decode and
-            // chunked prefill share one compiled kernel (bit-identical).
+            // f32 KV decode runs the chunk ABI with n = 1; the dispatch
+            // routes it to the split-K kernels where an f32 instance
+            // exists (the Qwen geometries), and to the one-group-per-row
+            // kernel otherwise (e.g. the 256x4 f32 Gemma geometry, which
+            // has no f32 split-K instance — correct, at the old cost).
             KvCache::F32 => {
                 ctx.qwen35_kv_store_chunk(
                     &self.k,
