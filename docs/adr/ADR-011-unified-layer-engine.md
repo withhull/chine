@@ -1020,3 +1020,29 @@ three passes each; full prefill ~330 ms):
   while the mma runs on current) where our 64x32 tile re-reads W per
   token-tile behind barriers - kernel work with the register-pressure
   trap recorded below, to be measured isolated first.
+
+- **The pipelining experiment, measured and reverted (2026-11-22).** The
+  K-loop software pipeline shipped at `22f8c90` on isolated evidence:
+  same-window, -7-11% at every deficit shape (FFN down 3717.4 ->
+  3353.7 us at 512 rows, 1.199x -> 1.082x vs llama; k/v 1.062x; q
+  1.091x; o 1.083x), both reference gates green, no occupancy-visible
+  regression at the 0.8B shapes. The quiet acceptance run
+  (`20261122T035251Z-…-gemma3-1b-pipe-quiet`, zero swap, clean tree)
+  **reversed it**: warm TTFT 319/317/317 vs the pre-pipeline kernels'
+  303/301/301 — **+16 ms, paired 1.10x vs 1.04x** — with the llama.cpp
+  control reproducing its previous run exactly (289/290/289), so the
+  regression is the kernel change alone. Decode unchanged (74.06).
+  Reverted at `52e269c`; the standing acceptance records stay the pb512
+  run (TTFT 301 ms, prefill ~96%; decode 74.09). Mechanism, recorded
+  as hypothesis only: in the model the GEMMs interleave with
+  attention/norm kernels in one grouped command buffer, where the
+  prefetch registers held live across the mma section cost issue
+  slots or occupancy; the isolated 16-identical-dispatch harness -
+  on a loaded machine - rewards the same pattern. **Rule recorded:
+  this is the third isolated/ungrouped projection to fail at the
+  request level (fused norms, edge stage, now this) and the first to
+  actively regress; kernel changes do not ship on isolated evidence
+  alone - they need an in-model interleaved A/B (as the batch-512
+  change had) or the quiet acceptance run before the commit counts
+  as accepted.** The at-512 deficit (~4%) stays open with the llama
+  `bci/bco` deeper-pipeline variants as the recorded follow-up.
