@@ -1072,3 +1072,32 @@ three passes each; full prefill ~330 ms):
   identically (max ~9.9, llama's own CPU-vs-Metal divergence) — so
   no registered CPU-reference tolerance is claimed for Q4-dominant
   artifacts; the typed refusal stands, exploratory runs only.
+
+- **Q4_0 acceptance run and the decode gap's location (2026-11-22).**
+  Quiet machine (battery, zero swap, all 3 ABBA rounds valid, clean
+  tree `6ac210d`), gemma-3-1b-it Q4_0, 512/256, f16 KV, ignore-EOS:
+  warm TTFT 312/312/313 vs 286/286/287 ms — **paired 1.09x, prefill
+  ~92%, the >= 90% prefill bar met on the first Q4 artifact**; warm
+  decode 86.21/86.39/86.43 (steady +/- 0.11) vs 102.11/102.53/102.15
+  — **paired 0.844 (0.843-0.846), the >= 0.90 decode bar NOT met**.
+  Footprint peak 938 MiB resident vs llama's 199 MiB mmap. Both
+  engines decode the halved weights faster than their Q8_0 standing
+  (ours 74.2 -> 86.4; llama ~75 -> 102), but llama gains 1.36x where
+  we gain 1.16x. The gap's location, measured with the CHINE_PROFILE
+  gemv harness (same window as the Q8_0 parity record): our Q4_0
+  gemv sustains **39.8 GB/s** on the 6912x1152 FFN shape where our
+  Q8_0 gemv sustains 55.7 GB/s (152 us) — the nibble unpack makes
+  the kernel ALU-bound on half the bytes, so the byte-traffic gain
+  does not arrive; the model-level arithmetic closes: 388 MB of
+  per-token weight traffic at 39.8 GB/s is ~9.8 ms + 1.12 ms
+  split-K attention + ~0.7 ms norms/rope/dispatch = the observed
+  11.6 ms/token. llama's same-artifact decode (measured 102.15
+  tok/s = 9.8 ms/token over the same 388 MB) implies its Q4 dot
+  stack sustains ~50 GB/s effective (derived, not isolated-
+  measured). The recorded lever, and an intra-family hint from the
+  same table: our own Q4_1 gemv sustains **59.9 GB/s** at the same
+  shape — the 24-byte Q4_1 block aligns to 8-byte loads while the
+  18-byte Q4_0 block forces scalar byte access; a vectorized/
+  regrouped Q4_0 load strategy is the concrete follow-up (kernel
+  session, same rules: no ship on isolated evidence, quiet
+  acceptance decides).

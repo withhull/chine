@@ -1581,6 +1581,67 @@ fn q8_0_gemv_timing_when_requested() {
 }
 
 #[test]
+fn q4_gemv_timing_when_requested() {
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
+        return;
+    }
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // Same harness and decode-shape list as the Q8_0 gate; block bytes 18
+    // (Q4_0) and 24 (Q4_1). Measurement only (ADR-011 engine note).
+    let shapes = vec![
+        (6912usize, 1152usize),
+        (1152, 6912),
+        (1024, 1152),
+        (1152, 1024),
+        (256, 1152),
+        (262144, 1152),
+        (3584, 1024),
+        (1024, 3584),
+    ];
+    for (rows, cols) in shapes {
+        for (label, block_bytes, upload) in [("q4_0", 18usize, 1u32), ("q4_1", 24, 3)] {
+            let n = rows * cols / 32 * block_bytes;
+            let w = vec![0u8; n];
+            let x = boundary_input(cols, 5);
+            let wb = ctx.buffer(n, true).unwrap();
+            wb.upload(0, &w).unwrap();
+            let xb = ctx.buffer(cols * 4, true).unwrap();
+            xb.upload(0, &f32_bytes(&x)).unwrap();
+            let yb = ctx.buffer(rows * 4, true).unwrap();
+            let call = |wb: &_, xb: &_, yb: &_| match upload {
+                1 => ctx.q4_0_gemv(wb, xb, yb, rows as u32, cols as u32),
+                _ => ctx.q4_1_gemv(wb, xb, yb, rows as u32, cols as u32),
+            };
+            let group = || {
+                ctx.begin_group().unwrap();
+                for _ in 0..16 {
+                    call(&wb, &xb, &yb).unwrap();
+                }
+                ctx.end_group().unwrap();
+                ctx.fence().unwrap();
+            };
+            for _ in 0..3 {
+                group();
+            }
+            let iters = 50;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                group();
+            }
+            let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
+            let wbytes = (rows * cols / 32 * block_bytes) as f64;
+            eprintln!(
+                "ours {label} gemv {rows:>6}x{cols:<5}: {per:>8.1} us  {gbw:>6.1} GB/s on weights",
+                gbw = wbytes / per / 1e9
+            );
+        }
+    }
+}
+
+#[test]
 fn split_k_attention_matches_the_cpu_reference() {
     let Some(ctx) = metal_context() else {
         return;
