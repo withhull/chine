@@ -926,3 +926,64 @@ three passes each; full prefill ~330 ms):
   (`…-splitk-quiet`, `…-splitk-quiet2`) are recorded as evidence of the
   load's effect, not acceptance: both engines ~20-25% below quiet,
   llama.cpp hit hardest, paired decode 1.033/1.031.
+
+- **Rust-engine landscape check (2026-11-22): candle and mistral.rs,
+  from their own sources.** What the two big Rust projects are, and
+  what the comparison means for this repo's positioning.
+- **candle** (huggingface, 21.4k stars): a general minimalist ML
+  *framework* — PyTorch-like tensors, training, a broad model zoo
+  (vision/audio/diffusion/LLM), safetensors/npz/pytorch/ggml formats,
+  CPU/CUDA/WASM backends plus `candle-metal-kernels`. Not a product:
+  no server, scheduler, admission, or exactness layer. Its Apple
+  Silicon quantized-inference story validates this repo's ADR-010:
+  candle's Metal decode was far behind llama.cpp until PR #2615
+  (2025-07) adopted ggml's matrix-matrix kernel designs — "within 10%
+  of llama.cpp" on prefill by their own report, a user-measured 100.6
+  vs 82.8 tok/s avg on M3 Max after the PR. Their speed on this
+  hardware came from sourcing kernels from the reference — the exact
+  decision ADR-010 records here — and their recent Metal work (fused
+  MoE kernels, encoder reuse, PR #3444 2026-04) mirrors our grouped
+  encoder. Nothing here changes our kernel plan; it is external
+  confirmation of it.
+- **mistral.rs** (7.9k stars, built on candle): the full *product*
+  surface — OpenAI + Anthropic APIs, web UI, Python/Rust SDKs, 45+
+  architectures, multimodal (vision/video/audio/speech/image-gen/
+  embeddings), GGUF + ISQ/UQFF + GPTQ/AWQ/HQQ/FP8/BNB, LoRA/X-LoRA,
+  AnyMoE, per-layer quantization topology, MCP/agents/tool-calling,
+  multi-GPU/distributed, continuous batching, and PagedAttention
+  (v0.9.5: **default on supported Metal models** with automatic
+  memory planning). On CUDA/GB10 their UQFF-vs-GGUF numbers lead
+  llama.cpp prefill 1.86x (Gemma 4 E4B) — but those artifacts are not
+  identity-matched (different formats claimed comparable; our
+  four-way identity rules would not allow that pairing). On **Apple
+  Silicon their own tracking issue #903** (open 2024-11, updated
+  2026-04) records mistral.rs behind llama.cpp at short/medium
+  contexts (Llama-3.2-3B: TG 63.3 vs 75.3, PP 434 vs 533; 8B-class:
+  TG 37.4 vs 38.9) and **ahead only at long-context decode** (TG5000
+  35.4 vs 33.1) after adopting MLX-derived KV optimizations
+  (#933 from mlx#1597). The third-party SiliconBench audit
+  (2026-08, unified-memory desktops) shows mistral.rs's Metal
+  concurrency fragile: c=1 fine, c=8 partial (40/100 requests),
+  c=16 crashed on chat; several configs never start.
+- **What that means here.** Where they are ahead of us: model breadth
+  (45+ vs our 3 families), multimodality, quantization breadth
+  (K-quants, FP8 — we ship Q8_0 + the ABI for Q4_0/Q4_1/Q8_0 only),
+  LoRA, agents/MCP, multi-GPU, and — most relevant to our tier —
+  **paged KV + long-context decode** (their TG5000 lead is the
+  measured proof that KV paging pays at long contexts; our KV is a
+  capacity-fixed resident plane) and **continuous batching** (we run
+  one generation per model with a queue; our concurrency story is
+  unmeasured). Where we hold measured ground none of them claims:
+  identity-matched parity-or-ahead of llama.cpp on 1-2B decode at the
+  8 GB tier (74.2 vs 69.6 medians, 2026-11-22), bit-exactness
+  discipline (token-identical MTP, bit-identical prefix cache,
+  reference-identity gates), typed admission before allocation, the
+  macOS memory-pressure governor, and the honesty contract itself —
+  no claims ledger or certified/estimated labels exist in either
+  project. Two design imports to consider when the time comes, now
+  recorded with sources: mistral.rs's MLX-derived long-context KV
+  optimization (for our >2048-context decode) and v0.9.5's
+  paged-KV-with-automatic-memory-planning (the ADR-006 constrained
+  tier's streaming strategy); mistral.rs's ISQ/UQFF/AnyMoE features
+  are out of contract here (requantization and model mutation are
+  refused by ADR-001, never traded for speed).
