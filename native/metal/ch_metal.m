@@ -91,6 +91,7 @@ struct ch_metal_ctx {
     id<MTLComputePipelineState> pso_f32f16;
     id<MTLComputePipelineState> pso_q8gemv;
     id<MTLComputePipelineState> pso_q4gemv;
+    id<MTLComputePipelineState> pso_q4gemv_one;
     id<MTLComputePipelineState> pso_q41gemv;
     id<MTLComputePipelineState> pso_f16gemv;
     id<MTLComputePipelineState> pso_q8row;
@@ -511,6 +512,7 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_f32f16 = ch_pipeline(ctx, @"ch_cast_f32_f16", &error);
         ctx->pso_q8gemv = ch_pipeline(ctx, @"ch_q8_0_gemv", &error);
         ctx->pso_q4gemv = ch_pipeline(ctx, @"ch_q4_0_gemv", &error);
+        ctx->pso_q4gemv_one = ch_pipeline(ctx, @"ch_q4_0_gemv_one", &error);
         ctx->pso_q41gemv = ch_pipeline(ctx, @"ch_q4_1_gemv", &error);
         ctx->pso_f16gemv = ch_pipeline(ctx, @"ch_f16_gemv", &error);
         ctx->pso_q8row = ch_pipeline(ctx, @"ch_q8_0_row_f32", &error);
@@ -568,7 +570,7 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_q35_attention_gqa_f32_128x4 == nil ||
             ctx->pso_q35_attention_chunk_f32 == nil || ctx->pso_q35_kv_store_chunk_f32 == nil ||
             ctx->pso_f16f32 == nil ||
-            ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_q4gemv == nil || ctx->pso_q41gemv == nil || ctx->pso_f16gemv == nil ||
+            ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_q4gemv == nil || ctx->pso_q4gemv_one == nil || ctx->pso_q41gemv == nil || ctx->pso_f16gemv == nil ||
             ctx->pso_q8row == nil || ctx->pso_q4row == nil || ctx->pso_q41row == nil || ctx->pso_rmsnorm == nil || ctx->pso_norm_add == nil ||
             ctx->pso_qk_norm == nil || ctx->pso_silu == nil ||
             ctx->pso_f16row == nil || ctx->pso_q8gemm == nil || ctx->pso_q4gemm == nil || ctx->pso_q41gemm == nil || ctx->pso_q8gemm_mma == nil || ctx->pso_q4gemm_mma == nil || ctx->pso_q41gemm_mma == nil ||
@@ -647,6 +649,7 @@ void ch_metal_destroy(ch_metal_ctx *ctx) {
         [ctx->pso_f16gemv release];
         [ctx->pso_q8gemv release];
         [ctx->pso_q4gemv release];
+        [ctx->pso_q4gemv_one release];
         [ctx->pso_q41gemv release];
         [ctx->pso_f32f16 release];
         [ctx->pso_f16f32 release];
@@ -1700,7 +1703,24 @@ int ch_metal_q4_0_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
         if (enc == nil) {
             return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q4_0_gemv: no encoder");
         }
-        [enc setComputePipelineState:ctx->pso_q4gemv];
+        /* Shape-adaptive routing (2026-11-22, measured in-model on the
+         * gemma3 Q4_0 decode): low-row shapes are parallelism-bound
+         * (the multi-row form's rows/8 groups cannot hide DRAM
+         * latency) and win on the one-row-per-simdgroup kernel
+         * (down 1152x6912 1.70-1.78 -> 1.35-1.65 ms/token, o
+         * 1152x1024 0.37-0.49 -> 0.31); high-row shapes already
+         * saturate DRAM with rows/8 groups and the x-load
+         * amortization across the 4 rows wins (gate/up 6912x1152
+         * 4.75-5.74 vs the one-row form's 7.3-8.1). The measured
+         * shapes bracket the threshold: 1152 -> one-row, 6912 ->
+         * multi-row. */
+        const uint32_t one_min = 2048u;
+        const NSUInteger rows_per_tg = (rows >= one_min) ? 8u : 2u;
+        if (rows >= one_min) {
+            [enc setComputePipelineState:ctx->pso_q4gemv];
+        } else {
+            [enc setComputePipelineState:ctx->pso_q4gemv_one];
+        }
         [enc setBuffer:w->buffer offset:0 atIndex:0];
         [enc setBuffer:x->buffer offset:0 atIndex:1];
         [enc setBuffer:y->buffer offset:0 atIndex:2];
@@ -1714,7 +1734,6 @@ int ch_metal_q4_0_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
             return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"q4_0_gemv: device simd width %lu != 32", (unsigned long)lanes]);
         }
-        const NSUInteger rows_per_tg = 8;
         NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];

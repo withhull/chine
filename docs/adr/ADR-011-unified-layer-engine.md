@@ -1226,3 +1226,36 @@ three passes each; full prefill ~330 ms):
   order (the cross-mode bit-gate risk chain, rejected twice this
   arc on the instrument) or a lever outside the kernel set; no
   further in-place margin work is available at these shapes.
+
+- **The Q4_0 gemv reduction-order redesign, measured and shipped
+  shape-adaptive (2026-11-22).** The recorded boundary named this
+  work; taking it measured two things straight. First, the
+  recorded "cross-mode bit-gate risk chain" was overcautious: **no
+  gate pins Q4_0 gemv bits** — the batch-1-vs-gemv bit gate is
+  Q8_0-only, the engine fixtures route F16/Q8_0, and every Q4_0 bar
+  is tolerance-based (the 1e-4 CPU reference, the llama.cpp Metal
+  envelope). The earlier "rejected twice on the instrument" were
+  performance rejections (simd_shuffle, pair-step), not gate
+  blockers. Second, the llama.cpp kernel_mul_mat_vec structure —
+  one row per SIMD group, lanes carrying whole 32-value blocks
+  strided by 32 — measured **split by shape**: on the low-row decode
+  shapes it wins (down 1152x6912 1.70-1.78 -> **1.35-1.65
+  ms/token**, o 1152x1024 0.37-0.49 -> 0.31) because the multi-row
+  form's rows/8 groups (144 for down) cannot hide DRAM latency; on
+  the high-row shapes it loses badly (gate/up 6912x1152 4.75-5.74
+  -> 7.3-8.1) because 864 groups already saturate DRAM and the
+  one-row form throws away the x-load amortization across rows.
+  **The ship is both kernels with wrapper routing** (rows >= 2048
+  multi-row, below one-row; the measured shapes bracket the
+  threshold), no Rust API change — the routing lives in the native
+  wrapper. Requalified: all 12 gemv gates green across both routes
+  (the reduction reorder lands ~1e-6 relative, well inside the
+  1e-4 CPU bound); the real-text Metal gate on the Q4_0 pin
+  unchanged in envelope (max |d| 0.0149, top-1 equal, windowed
+  decode 0.0102); full gate + the 9 pinned core gates + 25 e2e
+  gates green. In-model net: ~-0.3 ms/token concentrated on the
+  stable down instrument — honest size, and unlike the norm-fusion
+  projection its mechanism is measured (144 -> 576 groups), not
+  assumed. Quiet projection: 91.7 -> ~94 tok/s, fast-mode pairs
+  ~0.92 — the quiet acceptance run decides, per the rule the norm
+  fusion taught: loaded in-model walls cannot resolve <2% effects.

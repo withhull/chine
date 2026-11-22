@@ -53,14 +53,14 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Qwen3-1.7B (4 GiB budget) | **0.990 (0.989–0.991)** — the tightest paired band recorded on any model (both engines ± 0.05 tok/s) | **95% (588 vs 559 ms, paired 1.05×)** — the dense family one size up, zero engine changes; both Phase 1 bars met |
 | Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
 | Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
-| Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **at-the-bar vs llama's fast mode** (clean pairs 0.891–0.902 across three quiet runs, ours steady 91.3–91.8); medians 0.902/1.041 by llama's round mode (its recorded bimodality — never a lead). The vectorized gemv-load fix moved 86.4 → 91.7 (+6.2%); the head is measured at the DRAM ceiling (93.6% of spec — closed) and the norm stack at its floor (fusion tried, reverted by the quiet run) | **92% (311 vs 286 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
+| Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **at-the-bar vs llama's fast mode** (clean pairs 0.891–0.902 across three quiet runs, ours steady 91.3–91.8); medians by llama's round mode (its recorded bimodality — never a lead). The vectorized gemv loads moved 86.4 → 91.7 (+6.2%); the head is measured at the DRAM ceiling (closed) and the norm stack at its floor; the **shape-adaptive gemv redesign** (one-row-per-simdgroup below 2048 rows, multi-row above — down −20% in-model) is shipped, acceptance pending (~94 projected) | **92% (311 vs 286 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Decode
 meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, on
 Gemma 3 (worst pair 0.977), and on the Q4_0 artifact at-the-bar
 (clean fast-mode pairs 0.891–0.902, ours steady; llama's slow-mode
 rounds pair above 1.0 — its recorded bimodality, never a lead; the
-margin levers are measured to their floor). Prefill is
+shape-adaptive gemv redesign is shipped with its acceptance pending). Prefill is
 met and reproduced on the 0.8B, met at 98% on the 2B (reproduction
 pending), and met at 96% on Gemma 3 and 92% on its Q4_0 pin —
 llama.cpp's own first-token spread (0.269–0.300 s on the

@@ -2187,6 +2187,12 @@ ch_qwen35_gdn_chunk_reg<128u, CH_GDN_LANES>(CH_GDN_REG_ARGS);
  * Every structure mirrors the Q8_0 counterpart exactly — only the
  * dequant changes. */
 
+/* Multi-row slice form (4 rows per group, lanes covering 8-value
+ * slices, x amortized across the rows): serves high-row shapes where
+ * the group count alone saturates DRAM and the x-load amortization
+ * wins (measured: 6912x1152 gate/up 4.75-5.74 ms/token across machine
+ * states vs the one-row form's 7.3-8.1). Selected by the wrapper for
+ * rows >= 2048. */
 kernel void ch_q4_0_gemv(device const uchar *w [[buffer(0)]],
                           device const float *x [[buffer(1)]],
                           device float *y [[buffer(2)]],
@@ -2254,6 +2260,77 @@ kernel void ch_q4_0_gemv(device const uchar *w [[buffer(0)]],
         if (lane == 0u && row < rows) {
             y[row] = total;
         }
+    }
+}
+
+kernel void ch_q4_0_gemv_one(device const uchar *w [[buffer(0)]],
+                          device const float *x [[buffer(1)]],
+                          device float *y [[buffer(2)]],
+                          constant uint &rows [[buffer(3)]],
+                          constant uint &cols [[buffer(4)]],
+                          uint tg [[threadgroup_position_in_grid]],
+                          uint sg [[simdgroup_index_in_threadgroup]],
+                          uint lane [[thread_index_in_simdgroup]]) {
+    /* One row per SIMD group (the llama.cpp kernel_mul_mat_vec
+     * structure): each lane carries whole 32-value blocks strided by
+     * 32, so the 36-block gate/up loop is a single pass for 32 of 36
+     * lanes and a row is one load stream plus one simd_sum. Selected
+     * by the wrapper for rows < CH_Q4_GEMV_ONE_MIN: on the low-row
+     * decode shapes the multi-row form's group count (rows/8) could
+     * not hide DRAM latency and this form wins (measured in-model,
+     * per token: down 1152x6912 1.70-1.78 -> 1.35-1.65 ms, o
+     * 1152x1024 0.37-0.49 -> 0.31); on high-row shapes it loses to
+     * the x-amortization (gate/up 6912x1152 4.75-5.74 vs 7.3-8.1),
+     * so both kernels stay and the wrapper routes. The per-row lane
+     * partials differ from the slice form's, so results move within
+     * the registered CPU-reference tolerance; no bit-gate pins this
+     * kernel (the Q4_0 family is tolerance-qualified against the
+     * scalar reference and, on real artifacts, against llama.cpp
+     * Metal envelopes). */
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)blocks * 18u;
+    const uint row = tg * CH_Q8_SG + sg;
+    if (row >= rows) {
+        return;
+    }
+    const device uchar *base = w + (size_t)row * row_bytes;
+    float acc = 0.0f;
+    for (uint b = lane; b < blocks; b += 32u) {
+        const device uchar *blk = base + (size_t)b * 18u;
+        const float d = (float)(*(const device half *)blk);
+        /* 16 data bytes as four packed 4-byte loads (alignment 1, so
+         * the 18-byte block stride needs no special case); nibble math
+         * on uchar vectors (unsigned, so >> 4 is the logical shift the
+         * scalar form's int promotion gave). Low plane = values
+         * 0..15, high plane = 16..31. */
+        const device packed_uchar4 *qv =
+            (const device packed_uchar4 *)(blk + 2u);
+        const uchar4 c0 = uchar4(qv[0]);
+        const uchar4 c1 = uchar4(qv[1]);
+        const uchar4 c2 = uchar4(qv[2]);
+        const uchar4 c3 = uchar4(qv[3]);
+        const device packed_float4 *xv =
+            (const device packed_float4 *)(x + (size_t)b * 32u);
+        const float4 x0 = float4(xv[0]);
+        const float4 x1 = float4(xv[1]);
+        const float4 x2 = float4(xv[2]);
+        const float4 x3 = float4(xv[3]);
+        const float4 x4 = float4(xv[4]);
+        const float4 x5 = float4(xv[5]);
+        const float4 x6 = float4(xv[6]);
+        const float4 x7 = float4(xv[7]);
+        acc += d * (dot(float4(c0 & (uchar4)0x0fu) - 8.0f, x0)
+                  + dot(float4(c1 & (uchar4)0x0fu) - 8.0f, x1)
+                  + dot(float4(c2 & (uchar4)0x0fu) - 8.0f, x2)
+                  + dot(float4(c3 & (uchar4)0x0fu) - 8.0f, x3)
+                  + dot(float4(c0 >> 4) - 8.0f, x4)
+                  + dot(float4(c1 >> 4) - 8.0f, x5)
+                  + dot(float4(c2 >> 4) - 8.0f, x6)
+                  + dot(float4(c3 >> 4) - 8.0f, x7));
+    }
+    const float total = simd_sum(acc);
+    if (lane == 0u) {
+        y[row] = total;
     }
 }
 
