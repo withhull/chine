@@ -1510,6 +1510,142 @@ fn q8_0_gemm_batch_timing_when_requested() {
 }
 
 #[test]
+fn q8_0_gemv_timing_when_requested() {
+    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+        return;
+    }
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // `TUCKMILL_GEMV_SHAPES=rowsxcols,...` overrides the Gemma-decode
+    // default list. Per-dispatch wall over 16 serial dispatches; the
+    // printed number is the achieved DRAM-equivalent bandwidth on the
+    // weight bytes (measurement only; ADR-011 engine note records runs).
+    let shapes = std::env::var("TUCKMILL_GEMV_SHAPES")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| {
+                    let (r, c) = p.split_once('x').expect("rowsxcols");
+                    (
+                        r.trim().parse::<usize>().expect("rows"),
+                        c.trim().parse::<usize>().expect("cols"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            vec![
+                (6912usize, 1152usize),
+                (1152, 6912),
+                (1024, 1152),
+                (1152, 1024),
+                (256, 1152),
+                (262144, 1152),
+                (3584, 1024),
+                (1024, 3584),
+            ]
+        });
+    for (rows, cols) in shapes {
+        let w = boundary_weights(rows, cols, 3);
+        let x = boundary_input(cols, 5);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        wb.upload(0, &w).unwrap();
+        let xb = ctx.buffer(cols * 4, true).unwrap();
+        xb.upload(0, &f32_bytes(&x)).unwrap();
+        let yb = ctx.buffer(rows * 4, true).unwrap();
+        let group = || {
+            ctx.begin_group().unwrap();
+            for _ in 0..16 {
+                ctx.q8_0_gemv(&wb, &xb, &yb, rows as u32, cols as u32)
+                    .unwrap();
+            }
+            ctx.end_group().unwrap();
+            ctx.fence().unwrap();
+        };
+        for _ in 0..3 {
+            group();
+        }
+        let iters = 50;
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            group();
+        }
+        let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
+        let wbytes = (rows * cols / 32 * 34) as f64;
+        eprintln!(
+            "ours gemv {rows:>6}x{cols:<5}: {per:>8.1} us  {gbw:>6.1} GB/s on weights",
+            gbw = wbytes / per / 1e9
+        );
+    }
+}
+
+#[test]
+fn attention_decode_timing_when_requested() {
+    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+        return;
+    }
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // Gemma 3 1B decode geometry: 4 heads, 1 KV head, head_dim 256,
+    // f16 KV, cap 1024. One decode query at pos 530 with the sliding
+    // window (512) and full causal, plus the prefill-chunk call for
+    // reference.
+    let heads = 4u32;
+    let kv_heads = 1u32;
+    let hd = 256u32;
+    let cap = 1024u32;
+    let group = heads / kv_heads;
+    let scale = 1.0f32 / (hd as f32).sqrt();
+    let qb = (heads * hd * 4) as usize;
+    let plane = (kv_heads * cap * hd * 2) as usize;
+    let q = ctx.buffer(qb, true).unwrap();
+    let kc = ctx.buffer(plane, true).unwrap();
+    let vc = ctx.buffer(plane, true).unwrap();
+    let out = ctx.buffer(qb, true).unwrap();
+    let scratch = ctx.buffer((heads * cap * 4) as usize, true).unwrap();
+    let data = f32_bytes(&vec![0.25f32; (heads * hd) as usize]);
+    q.upload(0, &data).unwrap();
+    let kv16 = vec![0u8; plane];
+    kc.upload(0, &kv16).unwrap();
+    vc.upload(0, &kv16).unwrap();
+    for (pos, window, n, label) in [
+        (530u32, 512u32, 1u32, "decode windowed"),
+        (530, 0, 1, "decode full   "),
+        (530, 512, 128, "chunk n=128  "),
+    ] {
+        let group_fn = || {
+            ctx.begin_group().unwrap();
+            for _ in 0..16 {
+                ctx.qwen35_attention_chunk(
+                    &q, &kc, &vc, &out, &scratch, heads, pos, cap, hd, group, scale, n, window,
+                    false,
+                )
+                .unwrap();
+            }
+            ctx.end_group().unwrap();
+            ctx.fence().unwrap();
+        };
+        for _ in 0..3 {
+            group_fn();
+        }
+        let iters = 50;
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            group_fn();
+        }
+        let per = t0.elapsed().as_secs_f64() / (iters * 16) as f64;
+        eprintln!(
+            "attention {label} (pos {pos}, w {window}): {us:8.1} us/call",
+            us = per * 1e6
+        );
+    }
+}
+
+#[test]
 fn q8_0_gemm_mma_matches_the_cpu_reference_within_tolerance() {
     let Some(ctx) = metal_context() else {
         return;

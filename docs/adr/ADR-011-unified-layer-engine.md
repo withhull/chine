@@ -820,3 +820,53 @@ three passes each; full prefill ~330 ms):
   mode reaches ~76 tok/s (76 -> ~81 GB/s effective on a 100 GB/s part);
   profiling and closing that per-row GEMV gap at the kernel level is the
   next concrete step, ahead of any prefill concurrency work.
+
+- **The Gemma decode-gap investigation (2026-11-22): the GEMV kernels are
+  at parity; the gap is the decode attention; two attempts, one anomaly,
+  honestly recorded.**
+- **Isolated GEMV parity (the question as posed).** A wall-timing harness
+  (TUCKMILL_PROFILE=1, `q8_0_gemv_timing_when_requested`) measured our
+  per-row Q8_0 GEMV against pinned llama.cpp `mul_mv` at the Gemma decode
+  shapes, same window: 6912x1152 152 vs 156 us, 1152x6912 132 vs 135,
+  1024x1152 33.5 vs 28.8, 256x1152 23.6 vs 22.9, head 262144x1152 4445 vs
+  4554, and the 0.8B shapes likewise — **0.98-1.03x, parity**: the decode
+  GEMV is not the 65-vs-76 gap.
+- **The gap is the decode attention.** The ungrouped decode profile:
+  `qwen35_attention_f16_chunk` 2.77-2.89 ms/token (26 calls, ~107 us per
+  layer call) — one 128-thread group per (KV head, row) pulling ~5.4 GB/s
+  on the KV range (per-thread whole-key loads, no cross-key latency
+  hiding). A coalesced single-group rewrite measured worse (135 us: one
+  key in flight); a split-K design (16 slice groups + merge kernel)
+  measured its partial at 37.5 us/call and, after three real bugs were
+  found and fixed by new CPU gates (a dropped small-head_dim guard, a
+  per-thread partials fold, a stale head-grid merge), passed an
+  11-geometry CPU reference at <= 1.5e-7 and cut the in-engine decode
+  attention to 1.12-1.16 ms/token. It was **not shipped**: five
+  cross-mode bit-identity gates fail with it, and one (the gemma3
+  fixture) diverges by 2.67 logits in a way not reproduced at the op
+  level (the exact fixture geometry passes the unit gate at 1.2e-7) —
+  unresolved after extensive bisection. Pulled rather than shipped
+  unexplained.
+- **The anomaly that stopped the simpler fix.** While profiling, the
+  attention/rope chunk dispatches were found to overdispatch 128x their
+  apparent mapping (`kv_heads x 128` / `heads x 128` threadgroups where
+  the kernels read head = tg.x), and bounds-sentinel tests proved the
+  excess groups write out of bounds. The "obvious" grid correction
+  (one group per head) was attempted — and **breaks the kernels'
+  outputs**: the old GQA attention at the corrected grid is 0.56 off the
+  CPU reference, while the same kernel at the historical x128 grid
+  matches it at 6e-8 (deterministic across runs; the engine oracle gate
+  reproduces this: green at x128, Layer(3) off by 7.6e-3 at the
+  corrected grid). The overdispatched groups are load-bearing in a way
+  static analysis of the kernel source does not explain — recorded as
+  an open anomaly. Consequence: the grid is the kernel's de-facto
+  contract; any attention rewrite must treat x128 as the baseline and
+  requalify against it. The sentinel bounds gate was removed with its
+  disproven premise.
+- **What shipped from this investigation:** the GEMV wall-timing harness
+  (the parity record above), the decode-attention timing harness, and
+  this diagnosis. The recorded next lever for the 65-vs-76 gap is a
+  decode-attention kernel that qualifies against the x128 baseline —
+  the split-K work here is the measured starting point (37.5 us partial,
+  three found-and-fixed bugs, and the unresolved model-level divergence
+  to chase).
