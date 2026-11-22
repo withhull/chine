@@ -729,3 +729,24 @@ three passes each; full prefill ~330 ms):
   - Qualification: metal suite 32/32 (two new gates), engine suites
     19/19 on the real 0.8B and 2B, the Gemma real-text Metal gate
     unchanged (max 0.0256, top-1 equal), full gate 510 tests.
+
+- **Acceptance record for the fused norms (quiet battery run, clean tree
+  `6abf2a8`, all rounds valid, zero swap,
+  `…-gemma3-1b-fusednorm-quiet`).** Warm TTFT 326/326/325 ms —
+  **identical to the run before the fusion** (paired 1.13x, prefill
+  ~88.5%; pairs 1.128/1.128/1.126). Paired decode 0.862, TuckCore
+  steady 65.2-65.4, llama.cpp in its fast mode (75.7-76.0). The bar is
+  not crossed, and the projection (~6-7 ms off the TTFT) was wrong.
+  **Recorded plainly: this is the second projection from ungrouped
+  profile deltas to fail at the bench level.** Deltas measured in the
+  ungrouped profiling regime are dominated by per-dispatch overhead
+  (~25 us/op) that the grouped production encoder never pays; the
+  fused norms' real production saving is 208 fewer launches/encodes per
+  prefill (~1 ms), not the ungrouped stack's ~20 ms. The kernels are
+  kept — bit-identical, strictly less memory traffic per row, fewer
+  launches — but they are not the request-level lever. The remaining
+  ~11.5% TTFT gap (326 vs 289 ms) lives in the grouped regime's other
+  operators (chunk attention and GeGLU, each ~24 ms ungrouped) and
+  host dispatch. The recorded next step is a grouped-regime profile
+  before any further kernel work: no more projections from ungrouped
+  deltas.

@@ -59,10 +59,13 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   1.13×). Prefill is at **~88.5%** in the last recorded run, with two
   more cuts landed since: the fused post-block norm + residual add
   (bit-identical via an optnone call boundary; -40% per row-set at
-  1152-wide chunks) and the merged Q/K norms (one launch, bit-equal) —
-  the non-GEMM norm stack dropped from ~30 ms to ~10 ms in the
-  ungrouped profile. The next quiet bench run records whether the bar
-  is crossed; kernel arithmetic projects ~6-7 ms off the 326 ms TTFT.
+  1152-wide chunks) and the merged Q/K norms (one launch, bit-equal).
+  The acceptance run for them (paired 1.13×, ~88.5%) shows the bar is
+  **not crossed**: ungrouped-profile projections have failed twice —
+  the fused norms save only ~1 ms in the grouped production encoder.
+  The recorded next step is a grouped-regime profile of the remaining
+  gap (chunk attention, GeGLU, host dispatch) before further kernel
+  work.
 - **Qwen3.5-2B Q8_0** (four runs, 3 GiB budget; the fourth with the
   f16-operand GEMM profile): decode 38.4-39.8 vs 38.1-40.7 tok/s (paired
   0.956-1.030, at parity). Time to first token 0.623 s vs 0.587-0.588 s
