@@ -619,6 +619,105 @@ fn cpu_rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
 }
 
 #[test]
+fn grouped_profiling_attributes_per_operator() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    if !ctx.grouped_profiling_supported() {
+        eprintln!(
+            "skipping: this GPU does not expose dispatch-boundary counter sampling \
+             (grouped mode keeps the single 'group' label)"
+        );
+        return;
+    }
+    // The same operator sequence, ungrouped (per-op command buffers) and
+    // grouped (one shared command buffer, counter samples at dispatch
+    // boundaries). Every operator must appear with the same count in both
+    // regimes, and the grouped time must not exceed the ungrouped time:
+    // counter sampling measures the dispatch only, while ungrouped
+    // attribution includes the command-buffer overhead the earlier
+    // projections mistook for operator cost.
+    let rows = 128usize;
+    let cols = 1152usize;
+    let xb = ctx.buffer(rows * cols * 4, true).unwrap();
+    let resb = ctx.buffer(rows * cols * 4, true).unwrap();
+    let wb = ctx.buffer(cols * 4, true).unwrap();
+    let yb = ctx.buffer(rows * cols * 4, true).unwrap();
+    let xb2 = ctx.buffer(cols * 4, true).unwrap();
+    let yb2 = ctx.buffer(cols * 4, true).unwrap();
+    let data = f32_bytes(&vec![0.5f32; cols * 4]);
+    xb.upload(0, &data).unwrap();
+    resb.upload(0, &data).unwrap();
+    wb.upload(0, &data).unwrap();
+    xb2.upload(0, &data).unwrap();
+    let run = || {
+        ctx.rmsnorm(&xb, &wb, &yb, rows as u32, cols as u32, 1e-6)
+            .unwrap();
+        ctx.norm_add(&xb, &wb, &resb, &yb, rows as u32, cols as u32, 1e-6)
+            .unwrap();
+        ctx.f32_scale(&xb2, &yb2, 2.0, (cols * 4) as u32).unwrap();
+    };
+    let gather = |name: &str| -> std::collections::BTreeMap<String, (u64, u64)> {
+        ctx.set_profiling(true);
+        run();
+        if name == "grouped" {
+            ctx.begin_group().unwrap();
+            run();
+            ctx.end_group().unwrap();
+        }
+        ctx.fence().unwrap();
+        let snap = ctx.profile_snapshot();
+        ctx.set_profiling(false);
+        snap.into_iter()
+            .map(|(l, n, c)| (l, (n, c)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let ungrouped = gather("ungrouped");
+    let grouped = gather("grouped");
+    for label in ["rmsnorm", "norm_add", "scale"] {
+        let u = ungrouped
+            .get(label)
+            .unwrap_or_else(|| panic!("ungrouped {label}"));
+        let g = grouped
+            .get(label)
+            .unwrap_or_else(|| panic!("grouped {label}"));
+        assert_eq!(u.1, g.1, "{label}: dispatch counts");
+        assert!(
+            g.0 <= u.0,
+            "{label}: grouped {g0} ns exceeded ungrouped {u0} ns",
+            g0 = g.0,
+            u0 = u.0
+        );
+        assert!(
+            g.0 >= u.0 / 8,
+            "{label}: grouped {g0} ns implausibly below ungrouped {u0} ns",
+            g0 = g.0,
+            u0 = u.0
+        );
+        eprintln!(
+            "{label}: grouped {g0} ns vs ungrouped {u0} ns (x{runs})",
+            g0 = g.0,
+            u0 = u.0,
+            runs = g.1
+        );
+    }
+    // The grouped command buffer's own total must appear as the "group"
+    // label (folded from GPU timestamps by the completion handler).
+    let g_total = grouped.get("group").map(|(n, _)| *n);
+    if let Some(total) = g_total {
+        let ops: u64 = ["rmsnorm", "norm_add", "scale"]
+            .iter()
+            .filter_map(|l| grouped.get(*l).map(|(n, _)| *n))
+            .sum();
+        assert!(
+            ops <= total,
+            "grouped per-op sum {ops} exceeded the command buffer total {total}"
+        );
+        eprintln!("group total {total} ns, per-op sum {ops} ns");
+    }
+}
+
+#[test]
 fn norm_add_matches_the_sequential_pair() {
     let Some(ctx) = metal_context() else {
         return;

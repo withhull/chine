@@ -692,6 +692,7 @@ mod imp {
         ) -> c_int;
         pub fn tm_metal_gpu_nanos_total(ctx: *const TmMetalCtx) -> u64;
         pub fn tm_metal_profile_set(ctx: *mut TmMetalCtx, enabled: c_int) -> c_int;
+        pub fn tm_metal_counter_sampling_supported(ctx: *mut TmMetalCtx) -> c_int;
         pub fn tm_metal_profile_read(
             ctx: *mut TmMetalCtx,
             index: u32,
@@ -930,8 +931,13 @@ impl MetalContext {
     }
 
     /// Enable or disable per-operator GPU time attribution (profiling
-    /// only); either call clears the table. Grouped command buffers are
-    /// attributed to "group".
+    /// only); either call clears the table. Ungrouped dispatches are
+    /// attributed per operator from command-buffer GPU timestamps.
+    /// Grouped (shared command-buffer) dispatches are attributed per
+    /// operator from dispatch-boundary counter samples when
+    /// [`Self::grouped_profiling_supported`] is true — deltas between
+    /// consecutive samples fold at the next fence; without counter
+    /// sampling the whole group lands in the "group" label.
     pub fn set_profiling(&self, enabled: bool) {
         #[cfg(target_os = "macos")]
         unsafe {
@@ -941,6 +947,24 @@ impl MetalContext {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = enabled;
+    }
+
+    /// 1 when the device supports dispatch-boundary counter sampling, so
+    /// [`Self::set_profiling`] attributes per-operator GPU time inside
+    /// grouped (shared-command-buffer) dispatches as well; 0 means
+    /// grouped mode has no per-operator data (ungrouped attribution still
+    /// works). Paravirtualized GPUs may not support it.
+    pub fn grouped_profiling_supported(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: raw is valid while the inner lives; the call only
+            // reads a capability flag.
+            unsafe { imp::tm_metal_counter_sampling_supported(self.inner.raw) != 0 }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     }
 
     /// Per-operator GPU time recorded since profiling was enabled:

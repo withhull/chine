@@ -750,3 +750,45 @@ three passes each; full prefill ~330 ms):
   host dispatch. The recorded next step is a grouped-regime profile
   before any further kernel work: no more projections from ungrouped
   deltas.
+
+- **The grouped-regime instrument (2026-11-22): counter samples where the
+  GPU allows them, ablation where it does not.** `set_profiling` now
+  attributes per-operator GPU time inside grouped (shared-command-buffer)
+  dispatches when the device supports dispatch-boundary counter sampling:
+  a `MTLCounterSampleBuffer` (timestamp set, 16384 slots) takes a sample
+  after every encoded dispatch, the deltas fold into the same profile
+  slots at the fence, `abort_group` drops the discarded group's samples,
+  and `grouped_profiling_supported()` reports the capability. Measured
+  probe on this M3 (Apple G15 family): `AtDispatchBoundary` sampling is
+  **not supported** — stage-boundary is, but the compute encoder's
+  sample method asserts; the gate test therefore skips here with the
+  capability stated, and the scaffolding stays for GPUs that do support
+  it. The CI runner's paravirtualized GPU reports the same absence.
+- **The measurement the bench needed: grouped-regime ablation** (temporary
+  hooks, never committed; each class stubbed out of the production
+  encoder, 5 runs per phase, best wall, group-fenced). Gemma 3 1B,
+  512-token grouped prefill, two passes:
+  - GEMM (all Q8_0 matrix-unit projections): **303.0 ms of 357.9 (84.7%)
+    and 314.7 of 370.7 (84.9%)** — stable across passes;
+  - attention chunk: 9.3-44.1 ms (2.6-11.9%, the wide band is the
+    session's GPU-contention noise);
+  - GeGLU: 7.2-12.6 ms (2.0-3.4%);
+  - norms (pre/post RMSNorm + both norm-adds): <= 3.7%;
+  - Q/K norms + RoPE + KV store: <= 0.5%;
+  - embedding/head/copies/host-encode skeleton: 4.9-5.2 ms (~1.4%).
+- **What this settles.** The premise that led to the fused-norm work —
+  "the remaining ~21% of prefill is the non-GEMM stack" — is refuted in
+  the production regime: it was the ungrouped profiler's per-dispatch
+  overhead (~25 us per command buffer). The grouped prefill is ~85% GEMM,
+  every other operator class is single-digit, and the norms the fusion
+  improved are <= 3.7% of it — which is exactly why the fusion could not
+  move the bench TTFT. The Gemma prefill bar is therefore a GEMM-side
+  problem end to end: the isolated FFN kernels are 1.6-1.9% behind
+  llama's (attention shapes ahead), which bounds per-shape kernel tuning
+  at ~1.5% of prefill. The remaining headroom is the one ADR-011 recorded
+  early and the ablation now confirms as the only lever left with real
+  size: **llama.cpp's encoder overlaps independent nodes** (q/k/v and
+  gate/up are independent GEMMs per layer; ggml dispatches them
+  concurrently for a further ~5%+, while the unified engine's encoder
+  is strictly serial). With GEMM at ~85% of the prefill, node-concurrent
+  encoding — not further kernel work — is the recorded next lever.

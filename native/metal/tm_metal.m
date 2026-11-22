@@ -22,6 +22,15 @@
 
 #define TM_PROFILE_SLOTS 64
 #define TM_PROFILE_NAME 40
+/* Grouped per-operator attribution: one label record per dispatch inside
+ * the shared command buffer; deltas between consecutive counter samples
+ * fold into the profile slots at the next fence. */
+#define TM_GROUP_LABELS 2048
+
+typedef struct {
+    char name[TM_PROFILE_NAME];
+    uint32_t idx;
+} tm_group_label;
 
 /* One operator label's accumulated GPU time (profiling only). */
 typedef struct {
@@ -115,6 +124,22 @@ struct tm_metal_ctx {
     os_unfair_lock profile_lock;
     uint32_t profile_used;
     tm_profile_slot profile[TM_PROFILE_SLOTS];
+    /* Grouped per-operator attribution (profiling in grouped mode): GPU
+     * timestamps sampled at dispatch boundaries inside the shared
+     * command buffer, resolved host-side at the fence (Shared storage)
+     * and folded into the profile slots. counter_ready is probed at
+     * create; paravirtualized GPUs may not expose counter sampling, in
+     * which case grouped mode simply has no per-operator data (as
+     * before). */
+    id<MTLCounterSampleBuffer> counter_buf;
+    uint32_t counter_cap;
+    uint32_t counter_used;
+    uint32_t counter_label_used;
+    uint32_t counter_group_base; /* counter_used at begin_group (abort) */
+    uint32_t counter_label_base; /* counter_label_used at begin_group */
+    int counter_ready;
+    int counter_overflow;
+    tm_group_label counter_labels[TM_GROUP_LABELS];
     _Atomic(uint64_t) allocated;
     /* Bytes leased by pending command buffers: physically alive until the
      * completion handler runs, even if their handles were already freed.
@@ -173,6 +198,43 @@ static int tm_check_buffer(tm_metal_ctx *ctx, tm_metal_buffer *b, size_t need,
  * resource stays leased until the completion handler runs. Without this,
  * dropping a buffer before an explicit fence could free storage the GPU is
  * still using. */
+/* Fold `nanos` into the named profile slot (single context, serialized
+ * by the caller). */
+static void tm_profile_add(tm_metal_ctx *ctx, const char *name, uint64_t nanos) {
+    if (name == NULL || name[0] == '\0') {
+        return;
+    }
+    os_unfair_lock_lock(&ctx->profile_lock);
+    uint32_t slot = 0;
+    while (slot < ctx->profile_used && strcmp(ctx->profile[slot].name, name) != 0) {
+        slot++;
+    }
+    if (slot == ctx->profile_used && slot < TM_PROFILE_SLOTS) {
+        strlcpy(ctx->profile[slot].name, name, TM_PROFILE_NAME);
+        ctx->profile_used++;
+    }
+    if (slot < TM_PROFILE_SLOTS) {
+        ctx->profile[slot].nanos += nanos;
+        ctx->profile[slot].count += 1;
+    }
+    os_unfair_lock_unlock(&ctx->profile_lock);
+}
+
+/* Encode a counter sample at the next dispatch-boundary slot; returns the
+ * slot index, or counter_cap when sampling is off or exhausted. */
+static uint32_t tm_counter_sample(tm_metal_ctx *ctx, id<MTLComputeCommandEncoder> enc) {
+    if (!atomic_load_explicit(&ctx->profiling, memory_order_relaxed) || !ctx->counter_ready ||
+        ctx->counter_used >= ctx->counter_cap) {
+        return ctx->counter_cap;
+    }
+    [enc sampleCountersInBuffer:ctx->counter_buf
+                      atSampleIndex:(NSUInteger)ctx->counter_used
+                         withBarrier:NO];
+    uint32_t idx = ctx->counter_used;
+    ctx->counter_used++;
+    return idx;
+}
+
 static int tm_commit(tm_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_flight,
                      const char *what, char *err, size_t cap) {
     (void)err;
@@ -187,9 +249,6 @@ static int tm_commit(tm_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_fli
     }
     atomic_fetch_add_explicit(&ctx->leased, leased, memory_order_relaxed);
     atomic_fetch_add_explicit(&ctx->committed, 1, memory_order_relaxed);
-    if (ctx->pending != nil) {
-        [ctx->pending release];
-    }
     ctx->pending = [cb retain];
     tm_metal_ctx *c = ctx;
     [cb addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
@@ -205,20 +264,7 @@ static int tm_commit(tm_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_fli
         atomic_store_explicit(&c->last_gpu_nanos, (uint64_t)nanos, memory_order_relaxed);
         atomic_fetch_add_explicit(&c->gpu_nanos_total, (uint64_t)nanos, memory_order_relaxed);
         if (label.s[0] != '\0') {
-            os_unfair_lock_lock(&c->profile_lock);
-            uint32_t slot = 0;
-            while (slot < c->profile_used && strcmp(c->profile[slot].name, label.s) != 0) {
-                slot++;
-            }
-            if (slot == c->profile_used && slot < TM_PROFILE_SLOTS) {
-                strlcpy(c->profile[slot].name, label.s, TM_PROFILE_NAME);
-                c->profile_used++;
-            }
-            if (slot < TM_PROFILE_SLOTS) {
-                c->profile[slot].nanos += (uint64_t)nanos;
-                c->profile[slot].count += 1;
-            }
-            os_unfair_lock_unlock(&c->profile_lock);
+            tm_profile_add(c, label.s, (uint64_t)nanos);
         }
         atomic_fetch_add_explicit(&c->completed, 1, memory_order_release);
     }];
@@ -239,6 +285,32 @@ static int tm_wait_pending(tm_metal_ctx *ctx, char *err, size_t cap) {
                                                   ctx->pending.error != nil
                                                       ? [ctx->pending.error localizedDescription]
                                                       : @"unknown"]);
+    }
+    /* Fold the grouped per-operator deltas: resolved samples hold the GPU
+     * clock at each dispatch boundary, and compute dispatches inside one
+     * encoder are ordered, so delta = t[s] - t[s-1] is the operator's GPU
+     * time. Baseline samples carry no label and are simply skipped. */
+    if (ctx->counter_ready && ctx->counter_label_used > 0) {
+        @autoreleasepool {
+            NSData *resolved = [ctx->counter_buf resolveCounterRange:NSMakeRange(0, ctx->counter_used)];
+            if (resolved != nil && resolved.length >= (NSUInteger)ctx->counter_used * sizeof(uint64_t)) {
+                const uint64_t *ts = (const uint64_t *)resolved.bytes;
+                for (uint32_t i = 0; i < ctx->counter_label_used; i++) {
+                    uint32_t s_idx = ctx->counter_labels[i].idx;
+                    if (s_idx == 0 || s_idx >= ctx->counter_used) {
+                        continue; /* baseline or out of range */
+                    }
+                    uint64_t end = ts[s_idx];
+                    uint64_t begin = ts[s_idx - 1];
+                    if (end == MTLCounterErrorValue || begin == MTLCounterErrorValue || end <= begin) {
+                        continue; /* unresolved or non-monotonic sample */
+                    }
+                    tm_profile_add(ctx, ctx->counter_labels[i].name, end - begin);
+                }
+            }
+        }
+        ctx->counter_used = 0;
+        ctx->counter_label_used = 0;
     }
     /* waitUntilCompleted signals execution completion; addCompletedHandler
      * blocks are scheduled separately and may still be pending. Settlement
@@ -322,6 +394,30 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
         }
         /* New-rule: +1. */
         ctx->queue = [ctx->device newCommandQueue];
+        ctx->counter_ready = 0;
+        @autoreleasepool {
+            id<MTLCounterSet> ts_set = nil;
+            for (id<MTLCounterSet> set in ctx->device.counterSets) {
+                if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+                    ts_set = set;
+                    break;
+                }
+            }
+            if (ts_set != nil && [ctx->device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary]) {
+                MTLCounterSampleBufferDescriptor *desc = [[MTLCounterSampleBufferDescriptor alloc] init];
+                desc.counterSet = ts_set;
+                desc.sampleCount = 16384;
+                desc.storageMode = MTLStorageModeShared;
+                desc.label = @"tm grouped per-operator profiling";
+                NSError *cerr = nil;
+                ctx->counter_buf = [ctx->device newCounterSampleBufferWithDescriptor:desc error:&cerr];
+                [desc release];
+                if (ctx->counter_buf != nil) {
+                    ctx->counter_cap = (uint32_t)ctx->counter_buf.sampleCount;
+                    ctx->counter_ready = 1;
+                }
+            }
+        }
         NSError *error = nil;
         NSString *source = [NSString stringWithUTF8String:msl_source];
         /* New-rule: +1. */
@@ -468,6 +564,7 @@ void tm_metal_destroy(tm_metal_ctx *ctx) {
             fprintf(stderr, "tm_metal: %llu bytes still allocated at destroy; buffer lifetime bug\n",
                     (unsigned long long)still_allocated);
         }
+        [ctx->counter_buf release];
         [ctx->pso_f16gemm release];
         [ctx->pso_q8gemm release];
         [ctx->pso_q8gemm_mma release];
@@ -698,6 +795,21 @@ static int tm_frame_commit(tm_metal_ctx *ctx, tm_frame *f, char *err, size_t cap
                        [NSString stringWithFormat:@"%s: command encoder unavailable", what]);
     }
     if (!f->implicit) {
+        /* Grouped: no per-buffer commit exists to time, so per-operator
+         * attribution samples the GPU clock at this dispatch boundary
+         * and folds the delta at the fence. */
+        if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed) && ctx->counter_ready &&
+            ctx->counter_label_used < TM_GROUP_LABELS) {
+            uint32_t idx = tm_counter_sample(ctx, ctx->group_enc);
+            if (idx < ctx->counter_cap) {
+                strlcpy(ctx->counter_labels[ctx->counter_label_used].name,
+                        what != NULL ? what : "op", TM_PROFILE_NAME);
+                ctx->counter_labels[ctx->counter_label_used].idx = idx;
+                ctx->counter_label_used++;
+            } else {
+                ctx->counter_overflow = 1;
+            }
+        }
         return TM_METAL_OK; /* the open group commits once at end_group */
     }
     [f->enc endEncoding];
@@ -728,6 +840,11 @@ int tm_metal_begin_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
                            @"begin_group: command buffering unavailable");
         }
         ctx->group_active = 1;
+        /* Profiling baseline: the first operator's delta starts here, so
+         * host time between groups never lands in any label. */
+        ctx->counter_group_base = ctx->counter_used;
+        ctx->counter_label_base = ctx->counter_label_used;
+        tm_counter_sample(ctx, ctx->group_enc);
         return TM_METAL_OK;
     }
 }
@@ -775,6 +892,10 @@ int tm_metal_abort_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
     ctx->group_cb = nil;
     ctx->group_keep = nil;
     ctx->group_active = 0;
+    /* Samples encoded into the discarded buffer never execute; drop their
+     * bookkeeping so the next resolve stays consistent. */
+    ctx->counter_used = ctx->counter_group_base;
+    ctx->counter_label_used = ctx->counter_label_base;
     return TM_METAL_OK;
 }
 
@@ -1506,6 +1627,10 @@ int tm_metal_profile_set(tm_metal_ctx *ctx, int enabled) {
     os_unfair_lock_unlock(&ctx->profile_lock);
     atomic_store_explicit(&ctx->profiling, enabled ? 1 : 0, memory_order_relaxed);
     return TM_METAL_OK;
+}
+
+int tm_metal_counter_sampling_supported(tm_metal_ctx *ctx) {
+    return ctx != NULL && ctx->counter_ready;
 }
 
 int tm_metal_profile_read(tm_metal_ctx *ctx, uint32_t index, char *name, size_t name_cap,

@@ -334,6 +334,11 @@ uint64_t tm_metal_gpu_nanos_total(const tm_metal_ctx *ctx);
  * its GPU time accumulates per label; buffers of an open dispatch group
  * are attributed to "group". Setting either value clears the table. */
 int tm_metal_profile_set(tm_metal_ctx *ctx, int enabled);
+
+/* 1 when the device supports dispatch-boundary counter sampling, so the
+ * grouped (shared-command-buffer) encoder can attribute per-operator GPU
+ * time; 0 means grouped mode has no per-operator data. */
+int tm_metal_counter_sampling_supported(tm_metal_ctx *ctx);
 /* Reads table entry `index`: returns 1 and fills name/nanos/count while
  * index is below the number of labels seen, 0 past the end. */
 int tm_metal_profile_read(tm_metal_ctx *ctx, uint32_t index, char *name, size_t name_cap,

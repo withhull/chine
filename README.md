@@ -63,9 +63,13 @@ prompt tokens, 512 tokens in and 256 out, ABBA rounds. Two idle runs at
   The acceptance run for them (paired 1.13×, ~88.5%) shows the bar is
   **not crossed**: ungrouped-profile projections have failed twice —
   the fused norms save only ~1 ms in the grouped production encoder.
-  The recorded next step is a grouped-regime profile of the remaining
-  gap (chunk attention, GeGLU, host dispatch) before further kernel
-  work.
+  The grouped-regime ablation (2026-11-22) settles why: the grouped
+  prefill is **~85% GEMM** — attention ≤ 11.9%, GeGLU ≤ 3.4%, norms
+  ≤ 3.7%, skeleton ~1.4% — so the earlier "21% non-GEMM stack" was the
+  ungrouped profiler's per-dispatch overhead. Per-shape GEMM tuning is
+  bounded at ~1.5% of prefill; the recorded next lever is
+  node-concurrent encoding (llama.cpp overlaps the independent q/k/v
+  and gate/up GEMMs; the unified engine's encoder is serial).
 - **Qwen3.5-2B Q8_0** (four runs, 3 GiB budget; the fourth with the
   f16-operand GEMM profile): decode 38.4-39.8 vs 38.1-40.7 tok/s (paired
   0.956-1.030, at parity). Time to first token 0.623 s vs 0.587-0.588 s
