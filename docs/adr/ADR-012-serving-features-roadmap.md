@@ -327,3 +327,21 @@ fields refused, targeted unload. `scripts/test.sh`: 506 tests passed.
   accept-rate arithmetic projects k=2 clearly ahead on a quiet
   machine (2.5-2.95 tokens per one-pass verify plus one chain row vs
   1.94 at k=1). The quiet acceptance run is the recorded follow-up.
+
+- **Quiet acceptance verdict (2026-11-22): parity-with-noise on the
+  standard workload — the default returns to 1.** The quiet
+  single-engine A/B on the pinned 0.8B (`bench --speculative`, f16 KV,
+  ignore-EOS, app closed): k=1 100.10 tok/s end-to-end / 113.70
+  decode-only (reproducing the recorded 98.1-100.6 band exactly) vs
+  k=2 99.04 / 112.38 — a -1.2% difference inside the bench's own ±1.2%
+  run-to-run band. The chained accept rates measured on the gate's
+  prompts (1.46-1.91 per cycle) do not transfer to the frozen
+  synthetic-v1 workload; no request-level win is established for any
+  k > 1, so the shipped default is the measured-safe one-draft
+  configuration whose ≈1.30× record stands. The multi-token mechanism
+  itself stays (token identity proven at every depth, k=2/k=3 gates
+  green, the per-depth rollback qualified) and CHINE_MTP_DRAFTS=2+
+  remains the experiment knob — on real-text workloads its accept
+  headroom may pay (labeled projection, not a claim); the recorded
+  follow-up would be a workload with a real-text draft-acceptance
+  profile.

@@ -36,11 +36,16 @@ pub const PREFILL_BATCH: usize = 512;
 
 /// Drafts per speculative cycle (ADR-012 step 3, multi-token form) for
 /// engine loads that did not pin their own count: the MTP head chains
-/// this many drafts and one verify chunk checks them. The value is the
-/// measured optimum from the pinned Qwen3.5-0.8B accept-rate sweep
-/// (see the ADR-012 note); CHINE_MTP_DRAFTS overrides it for
-/// experiments. Served tokens never depend on it.
-pub const MTP_DRAFTS: usize = 2;
+/// this many drafts and one verify chunk checks them. 1, the
+/// historically recorded configuration: the quiet acceptance run
+/// (2026-11-22, ADR-012 note) measured k=2 at parity-with-noise on the
+/// standard-v1 workload (99.04/112.38 vs 100.10/113.70 tok/s, inside the
+/// bench's own ±1.2% band) — the chained accept rates on real-text-style
+/// prompts (1.46-1.91 per cycle) do not transfer to the frozen synthetic
+/// workload, so no request-level win is established and the default stays
+/// at the measured-safe one-draft form. CHINE_MTP_DRAFTS overrides it
+/// for experiments. Served tokens never depend on it.
+pub const MTP_DRAFTS: usize = 1;
 
 /// Prefill chunks allowed in flight on the GPU at once. Each chunk is one
 /// command buffer of thousands of dispatches, and Metal backs its encoding
