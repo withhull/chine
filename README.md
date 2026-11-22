@@ -76,10 +76,17 @@ production encoder directly: the 512-token prefill is **~85% GEMM**
 GeGLU ≤ 3.4%, all norms ≤ 3.7%, host skeleton ~1.4%. The isolated FFN
 kernels are 1.6–1.9% behind llama's and the small attention shapes are
 ahead of it, which bounds further per-shape kernel tuning at ~1.5% of
-prefill. The remaining lever with real size is **node-concurrent
-encoding**: llama.cpp dispatches the independent q/k/v and gate/up GEMMs
-concurrently for a further ~5%+, while this engine's encoder is strictly
-serial. That — not more kernel work — is the recorded next step.
+prefill. Node-concurrent encoding is worth less than the early ADR-011
+note hoped: llama.cpp's own merged concurrency reordering (PR #19555,
+Feb 2026) measures 0.98–1.03× on dense prefill — the GEMMs already
+saturate the GPU, so overlap has little idle capacity to fill. The
+headroom other engines measurably exploit on Apple Silicon is
+decode-side (Rec's fused whole-decode-pass Metal kernel claims
+1.4–2.6×; MLX leads llama.cpp decode by ~9%), workload-level (prefix
+caching — built here, bit-identical), and long-context KV pruning. The
+concrete next target on our side: Gemma decode is steady at 65.0 tok/s
+while llama.cpp's fast mode reaches ~76 — profiling and closing that
+per-row GEMV gap.
 
 **Beyond decode and prefill:**
 
