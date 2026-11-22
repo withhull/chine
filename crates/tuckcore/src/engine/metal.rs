@@ -22,7 +22,17 @@ use super::WeightSource;
 use crate::qwen35_gpu::{f32_bytes, GpuAllocPlan, Qwen35Gpu, STAGING_CHUNK_BYTES};
 
 /// Prompt tokens per batched prefill chunk (one command buffer each).
-pub const PREFILL_BATCH: usize = 128;
+/// 512, not 128, since 2026-11-22: the matrix-unit GEMM's M-scaling
+/// means one 512-row GEMM beats four 128-row ones at every Gemma shape
+/// (interleaved in-model A/B: 512-token prefill 375.6 vs 384.4 ms,
+/// -9 ms; isolated 1152x6912: 1972 -> 2193 GFLOP/s from 128 to 512
+/// rows), and llama.cpp's request runs its prefill GEMMs at the full
+/// batch. The scratch is sized for this batch and stays inside the
+/// planner's resident workspaces reservation (192 MiB; Gemma at 512
+/// needs 56.1 MiB); a model whose 512-chunk scratch exceeds the plan's
+/// reservation is refused with the typed understated-workspaces error
+/// before any GPU allocation.
+pub const PREFILL_BATCH: usize = 512;
 
 /// Prefill chunks allowed in flight on the GPU at once. Each chunk is one
 /// command buffer of thousands of dispatches, and Metal backs its encoding
