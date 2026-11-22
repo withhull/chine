@@ -213,7 +213,7 @@ crates/manifest     schemas, GGUF/Safetensors inspection, adapters, fixtures
 crates/backend      versioned inference-backend interface
 crates/planner      device profiler, admission and KV math, cost model
 crates/store        imports, packing, cache/GC
-crates/chinecore     custom executor: unified engine, CPU oracle, loader, tokenizer
+crates/core     custom executor: unified engine, CPU oracle, loader, tokenizer
 crates/metal        typed Rust handles over the Metal C ABI
 crates/llamaref     pinned llama.cpp reference backend
 crates/supervisor   queue, governor, worker protocol, API, bench, verify

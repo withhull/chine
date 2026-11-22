@@ -499,7 +499,7 @@ three passes each; full prefill ~330 ms):
   - The CLI completion is unchanged.
   - Qwen3.5 numbers are unchanged.
 - **Retired:**
-  - `crates/chinecore/src/gpu.rs`;
+  - `crates/core/src/gpu.rs`;
   - the operators only it used: f32 per-token and batched `rope`,
     `kv_store` and `attention`, and `rmsnorm_f16w` (kernels, C ABI,
     pipelines, Rust wrappers and their operator tests);

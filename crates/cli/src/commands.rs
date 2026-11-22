@@ -307,7 +307,7 @@ fn execution_options(
     use chine_supervisor::options::ExecutionOptions;
     let (kind, _) = parse_engine(engine)?;
     let kernels = match kernels {
-        Some(k) => Some(chine_chinecore::KernelSelection::parse(k).ok_or_else(|| {
+        Some(k) => Some(chine_core::KernelSelection::parse(k).ok_or_else(|| {
             ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("unknown --kernels {k:?}; use auto, scalar, neon, or metal"),
@@ -316,7 +316,7 @@ fn execution_options(
         None => None,
     };
     let storage = match storage {
-        Some(st) => Some(chine_chinecore::StorageSelection::parse(st).ok_or_else(|| {
+        Some(st) => Some(chine_core::StorageSelection::parse(st).ok_or_else(|| {
             ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("unknown --storage {st:?}; use auto, mapped, or owned"),
@@ -1308,7 +1308,7 @@ fn verify(
         &runtime.layout.artifact_payload_path(&artifact.artifact_id),
     );
     let report = if reference {
-        let profile = chine_chinecore::forward::NumericalProfile::parse(chinecore_profile)
+        let profile = chine_core::forward::NumericalProfile::parse(chinecore_profile)
             .ok_or_else(|| {
                 ChineError::new(
                     ErrorCode::InvalidRequest,

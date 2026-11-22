@@ -3109,7 +3109,7 @@ mod oracle_tests {
     /// pinned model's decode. Prints a table; asserts only that the
     /// accounting is consistent. Run with
     /// `CHINE_QWEN35_GGUF=... CHINE_PROFILE=1 cargo test --release
-    /// -p chine-chinecore profile_pinned_decode -- --nocapture`.
+    /// -p chine-core profile_pinned_decode -- --nocapture`.
     #[test]
     fn profile_pinned_decode_when_requested() {
         let Some(path) = std::env::var("CHINE_QWEN35_GGUF")

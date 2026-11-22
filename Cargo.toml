@@ -5,7 +5,7 @@ members = [
     "crates/backend",
     "crates/planner",
     "crates/store",
-    "crates/chinecore",
+    "crates/core",
     "crates/llamaref",
     "crates/metal",
     "crates/supervisor",
@@ -25,7 +25,7 @@ description = "Chine: local-first model inference framework for Apple Silicon Ma
 [workspace.dependencies]
 chine-manifest = { path = "crates/manifest", version = "0.2.0" }
 chine-backend = { path = "crates/backend", version = "0.2.0" }
-chine-chinecore = { path = "crates/chinecore", version = "0.2.0" }
+chine-core = { path = "crates/core", version = "0.2.0" }
 chine-llamaref = { path = "crates/llamaref", version = "0.2.0" }
 chine-planner = { path = "crates/planner", version = "0.2.0" }
 chine-metal = { path = "crates/metal", version = "0.2.0" }

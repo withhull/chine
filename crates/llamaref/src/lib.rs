@@ -1291,7 +1291,7 @@ mod tests {
         let insp =
             chine_manifest::gguf::inspect(&fixture, &chine_manifest::gguf::Limits::default())
                 .unwrap();
-        let ours = chine_chinecore::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
+        let ours = chine_core::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
 
         let mut backend = LlamaRef::new();
         let artifact = ArtifactRef {
@@ -1382,7 +1382,7 @@ mod tests {
             &chine_manifest::gguf::Limits::default(),
         )
         .unwrap();
-        let native = chine_chinecore::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
+        let native = chine_core::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
         if !native.encode_is_exact() {
             let err = native.encode("test", false).unwrap_err();
             assert_eq!(

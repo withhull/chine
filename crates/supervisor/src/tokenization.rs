@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use chine_chinecore::tokenizer::Tokenizer;
+use chine_core::tokenizer::Tokenizer;
 use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 pub enum ArtifactEncoder {

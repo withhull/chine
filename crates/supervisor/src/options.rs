@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use chine_backend::{BackendStats, EngineKind};
-use chine_chinecore::{KernelSelection, StorageSelection};
+use chine_core::{KernelSelection, StorageSelection};
 use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 /// Requested execution options for one backend worker. `None` means "engine

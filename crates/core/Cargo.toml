@@ -1,5 +1,5 @@
 [package]
-name = "chine-chinecore"
+name = "chine-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -9,7 +9,7 @@ description = "Chine supervisor: admission, queues, worker lifecycle, governor, 
 [dependencies]
 chine-manifest.workspace = true
 chine-backend.workspace = true
-chine-chinecore.workspace = true
+chine-core.workspace = true
 chine-llamaref.workspace = true
 chine-planner.workspace = true
 chine-store.workspace = true

@@ -15,7 +15,7 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-chine-chinecore.workspace = true
+chine-core.workspace = true
 
 [lints]
 workspace = true

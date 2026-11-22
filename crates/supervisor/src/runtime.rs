@@ -1266,7 +1266,7 @@ impl Runtime {
     pub fn declared_identity(&self) -> chine_manifest::records::EngineIdentity {
         match self.engine_kind {
             EngineKind::ReferenceTest => crate::engine::reference_test_identity(),
-            EngineKind::ChineCore => chine_chinecore::ChineCore::new().identity(),
+            EngineKind::ChineCore => chine_core::ChineCore::new().identity(),
             EngineKind::LlamaCpp => chine_llamaref::identity(),
         }
     }
@@ -3011,7 +3011,7 @@ mod tests {
         )
         .unwrap();
         let execution = crate::options::ExecutionOptions {
-            kernels: Some(chine_chinecore::KernelSelection::Metal),
+            kernels: Some(chine_core::KernelSelection::Metal),
             ..Default::default()
         };
         let runtime = Runtime::open(RuntimeOptions {
@@ -3039,25 +3039,25 @@ mod tests {
             chine_manifest::gguf::inspect(&payload, &chine_manifest::gguf::Limits::default())
                 .unwrap();
         let reg = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
-        let (cfg, _) = chine_chinecore::model::resolve(&insp, &reg).unwrap();
-        let mut names = chine_chinecore::model::TensorNames::for_layers(cfg.layers);
+        let (cfg, _) = chine_core::model::resolve(&insp, &reg).unwrap();
+        let mut names = chine_core::model::TensorNames::for_layers(cfg.layers);
         names.resolve(&insp).unwrap();
-        let graph = chine_chinecore::engine::adapters::qwen3(&cfg, &names, &insp).unwrap();
+        let graph = chine_core::engine::adapters::qwen3(&cfg, &names, &insp).unwrap();
         let file = std::fs::File::open(&payload).unwrap();
-        let weights = chine_chinecore::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
-        let engine_plan = chine_chinecore::engine::metal::alloc_plan_with(
+        let weights = chine_core::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
+        let engine_plan = chine_core::engine::metal::alloc_plan_with(
             &graph,
             &weights,
             512,
-            chine_chinecore::engine::metal::EngineOptions {
-                kv: chine_chinecore::engine::metal::KvCache::F32,
+            chine_core::engine::metal::EngineOptions {
+                kv: chine_core::engine::metal::KvCache::F32,
                 prefix_cache: true,
                 mtp: false,
                 gemm_f16_operands: true,
             },
         )
         .unwrap();
-        let kv_req = chine_chinecore::forward::KvState::bytes_for(&cfg, 512);
+        let kv_req = chine_core::forward::KvState::bytes_for(&cfg, 512);
         assert_eq!(
             engine_plan.state, kv_req,
             "f32 KV planes == the dense KV bound"
@@ -3110,7 +3110,7 @@ mod tests {
         let stats_a = runtime.backend_stats().expect("stats");
         assert_eq!(
             stats_a.prefill_batch,
-            Some(chine_chinecore::engine::metal::PREFILL_BATCH as u32)
+            Some(chine_core::engine::metal::PREFILL_BATCH as u32)
         );
         assert_eq!(stats_a.retained_workspace_bytes, Some(engine_plan.scratch));
 

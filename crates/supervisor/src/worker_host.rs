@@ -39,7 +39,7 @@ const SCORE_CHUNK_FLOATS: usize = 16_384;
 fn make_backend(kind: EngineKind) -> Box<dyn InferenceBackend> {
     match kind {
         EngineKind::ReferenceTest => Box::new(ReferenceTestEngine::new()),
-        EngineKind::ChineCore => Box::new(chine_chinecore::ChineCore::new()),
+        EngineKind::ChineCore => Box::new(chine_core::ChineCore::new()),
         EngineKind::LlamaCpp => Box::new(chine_llamaref::LlamaRef::new()),
     }
 }

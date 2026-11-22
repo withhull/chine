@@ -17,7 +17,7 @@ scripts/test.sh      # fmt check + clippy -D warnings + full test suite
 scripts/demo.sh      # end-to-end demo on a generated fixture (temp data dir)
 scripts/fetch-llama.sh # pinned llama.cpp reference + tm shim into .deps/ (gitignored)
 
-cargo test -p chine-chinecore          # single crate
+cargo test -p chine-core          # single crate
 CHINE_DATA_DIR=$(mktemp -d) target/debug/chine doctor
 cargo run -p chine-manifest --example gen_fixture -- /tmp/fixture.gguf
 ```
@@ -68,7 +68,7 @@ what was verified, with which command, on which artifact).
 
 - Workspace crates: `manifest` (schemas/inspection), `backend` (engine
   interface), `planner` (admission/cost), `store` (artifacts/packing),
-  `chinecore` (custom executor), `supervisor` (runtime/API/bench/verify),
+  `core` (custom executor), `supervisor` (runtime/API/bench/verify),
   `cli`. Dependencies point one way; never create cycles.
 - Typed errors only: `chine_manifest::ErrorCode` (`crates/manifest/src/error.rs`),
   each with a safe next action. No `anyhow` in library crates.

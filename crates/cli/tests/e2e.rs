@@ -1106,10 +1106,10 @@ fn qwen35_pinned_artifact_contract_when_available() {
         .open_reference_model(std::path::Path::new(&gguf), true)
         .unwrap();
     let prompt_tokens = reference.tokenize(prompt, false).unwrap();
-    let mut oracle = chine_chinecore::qwen35_forward::Qwen35Model::open(
+    let mut oracle = chine_core::qwen35_forward::Qwen35Model::open(
         std::path::Path::new(&gguf),
         prompt_tokens.len() + max_output,
-        chine_chinecore::qwen35_kv::KvPrecision::F16,
+        chine_core::qwen35_kv::KvPrecision::F16,
     )
     .unwrap();
     let mut logits = Vec::new();
@@ -1161,10 +1161,10 @@ fn qwen35_teacher_forced_logits_match_reference_when_available() {
     }
     let tokens = [9707u32, 11, 1879, 1000, 358, 1079, 13, 1000];
 
-    let mut model = chine_chinecore::qwen35_forward::Qwen35Model::open(
+    let mut model = chine_core::qwen35_forward::Qwen35Model::open(
         &gguf,
         16,
-        chine_chinecore::qwen35_kv::KvPrecision::F16,
+        chine_core::qwen35_kv::KvPrecision::F16,
     )
     .unwrap();
     let mut ours = Vec::new();
@@ -1215,21 +1215,15 @@ fn qwen35_teacher_forced_logits_match_reference_when_available() {
     // Q35-2C: the complete GPU model executes the same tokens and is
     // compared against the pinned reference as well. Skips (loudly) only
     // when no Metal device is available.
-    match chine_chinecore::qwen35_gpu::Qwen35Gpu::open() {
+    match chine_core::qwen35_gpu::Qwen35Gpu::open() {
         Ok(gpu) => {
-            let source =
-                chine_chinecore::qwen35_forward::ArtifactTensorSource::open(&gguf).unwrap();
-            use chine_chinecore::qwen35_forward::TensorSource;
-            let graph = chine_chinecore::engine::adapters::qwen35(source.config(), source.layout());
-            let plan = chine_chinecore::engine::metal::alloc_plan(&graph, &source, 16).unwrap();
-            let model = chine_chinecore::engine::metal::EngineModel::load(
-                gpu,
-                graph,
-                &source,
-                16,
-                plan.total(),
-            )
-            .unwrap();
+            let source = chine_core::qwen35_forward::ArtifactTensorSource::open(&gguf).unwrap();
+            use chine_core::qwen35_forward::TensorSource;
+            let graph = chine_core::engine::adapters::qwen35(source.config(), source.layout());
+            let plan = chine_core::engine::metal::alloc_plan(&graph, &source, 16).unwrap();
+            let model =
+                chine_core::engine::metal::EngineModel::load(gpu, graph, &source, 16, plan.total())
+                    .unwrap();
             let mut gpu_logits = Vec::new();
             model.forward_token(tokens[0], &mut gpu_logits).unwrap();
             for token in &tokens[1..] {
@@ -1430,12 +1424,12 @@ fn gemma3_engine_logits_match_reference_when_available() {
     let file = std::fs::File::open(&gguf).unwrap();
     let insp =
         chine_manifest::gguf::inspect(&gguf, &chine_manifest::gguf::Limits::default()).unwrap();
-    let source = chine_chinecore::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
-    let graph = chine_chinecore::engine::adapters::gemma3(&insp).unwrap();
+    let source = chine_core::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
+    let graph = chine_core::engine::adapters::gemma3(&insp).unwrap();
     let capacity = all.len() + 8;
-    let plan = chine_chinecore::engine::metal::alloc_plan(&graph, &source, capacity).unwrap();
-    let model = chine_chinecore::engine::metal::EngineModel::load(
-        chine_chinecore::qwen35_gpu::Qwen35Gpu::open().unwrap(),
+    let plan = chine_core::engine::metal::alloc_plan(&graph, &source, capacity).unwrap();
+    let model = chine_core::engine::metal::EngineModel::load(
+        chine_core::qwen35_gpu::Qwen35Gpu::open().unwrap(),
         graph,
         &source,
         capacity,
@@ -1444,7 +1438,7 @@ fn gemma3_engine_logits_match_reference_when_available() {
     .unwrap();
     assert_eq!(model.allocated_bytes(), plan.total(), "ledger == plan");
 
-    let pb = chine_chinecore::engine::metal::PREFILL_BATCH;
+    let pb = chine_core::engine::metal::PREFILL_BATCH;
     for len in [2usize, 9, 40, 200, 511, 513, all.len()] {
         let tokens = &all[..len];
         model.reset().unwrap();

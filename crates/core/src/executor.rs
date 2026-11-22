@@ -2385,7 +2385,7 @@ mod tests {
     /// Q8_0 artifact — teacher-forced logits at held positions and greedy
     /// generation — within a registered f32 reduction-order policy.
     /// Debug builds skip it (the CPU oracle is ~10x slower there); run with
-    /// `cargo test --release -p chine-chinecore real_model_metal` and
+    /// `cargo test --release -p chine-core real_model_metal` and
     /// CHINE_REAL_GGUF pointing at the pinned artifact.
     #[cfg(not(debug_assertions))]
     #[test]

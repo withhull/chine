@@ -75,7 +75,7 @@ never accepted by any real artifact.
   priced at 2 B/element; f32 priced at 4 B/element) and must prove by
   test that the admitted plan covers what it allocates. Recurrent and
   convolution state are f32 as declared by `mamba_ssm_dtype`.
-- **Typed contract (Q35-1A).** `crates/chinecore/src/qwen35.rs` resolves
+- **Typed contract (Q35-1A).** `crates/core/src/qwen35.rs` resolves
   `Qwen35Config`, the exact layer map, the tensor map (every served
   tensor consumed exactly once with dimensions verified; unknown tensors
   inside the served stack refuse; MTP blocks excluded) and the state
@@ -105,7 +105,7 @@ never accepted by any real artifact.
 ## Addendum 3 (Q35-1B)
 
 - Scalar reference operators for the Gated DeltaNet layers live in
-  `crates/chinecore/src/qwen35_ops.rs`, with semantics taken from the
+  `crates/core/src/qwen35_ops.rs`, with semantics taken from the
   pinned build: `ggml_ssm_conv` (windowed per-channel dot, no flip,
   `(kernel - 1)`-row history), `build_gdn_l2_norm` (`x / sqrt(sum(x^2) +
   eps)`, exactly `rms_norm(x, eps/n) / sqrt(n)`), the autoregressive
@@ -123,7 +123,7 @@ never accepted by any real artifact.
 ## Addendum 4 (Q35-1C)
 
 - Full-attention and FFN operators join the scalar reference library
-  (`crates/chinecore/src/qwen35_ops.rs`): weighted per-head RMS norm via
+  (`crates/core/src/qwen35_ops.rs`): weighted per-head RMS norm via
   the shared `rmsnorm_in_place` primitive; partial split-half RoPE that
   rotates only the declared span (`rope.dimension_count` = 64 of 256),
   with the frequency table spaced over the rotated dims exactly as
@@ -142,7 +142,7 @@ never accepted by any real artifact.
 
 ## Addendum 5 (Q35-1D state contract)
 
-- **Packed KV storage is the declared precision.** `crates/chinecore/src/
+- **Packed KV storage is the declared precision.** `crates/core/src/
   qwen35_kv.rs` stores per-attention-layer K/V planes at the declared
   element width (packed f16 default, f32 selectable) via the shared
   round-to-nearest-even converters. A cache allocates exactly
@@ -163,7 +163,7 @@ never accepted by any real artifact.
 
 ## Addendum 6 (Q35-1D execution and reference qualification)
 
-- **Complete CPU reference forward pass.** `crates/chinecore/src/
+- **Complete CPU reference forward pass.** `crates/core/src/
   qwen35_forward.rs` executes the served 24-layer hybrid stack (18 GDN +
   6 full attention; MTP excluded) over explicit token IDs: tied token
   embedding; per layer the pre-attention norm, the kind-specific
@@ -225,7 +225,7 @@ never accepted by any real artifact.
   gates, the f32 delta-rule recurrence with device-resident state, and
   the gated output normalization. Host dispatches follow the existing
   frame/group discipline; the Rust wrapper set mirrors the CPU operator
-  signatures in `crates/chinecore/src/qwen35_gpu.rs`.
+  signatures in `crates/core/src/qwen35_gpu.rs`.
 - The recurrence is one thread per head (correct-first): per-head
   arithmetic order matches the scalar rule, and prefill batching waits
   until decode and state transitions are qualified.

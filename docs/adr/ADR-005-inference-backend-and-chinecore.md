@@ -192,7 +192,7 @@ not read weights even if an executor existed) and no scoring frames.
    remains dependency-free of execution concerns; supervisor and backends
    depend on `chine-backend`.
 2. **Backends.** `ReferenceTest` (existing synthetic engine, unchanged
-   semantics) and `ChineCore` (new crate `chine-chinecore`). llama.cpp will
+   semantics) and `ChineCore` (new crate `chine-core`). llama.cpp will
    arrive as a third backend (`Reference`, `EngineAvailability::Certified`
    candidate) through the same interface — not through new coupling.
 3. **ChineCore starts narrow and honest.** Dense Qwen3 only (moe/hybrid

@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use chine_backend::{ArtifactRef, BackendStats, EngineKind};
-use chine_chinecore::forward::NumericalProfile;
+use chine_core::forward::NumericalProfile;
 use chine_manifest::error::{ChineError, ErrorCode, Result};
 use chine_manifest::ids::{hash_of, now_unix_ms, secure_random_hex, Id};
 use chine_manifest::plan::ExecutionPlan;
@@ -96,9 +96,9 @@ pub struct ReferenceCompareOptions {
     /// seed and a larger, disjoint workload from the calibration set.
     pub held_out: bool,
     /// Requested kernel selection for the ChineCore side (None = default).
-    pub chinecore_kernels: Option<chine_chinecore::KernelSelection>,
+    pub chinecore_kernels: Option<chine_core::KernelSelection>,
     /// Requested weight-storage selection for the ChineCore side.
-    pub chinecore_storage: Option<chine_chinecore::StorageSelection>,
+    pub chinecore_storage: Option<chine_core::StorageSelection>,
     pub score_deadline: Duration,
 }
 
@@ -131,9 +131,9 @@ pub struct VerifyOptions {
     pub max_abs_tolerance: f64,
     pub require_exact: bool,
     /// Requested kernel selection for both sides (None = engine default).
-    pub kernels: Option<chine_chinecore::KernelSelection>,
+    pub kernels: Option<chine_core::KernelSelection>,
     /// Requested weight-storage selection for both sides.
-    pub storage: Option<chine_chinecore::StorageSelection>,
+    pub storage: Option<chine_core::StorageSelection>,
     pub score_deadline: Duration,
 }
 
@@ -959,13 +959,13 @@ impl Runtime {
                     "ChineCore numerical profile: {} ({}); the comparison establishes a numerical envelope for this artifact, configuration, and tolerance policy — not performance and not bit-identity",
                     options.chinecore_profile.as_str(),
                     match options.chinecore_profile {
-                        chine_chinecore::forward::NumericalProfile::OracleF32 => {
+                        chine_core::forward::NumericalProfile::OracleF32 => {
                             "scalar FP32 reference, no additional activation rounding"
                         }
-                        chine_chinecore::forward::NumericalProfile::LlamaCpu => {
+                        chine_core::forward::NumericalProfile::LlamaCpu => {
                             "mirrors pinned llama.cpp CPU activation quantization"
                         }
-                        chine_chinecore::forward::NumericalProfile::MetalF16Act => {
+                        chine_core::forward::NumericalProfile::MetalF16Act => {
                             "unified-engine Metal path; batched prefill GEMMs stage operands as \
                              half with f32 accumulation (llama.cpp kernel_mul_mm numerics, \
                              ADR-010)"
@@ -1077,7 +1077,7 @@ impl Runtime {
             label: label.to_string(),
             // The cache actually applied: the Metal path keeps weights
             // resident and receives no cache geometry.
-            cache_bytes: if matches!(side.kernels, Some(chine_chinecore::KernelSelection::Metal)) {
+            cache_bytes: if matches!(side.kernels, Some(chine_core::KernelSelection::Metal)) {
                 0
             } else {
                 cache_bytes.unwrap_or(0)

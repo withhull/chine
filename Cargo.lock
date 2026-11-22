@@ -102,24 +102,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "chine-chinecore"
-version = "0.2.0"
-dependencies = [
- "chine-backend",
- "chine-manifest",
- "chine-metal",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "chine-cli"
 version = "0.2.0"
 dependencies = [
  "chine-backend",
- "chine-chinecore",
+ "chine-core",
  "chine-llamaref",
  "chine-manifest",
  "chine-planner",
@@ -133,11 +120,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "chine-core"
+version = "0.2.0"
+dependencies = [
+ "chine-backend",
+ "chine-manifest",
+ "chine-metal",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "chine-llamaref"
 version = "0.2.0"
 dependencies = [
  "chine-backend",
- "chine-chinecore",
+ "chine-core",
  "chine-manifest",
  "libc",
  "serde",
@@ -195,7 +195,7 @@ name = "chine-supervisor"
 version = "0.2.0"
 dependencies = [
  "chine-backend",
- "chine-chinecore",
+ "chine-core",
  "chine-llamaref",
  "chine-manifest",
  "chine-planner",

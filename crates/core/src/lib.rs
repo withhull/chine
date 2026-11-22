@@ -45,7 +45,7 @@ mod executor;
 /// (stats/identity) — a build id alone never identifies them.
 pub fn format_build_id() -> String {
     format!(
-        "chine-chinecore {} ({}, {}, rev {})",
+        "chine-core {} ({}, {}, rev {})",
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) {
             "debug"
