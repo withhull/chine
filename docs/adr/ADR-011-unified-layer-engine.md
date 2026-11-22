@@ -1194,3 +1194,35 @@ three passes each; full prefill ~330 ms):
   accept rates unchanged). Projected quiet effect: 91.7 -> ~92.3
   tok/s, clean-round pairs ~0.91 — a modest margin over the 0.90
   bar, honestly sized; the quiet acceptance run decides.
+
+- **The norm fusion's quiet verdict: a ~0.5% regression — reverted;
+  the margin levers are closed (2026-11-22).** The quiet acceptance
+  run (`20261122T092018Z-…-gemma3-1b-q4_0-normfuse`, battery, zero
+  swap, clean tree `483c6a1`) returned warm decode
+  **91.28/91.29/91.33 (± 0.03)** against the gemvfix run's
+  91.48/91.79/91.73 — the two runs' bands do not overlap, while
+  llama's control reproduced its fast mode exactly (102.45 vs
+  101.77-102.53): the pipelining-run signature (control identical,
+  ours moved). The loaded in-model A/B that shipped the fusion read
+  "equal-or-better in every pair" — inside its +/-2% noise floor;
+  **rule recorded: a loaded in-model A/B cannot resolve effects
+  under ~2%, only the quiet acceptance can.** This is the fourth
+  projection to fail at the quiet level (prefill fused norms, edge
+  stage, pipelining, now this). The fusion's mechanism, recorded
+  as the working hypothesis: at rows=1 the fused kernel is not
+  strictly less work — the residual read and the no-inline
+  bit-identity helper cost more GPU time than the launch-bound
+  rmsnorm + axpy pair they replaced, and the 52 saved dispatches
+  did not pay on the quiet machine. Reverted; the decode sites keep
+  a comment naming the run. The run's paired median 1.041 is
+  llama's bimodality (rounds 2-3 in its 87.4-87.7 slow mode), not a
+  gain on ours — recorded plainly. **Final standing of the two
+  levers:** the head is DRAM-closed (93.6% of spec, reference at
+  parity), the norm stack is measured at its floor — the Q4_0
+  decode stands at-the-bar (clean fast-mode pairs 0.891-0.902
+  across the three quiet runs, ours steady at 91.3-91.8) and the
+  recorded boundary is now honest: holding the bar *with margin*
+  requires a Q4_0 gemv redesign that changes the per-lane reduction
+  order (the cross-mode bit-gate risk chain, rejected twice this
+  arc on the instrument) or a lever outside the kernel set; no
+  further in-place margin work is available at these shapes.
