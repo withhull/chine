@@ -1344,13 +1344,20 @@ fn gemma3_engine_kernel_id(insp: &chine_manifest::gguf::GgufInspection) -> Strin
 /// the most bytes in the artifact (Q8_0 vs Q4_0 today).
 fn dominant_weight_quant(insp: &chine_manifest::gguf::GgufInspection) -> &'static str {
     let stats = insp.tensor_stats();
-    let q8 = stats.by_type.get("Q8_0").copied().unwrap_or(0);
-    let q4 = stats.by_type.get("Q4_0").copied().unwrap_or(0);
-    if q4 > q8 {
-        "q4_0"
-    } else {
-        "q8_0"
-    }
+    // The label names the type carrying the most weight bytes; ties and
+    // all smaller types fold into the dominant one, so the record can
+    // never claim a quant the artifact does not carry.
+    let best = [
+        ("Q8_0", "q8_0"),
+        ("Q4_0", "q4_0"),
+        ("Q4_1", "q4_1"),
+        ("Q4_K", "q4_k"),
+        ("Q6_K", "q6_k"),
+    ]
+    .into_iter()
+    .max_by_key(|(name, _)| stats.by_type.get(*name).copied().unwrap_or(0))
+    .map(|(_, label)| label);
+    best.unwrap_or("q8_0")
 }
 
 /// Resolved GEMM operand profile for engine (Metal) loads: true is the

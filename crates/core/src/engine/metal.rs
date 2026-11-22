@@ -152,11 +152,19 @@ impl Matrix {
                 format!("tensor {} is 1-D; vectors use the f32 path", t.index),
             ));
         }
-        if type_id != 1 && type_id != 8 && type_id != 2 && type_id != 3 {
+        if type_id != 0
+            && type_id != 1
+            && type_id != 8
+            && type_id != 2
+            && type_id != 3
+            && type_id != 12
+            && type_id != 13
+            && type_id != 14
+        {
             return Err(ChineError::new(
                 ErrorCode::UnsupportedQuantization,
                 format!(
-                    "engine matrices must be F16, Q8_0, Q4_0 or Q4_1; tensor {} is type {type_id}",
+                    "engine matrices must be F32, F16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K or Q6_K; tensor {} is type {type_id}",
                     t.index
                 ),
             ));
@@ -184,10 +192,14 @@ impl Matrix {
         let ctx = gpu.context();
         let (rows, cols) = (self.out_dim as u32, self.in_dim as u32);
         match self.type_id {
+            0 => ctx.f32_gemv(&self.buf, x, y, rows, cols),
             1 => ctx.f16_gemv(&self.buf, x, y, rows, cols),
             8 => ctx.q8_0_gemv(&self.buf, x, y, rows, cols),
             2 => ctx.q4_0_gemv(&self.buf, x, y, rows, cols),
             3 => ctx.q4_1_gemv(&self.buf, x, y, rows, cols),
+            12 => ctx.q4_k_gemv(&self.buf, x, y, rows, cols),
+            13 => ctx.q5_k_gemv(&self.buf, x, y, rows, cols),
+            14 => ctx.q6_k_gemv(&self.buf, x, y, rows, cols),
             other => Err(unsupported_type(other)),
         }
     }
@@ -207,7 +219,12 @@ impl Matrix {
         let ctx = gpu.context();
         let (rows, cols) = (self.out_dim as u32, self.in_dim as u32);
         if !exact
-            && (self.type_id == 8 || self.type_id == 2 || self.type_id == 3)
+            && (self.type_id == 8
+                || self.type_id == 2
+                || self.type_id == 3
+                || self.type_id == 12
+                || self.type_id == 13
+                || self.type_id == 14)
             && (2..=GEMM_MMA_MAX_BATCH).contains(&batch)
         {
             // Declared GEMM operand profile (ADR-010): metal-f16-act
@@ -218,13 +235,21 @@ impl Matrix {
                 match self.type_id {
                     8 => ctx.q8_0_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
                     2 => ctx.q4_0_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
-                    _ => ctx.q4_1_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    3 => ctx.q4_1_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    12 => ctx.q4_k_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    13 => ctx.q5_k_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    14 => ctx.q6_k_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    other => return Err(unsupported_type(other)),
                 }
             } else {
                 match self.type_id {
                     8 => ctx.q8_0_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
                     2 => ctx.q4_0_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
-                    _ => ctx.q4_1_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    3 => ctx.q4_1_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    12 => ctx.q4_k_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    13 => ctx.q5_k_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    14 => ctx.q6_k_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
+                    other => return Err(unsupported_type(other)),
                 }
             };
         }
@@ -233,10 +258,14 @@ impl Matrix {
             let n = (batch - t0).min(GEMM_MAX_BATCH);
             let (x_off, y_off) = (t0 * cols, t0 * rows);
             match self.type_id {
+                0 => ctx.f32_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
                 1 => ctx.f16_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
                 8 => ctx.q8_0_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
                 2 => ctx.q4_0_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
                 3 => ctx.q4_1_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
+                12 => ctx.q4_k_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
+                13 => ctx.q5_k_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
+                14 => ctx.q6_k_gemm(&self.buf, x, y, rows, cols, n, x_off, y_off)?,
                 other => return Err(unsupported_type(other)),
             }
             t0 += n;
@@ -267,10 +296,20 @@ impl Matrix {
     fn row_into(&self, gpu: &Qwen35Gpu, row: u32, out: &MetalBuffer, out_off: u32) -> Result<()> {
         let ctx = gpu.context();
         match self.type_id {
+            0 => ctx.copy_f32(
+                &self.buf,
+                row * self.in_dim as u32,
+                out,
+                out_off,
+                self.in_dim as u32,
+            ),
             1 => ctx.f16_row(&self.buf, out, row, self.in_dim as u32, out_off),
             8 => ctx.q8_0_row(&self.buf, out, row, self.in_dim as u32, out_off),
             2 => ctx.q4_0_row_f32(&self.buf, out, row, self.in_dim as u32, out_off),
             3 => ctx.q4_1_row_f32(&self.buf, out, row, self.in_dim as u32, out_off),
+            12 => ctx.q4_k_row_f32(&self.buf, out, row, self.in_dim as u32, out_off),
+            13 => ctx.q5_k_row_f32(&self.buf, out, row, self.in_dim as u32, out_off),
+            14 => ctx.q6_k_row_f32(&self.buf, out, row, self.in_dim as u32, out_off),
             other => Err(unsupported_type(other)),
         }
     }

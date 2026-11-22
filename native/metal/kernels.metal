@@ -3095,3 +3095,1649 @@ kernel void ch_q4_1_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         }
     }
 }
+
+
+/* ---------------- Q4_K kernels (2026-11-22) ----------------
+ * Pinned to llama.cpp b11695 (ggml-common.h block_q4_K, ggml-quants.c
+ * dequantize_row_q4_K / get_scale_min_k4): 256-value super-blocks,
+ * bytes [f16 d][f16 dmin][u8 scales; 12][u8 qs; 128]. Eight 32-value
+ * slices; slice k reads bytes [32*(k/2), +32) of qs (low nibbles for
+ * even k, high for odd) with its own (scale, min) pair decoded from
+ * the 12-byte packed form: for k < 4, sc = scales[k] & 63 and
+ * m = scales[k+4] & 63; for k >= 4, sc = (scales[k+4] & 0xF) |
+ * ((scales[k-4] >> 6) << 4) and m = (scales[k+4] >> 4) |
+ * ((scales[k] >> 6) << 4). Value = d*sc*nib - dmin*m. */
+
+kernel void ch_q4_k_gemv(device const uchar *w [[buffer(0)]],
+                         device const float *x [[buffer(1)]],
+                         device float *y [[buffer(2)]],
+                         constant uint &rows [[buffer(3)]],
+                         constant uint &cols [[buffer(4)]],
+                         uint tg [[threadgroup_position_in_grid]],
+                         uint sg [[simdgroup_index_in_threadgroup]],
+                         uint lane [[thread_index_in_simdgroup]]) {
+    const uint blocks = cols / 256u;
+    const size_t row_bytes = (size_t)blocks * 144u;
+    const uint first = (tg * CH_Q8_SG + sg) * CH_Q8_ROWS;
+    if (first >= rows) {
+        return;
+    }
+    const uint k = lane % 8u;        /* 32-value slice of the super-block */
+    const uint lane_sb = lane / 8u; /* which of the 4 super-blocks this step */
+    const bool hi = k % 2u == 1u;
+
+    float acc[CH_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint b = lane_sb; b < blocks; b += 4u) {
+        const device packed_float4 *xv =
+            (const device packed_float4 *)(x + (size_t)b * 256u + k * 32u);
+        float4 x0 = float4(xv[0]);
+        float4 x1 = float4(xv[1]);
+        float4 x2 = float4(xv[2]);
+        float4 x3 = float4(xv[3]);
+        float4 x4 = float4(xv[4]);
+        float4 x5 = float4(xv[5]);
+        float4 x6 = float4(xv[6]);
+        float4 x7 = float4(xv[7]);
+        for (uint r = 0; r < CH_Q8_ROWS; ++r) {
+            const uint row = first + r;
+            if (row >= rows) {
+                break;
+            }
+            const device uchar *blk = w + (size_t)row * row_bytes + (size_t)b * 144u;
+            const float d = (float)(*(const device half *)blk);
+            const float dmin = (float)(*(const device half *)(blk + 2u));
+            const device uchar *sc = blk + 4u;
+            float a, mn;
+            if (k < 4u) {
+                a = (float)(sc[k] & 63u);
+                mn = (float)(sc[k + 4u] & 63u);
+            } else {
+                a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+                mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+            }
+            const float ds = d * a;
+            const float dm = dmin * mn;
+            const device uchar *qs = blk + 16u + 32u * (k / 2u);
+            /* 32 values as eight packed 4-byte loads; the affine dequant
+             * keeps every product inside the f16 domain when staged. */
+            const device packed_uchar4 *qv = (const device packed_uchar4 *)qs;
+            float4 q0, q1, q2, q3, q4, q5, q6, q7;
+            if (!hi) {
+                q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu) * ds - dm;
+                q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu) * ds - dm;
+                q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu) * ds - dm;
+                q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu) * ds - dm;
+                q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu) * ds - dm;
+                q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu) * ds - dm;
+                q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu) * ds - dm;
+                q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu) * ds - dm;
+            } else {
+                q0 = float4(uchar4(qv[0]) >> 4) * ds - dm;
+                q1 = float4(uchar4(qv[1]) >> 4) * ds - dm;
+                q2 = float4(uchar4(qv[2]) >> 4) * ds - dm;
+                q3 = float4(uchar4(qv[3]) >> 4) * ds - dm;
+                q4 = float4(uchar4(qv[4]) >> 4) * ds - dm;
+                q5 = float4(uchar4(qv[5]) >> 4) * ds - dm;
+                q6 = float4(uchar4(qv[6]) >> 4) * ds - dm;
+                q7 = float4(uchar4(qv[7]) >> 4) * ds - dm;
+            }
+            acc[r] += dot(q0, x0) + dot(q1, x1) + dot(q2, x2) + dot(q3, x3)
+                    + dot(q4, x4) + dot(q5, x5) + dot(q6, x6) + dot(q7, x7);
+        }
+    }
+    for (uint r = 0; r < CH_Q8_ROWS; ++r) {
+        const float total = simd_sum(acc[r]);
+        const uint row = first + r;
+        if (lane == 0u && row < rows) {
+            y[row] = total;
+        }
+    }
+}
+
+/* Dequantize one Q4_K matrix row (or embedding row) to f32: one thread
+ * per output element. */
+kernel void ch_q4_k_row_f32(device const uchar *w [[buffer(0)]],
+                            device float *out [[buffer(1)]],
+                            constant uint &row [[buffer(2)]],
+                            constant uint &cols [[buffer(3)]],
+                            constant uint &out_off [[buffer(4)]],
+                            uint gid [[thread_position_in_grid]]) {
+    if (gid >= cols) {
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *blk =
+        w + (size_t)row * (size_t)blocks * 144u + (size_t)(gid / 256u) * 144u;
+    const uint k = (gid % 256u) / 32u;
+    const float d = (float)(*(const device half *)blk);
+    const float dmin = (float)(*(const device half *)(blk + 2u));
+    const device uchar *sc = blk + 4u;
+    float a, mn;
+    if (k < 4u) {
+        a = (float)(sc[k] & 63u);
+        mn = (float)(sc[k + 4u] & 63u);
+    } else {
+        a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+        mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+    }
+    const uint j = gid % 32u;
+    const device uchar *qs = blk + 16u + 32u * (k / 2u) + j;
+    const uint nib = k % 2u == 0u ? (qs[0] & 0x0fu) : (qs[0] >> 4);
+    out[out_off + gid] = d * a * (float)nib - dmin * mn;
+}
+
+kernel void ch_q4_k_row_indirect_f32(device const uchar *w [[buffer(0)]],
+                                     device float *out [[buffer(1)]],
+                                     device const uint *ids [[buffer(2)]],
+                                     constant uint &slot [[buffer(3)]],
+                                     constant uint &rows [[buffer(4)]],
+                                     constant uint &cols [[buffer(5)]],
+                                     uint gid [[thread_position_in_grid]]) {
+    if (gid >= cols) {
+        return;
+    }
+    const uint row = ids[slot];
+    if (row >= rows) {
+        out[gid] = 0.0f;
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *blk =
+        w + ((size_t)row * (size_t)blocks + gid / 256u) * 144u;
+    const uint k = (gid % 256u) / 32u;
+    const float d = (float)(*(const device half *)blk);
+    const float dmin = (float)(*(const device half *)(blk + 2u));
+    const device uchar *sc = blk + 4u;
+    float a, mn;
+    if (k < 4u) {
+        a = (float)(sc[k] & 63u);
+        mn = (float)(sc[k + 4u] & 63u);
+    } else {
+        a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+        mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+    }
+    const uint j = gid % 32u;
+    const device uchar *qs = blk + 16u + 32u * (k / 2u) + j;
+    const uint nib = k % 2u == 0u ? (qs[0] & 0x0fu) : (qs[0] >> 4);
+    out[gid] = d * a * (float)nib - dmin * mn;
+}
+
+/* Mid-batch Q4_K GEMV projection: one threadgroup per output row. */
+kernel void ch_q4_k_gemm(device const uchar *w [[buffer(0)]],
+                         device const float *x [[buffer(1)]],
+                         device float *y [[buffer(2)]],
+                         constant uint &rows [[buffer(3)]],
+                         constant uint &cols [[buffer(4)]],
+                         constant uint &batch [[buffer(5)]],
+                         constant uint &x_off [[buffer(6)]],
+                         constant uint &y_off [[buffer(7)]],
+                         uint row [[threadgroup_position_in_grid]],
+                         uint lane [[thread_position_in_threadgroup]]) {
+    if (row >= rows || batch == 0u || batch > 32u) {
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *wrow = w + (size_t)row * (size_t)blocks * 144u;
+    const uint k = lane % 8u;
+    const uint lane_sb = lane / 8u;
+    const bool hi = k % 2u == 1u;
+    float acc[32];
+    for (uint b = 0; b < batch; ++b) {
+        acc[b] = 0.0f;
+    }
+    for (uint blk = lane_sb; blk < blocks; blk += 4u) {
+        const device uchar *block = wrow + (size_t)blk * 144u;
+        const float d = (float)(*(const device half *)block);
+        const float dmin = (float)(*(const device half *)(block + 2u));
+        const device uchar *sc = block + 4u;
+        float a, mn;
+        if (k < 4u) {
+            a = (float)(sc[k] & 63u);
+            mn = (float)(sc[k + 4u] & 63u);
+        } else {
+            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+        }
+        const float ds = d * a;
+        const float dm = dmin * mn;
+        const device uchar *qs = block + 16u + 32u * (k / 2u);
+        const device packed_uchar4 *qv = (const device packed_uchar4 *)qs;
+        float4 q0, q1, q2, q3, q4, q5, q6, q7;
+        if (!hi) {
+            q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu) * ds - dm;
+            q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu) * ds - dm;
+            q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu) * ds - dm;
+            q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu) * ds - dm;
+            q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu) * ds - dm;
+            q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu) * ds - dm;
+            q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu) * ds - dm;
+            q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu) * ds - dm;
+        } else {
+            q0 = float4(uchar4(qv[0]) >> 4) * ds - dm;
+            q1 = float4(uchar4(qv[1]) >> 4) * ds - dm;
+            q2 = float4(uchar4(qv[2]) >> 4) * ds - dm;
+            q3 = float4(uchar4(qv[3]) >> 4) * ds - dm;
+            q4 = float4(uchar4(qv[4]) >> 4) * ds - dm;
+            q5 = float4(uchar4(qv[5]) >> 4) * ds - dm;
+            q6 = float4(uchar4(qv[6]) >> 4) * ds - dm;
+            q7 = float4(uchar4(qv[7]) >> 4) * ds - dm;
+        }
+        const uint col = blk * 256u + k * 32u;
+        for (uint b = 0; b < batch; ++b) {
+            const device packed_float4 *xv =
+                (const device packed_float4 *)(x + x_off + b * cols + col);
+            acc[b] += dot(q0, float4(xv[0])) + dot(q1, float4(xv[1]))
+                    + dot(q2, float4(xv[2])) + dot(q3, float4(xv[3]))
+                    + dot(q4, float4(xv[4])) + dot(q5, float4(xv[5]))
+                    + dot(q6, float4(xv[6])) + dot(q7, float4(xv[7]));
+        }
+    }
+    for (uint b = 0; b < batch; ++b) {
+        const float total = simd_sum(acc[b]);
+        if (lane == 0u) {
+            y[y_off + b * rows + row] = total;
+        }
+    }
+}
+
+/* Batched Q4_K GEMM on the SIMD-group matrix units (f32 operands). The
+ * 32-value K-step tiles the super-block's eight slices exactly
+ * (slice k = blk & 7), so each thread stages one (scale, min) pair. */
+kernel void ch_q4_k_gemm_mma(device const uchar *w [[buffer(0)]],
+                             device const float *x [[buffer(1)]],
+                             device float *y [[buffer(2)]],
+                             constant uint &rows [[buffer(3)]],
+                             constant uint &cols [[buffer(4)]],
+                             constant uint &batch [[buffer(5)]],
+                             constant uint &x_off [[buffer(6)]],
+                             constant uint &y_off [[buffer(7)]],
+                             uint tg [[threadgroup_position_in_grid]],
+                             uint tid [[thread_position_in_threadgroup]],
+                             uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sa[CH_MMA_ROWS * 32u];
+    threadgroup float sb[CH_MMA_TOK * 32u];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)(cols / 256u) * 144u;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    threadgroup float *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup float *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup float *lsa = sa + 64u * sg_r;
+    const threadgroup float *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
+        const uint k = blk & 7u;
+        const device uchar *block = wrow + (size_t)(blk >> 3) * 144u;
+        const float d = (float)(*(const device half *)block);
+        const float dmin = (float)(*(const device half *)(block + 2u));
+        const device uchar *sc = block + 4u;
+        float a, mn;
+        if (k < 4u) {
+            a = (float)(sc[k] & 63u);
+            mn = (float)(sc[k + 4u] & 63u);
+        } else {
+            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+        }
+        const float ds = d * a;
+        const float dm = dmin * mn;
+        const device uchar *qs = block + 16u + 32u * (k / 2u) + w_k;
+        float wv[16];
+        if (k % 2u == 0u) {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] & 0x0fu) * ds - dm;
+            }
+        } else {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] >> 4) * ds - dm;
+            }
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+        }
+        *(threadgroup float4 *)(sb_dst) = xv0;
+        *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_float8x8 ma[4];
+            simdgroup_float8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *ot = sa;
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * CH_MMA_ROWS + (sg_r + i) * 8u,
+                            CH_MMA_ROWS);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tid; idx < CH_MMA_ROWS * CH_MMA_TOK; idx += 128u) {
+        const uint r = idx % CH_MMA_ROWS;
+        const uint b = idx / CH_MMA_ROWS;
+        if (row0 + r < rows && b < tile_batch) {
+            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * CH_MMA_ROWS + r];
+        }
+    }
+}
+
+/* Batched Q4_K GEMM with f16 operand tiles (metal-f16-act). */
+kernel void ch_q4_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
+                                   device const float *x [[buffer(1)]],
+                                   device float *y [[buffer(2)]],
+                                   constant uint &rows [[buffer(3)]],
+                                   constant uint &cols [[buffer(4)]],
+                                   constant uint &batch [[buffer(5)]],
+                                   constant uint &x_off [[buffer(6)]],
+                                   constant uint &y_off [[buffer(7)]],
+                                   uint tg [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_position_in_threadgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half sa[CH_MMA_ROWS * 32u];
+    threadgroup half sb[CH_MMA_TOK * 32u];
+    threadgroup float edge_frag[4][64];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)(cols / 256u) * 144u;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    threadgroup half *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup half *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup half *lsa = sa + 64u * sg_r;
+    const threadgroup half *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
+        const uint k = blk & 7u;
+        const device uchar *block = wrow + (size_t)(blk >> 3) * 144u;
+        const float d = (float)(*(const device half *)block);
+        const float dmin = (float)(*(const device half *)(block + 2u));
+        const device uchar *sc = block + 4u;
+        float a, mn;
+        if (k < 4u) {
+            a = (float)(sc[k] & 63u);
+            mn = (float)(sc[k + 4u] & 63u);
+        } else {
+            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+        }
+        const float ds = d * a;
+        const float dm = dmin * mn;
+        const device uchar *qs = block + 16u + 32u * (k / 2u) + w_k;
+        float wv[16];
+        if (k % 2u == 0u) {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] & 0x0fu) * ds - dm;
+            }
+        } else {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] >> 4) * ds - dm;
+            }
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+        }
+        *(threadgroup half4 *)(sb_dst) = half4(xv0);
+        *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_half8x8 ma[4];
+            simdgroup_half8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    const uint tok_end = tok0 + tile_batch;
+    {
+        threadgroup float * const edge_frag_mine = edge_frag[sg];
+        const uint rb_base = row0 + sg_r * 8u;
+        const uint tb_base = tok0 + sg_t * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                const uint rb = rb_base + i * 8u;
+                const uint tb = tb_base + j * 8u;
+                if (rb >= rows || tb >= tok_end) {
+                    continue;
+                }
+                if (rb + 8u <= rows && tb + 8u <= tok_end) {
+                    simdgroup_store(mc[j][i], y + y_off + (size_t)tb * rows + rb, rows);
+                } else {
+                    simdgroup_store(mc[j][i], edge_frag_mine, 8);
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                    for (uint lane = tid % 32u; lane < 64u; lane += 32u) {
+                        const uint fr = lane / 8u;
+                        const uint ft = lane % 8u;
+                        if (tb + fr < tok_end && rb + ft < rows) {
+                            y[y_off + (size_t)(tb + fr) * rows + rb + ft] =
+                                edge_frag_mine[fr * 8u + ft];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/* ---------------- Q6_K kernels (2026-11-22) ----------------
+ * Pinned to llama.cpp b11695 (ggml-common.h block_q6_K, ggml-quants.c
+ * dequantize_row_q6_K): 256-value super-blocks, bytes [u8 ql; 128][u8 qh;
+ * 64][i8 scales; 16][f16 d]. Sixteen 16-value slices; slice k (value
+ * range [16k, 16k+16)) reads ql bytes [64*(k/8) + 32*((k%8)/2 % 2) +
+ * 16*(k%2), +16) — low nibble when (k%8)/2 < 2, high when >= 2 — and qh
+ * bytes [32*(k/8) + 16*(k%2), +16) at bit shift 2*((k%8)/2), with the
+ * int8 scale scales[k]. Value = d * scales[k] * (q - 32), where
+ * q = nibble | (((qh >> shift) & 3) << 4). */
+
+kernel void ch_q6_k_gemv(device const uchar *w [[buffer(0)]],
+                         device const float *x [[buffer(1)]],
+                         device float *y [[buffer(2)]],
+                         constant uint &rows [[buffer(3)]],
+                         constant uint &cols [[buffer(4)]],
+                         uint tg [[threadgroup_position_in_grid]],
+                         uint sg [[simdgroup_index_in_threadgroup]],
+                         uint lane [[thread_index_in_simdgroup]]) {
+    const uint blocks = cols / 256u;
+    const size_t row_bytes = (size_t)blocks * 210u;
+    const uint first = (tg * CH_Q8_SG + sg) * CH_Q8_ROWS;
+    if (first >= rows) {
+        return;
+    }
+    const uint k = lane % 16u;      /* 16-value slice of the super-block */
+    const uint lane_sb = lane / 16u; /* which of the 2 super-blocks this step */
+    const uint c = k / 8u;
+    const uint jj = (k % 8u) / 2u;
+    const bool hi = jj >= 2u;
+    const uint l0 = 16u * (k % 2u);
+    const uint ql0 = 64u * c + 32u * (jj % 2u) + l0;
+    const uint qh0 = 32u * c + l0;
+    const uint shift = 2u * jj;
+
+    float acc[CH_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint b = lane_sb; b < blocks; b += 2u) {
+        const device packed_float4 *xv =
+            (const device packed_float4 *)(x + (size_t)b * 256u + k * 16u);
+        float4 x0 = float4(xv[0]);
+        float4 x1 = float4(xv[1]);
+        float4 x2 = float4(xv[2]);
+        float4 x3 = float4(xv[3]);
+        for (uint r = 0; r < CH_Q8_ROWS; ++r) {
+            const uint row = first + r;
+            if (row >= rows) {
+                break;
+            }
+            const device uchar *blk = w + (size_t)row * row_bytes + (size_t)b * 210u;
+            const float d = (float)(*(const device half *)(blk + 208u));
+            const float s = (float)((const device int8_t *)(blk + 192u))[k];
+            const float ds = d * s;
+            const device packed_uchar4 *qlv = (const device packed_uchar4 *)(blk + ql0);
+            const device packed_uchar4 *qhv = (const device packed_uchar4 *)(blk + 128u + qh0);
+            float4 q0, q1, q2, q3;
+            if (!hi) {
+                q0 = float4(uchar4(qlv[0]) & (uchar4)0x0fu);
+                q1 = float4(uchar4(qlv[1]) & (uchar4)0x0fu);
+                q2 = float4(uchar4(qlv[2]) & (uchar4)0x0fu);
+                q3 = float4(uchar4(qlv[3]) & (uchar4)0x0fu);
+            } else {
+                q0 = float4(uchar4(qlv[0]) >> 4);
+                q1 = float4(uchar4(qlv[1]) >> 4);
+                q2 = float4(uchar4(qlv[2]) >> 4);
+                q3 = float4(uchar4(qlv[3]) >> 4);
+            }
+            const uchar4 h0 = uchar4(qhv[0]);
+            const uchar4 h1 = uchar4(qhv[1]);
+            const uchar4 h2 = uchar4(qhv[2]);
+            const uchar4 h3 = uchar4(qhv[3]);
+            q0 += float4(h0 >> shift & (uchar4)3u) * 16.0f;
+            q1 += float4(h1 >> shift & (uchar4)3u) * 16.0f;
+            q2 += float4(h2 >> shift & (uchar4)3u) * 16.0f;
+            q3 += float4(h3 >> shift & (uchar4)3u) * 16.0f;
+            acc[r] += ds * (dot(q0 - 32.0f, x0) + dot(q1 - 32.0f, x1)
+                          + dot(q2 - 32.0f, x2) + dot(q3 - 32.0f, x3));
+        }
+    }
+    for (uint r = 0; r < CH_Q8_ROWS; ++r) {
+        const float total = simd_sum(acc[r]);
+        const uint row = first + r;
+        if (lane == 0u && row < rows) {
+            y[row] = total;
+        }
+    }
+}
+
+/* Dequantize one Q6_K matrix row (or embedding row) to f32: one thread
+ * per output element. */
+kernel void ch_q6_k_row_f32(device const uchar *w [[buffer(0)]],
+                            device float *out [[buffer(1)]],
+                            constant uint &row [[buffer(2)]],
+                            constant uint &cols [[buffer(3)]],
+                            constant uint &out_off [[buffer(4)]],
+                            uint gid [[thread_position_in_grid]]) {
+    if (gid >= cols) {
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *blk =
+        w + (size_t)row * (size_t)blocks * 210u + (size_t)(gid / 256u) * 210u;
+    const uint r = gid % 256u;
+    const uint c = r / 128u;
+    const uint jj = (r % 128u) / 32u;
+    const uint l = r % 32u;
+    const float d = (float)(*(const device half *)(blk + 208u));
+    const float s = (float)((const device int8_t *)(blk + 192u))[r / 16u];
+    const uint nib = jj < 2u ? (blk[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
+                             : (blk[64u * c + 32u * (jj % 2u) + l] >> 4);
+    const uint qh = (blk[128u + 32u * c + l] >> (2u * jj)) & 3u;
+    out[out_off + gid] = d * s * ((float)(nib | (qh << 4)) - 32.0f);
+}
+
+kernel void ch_q6_k_row_indirect_f32(device const uchar *w [[buffer(0)]],
+                                     device float *out [[buffer(1)]],
+                                     device const uint *ids [[buffer(2)]],
+                                     constant uint &slot [[buffer(3)]],
+                                     constant uint &rows [[buffer(4)]],
+                                     constant uint &cols [[buffer(5)]],
+                                     uint gid [[thread_position_in_grid]]) {
+    if (gid >= cols) {
+        return;
+    }
+    const uint row = ids[slot];
+    if (row >= rows) {
+        out[gid] = 0.0f;
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *blk =
+        w + ((size_t)row * (size_t)blocks + gid / 256u) * 210u;
+    const uint r = gid % 256u;
+    const uint c = r / 128u;
+    const uint jj = (r % 128u) / 32u;
+    const uint l = r % 32u;
+    const float d = (float)(*(const device half *)(blk + 208u));
+    const float s = (float)((const device int8_t *)(blk + 192u))[r / 16u];
+    const uint nib = jj < 2u ? (blk[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
+                             : (blk[64u * c + 32u * (jj % 2u) + l] >> 4);
+    const uint qh = (blk[128u + 32u * c + l] >> (2u * jj)) & 3u;
+    out[gid] = d * s * ((float)(nib | (qh << 4)) - 32.0f);
+}
+
+/* Mid-batch Q6_K GEMV projection: one threadgroup per output row. */
+kernel void ch_q6_k_gemm(device const uchar *w [[buffer(0)]],
+                         device const float *x [[buffer(1)]],
+                         device float *y [[buffer(2)]],
+                         constant uint &rows [[buffer(3)]],
+                         constant uint &cols [[buffer(4)]],
+                         constant uint &batch [[buffer(5)]],
+                         constant uint &x_off [[buffer(6)]],
+                         constant uint &y_off [[buffer(7)]],
+                         uint row [[threadgroup_position_in_grid]],
+                         uint lane [[thread_position_in_threadgroup]]) {
+    if (row >= rows || batch == 0u || batch > 32u) {
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *wrow = w + (size_t)row * (size_t)blocks * 210u;
+    const uint k = lane % 16u;
+    const uint lane_sb = lane / 16u;
+    const uint c = k / 8u;
+    const uint jj = (k % 8u) / 2u;
+    const bool hi = jj >= 2u;
+    const uint l0 = 16u * (k % 2u);
+    const uint ql0 = 64u * c + 32u * (jj % 2u) + l0;
+    const uint qh0 = 32u * c + l0;
+    const uint shift = 2u * jj;
+    float acc[32];
+    for (uint b = 0; b < batch; ++b) {
+        acc[b] = 0.0f;
+    }
+    for (uint blk = lane_sb; blk < blocks; blk += 2u) {
+        const device uchar *block = wrow + (size_t)blk * 210u;
+        const float d = (float)(*(const device half *)(block + 208u));
+        const float s = (float)((const device int8_t *)(block + 192u))[k];
+        const float ds = d * s;
+        const device packed_uchar4 *qlv = (const device packed_uchar4 *)(block + ql0);
+        const device packed_uchar4 *qhv = (const device packed_uchar4 *)(block + 128u + qh0);
+        float4 q0, q1, q2, q3;
+        if (!hi) {
+            q0 = float4(uchar4(qlv[0]) & (uchar4)0x0fu);
+            q1 = float4(uchar4(qlv[1]) & (uchar4)0x0fu);
+            q2 = float4(uchar4(qlv[2]) & (uchar4)0x0fu);
+            q3 = float4(uchar4(qlv[3]) & (uchar4)0x0fu);
+        } else {
+            q0 = float4(uchar4(qlv[0]) >> 4);
+            q1 = float4(uchar4(qlv[1]) >> 4);
+            q2 = float4(uchar4(qlv[2]) >> 4);
+            q3 = float4(uchar4(qlv[3]) >> 4);
+        }
+        const uchar4 h0 = uchar4(qhv[0]);
+        const uchar4 h1 = uchar4(qhv[1]);
+        const uchar4 h2 = uchar4(qhv[2]);
+        const uchar4 h3 = uchar4(qhv[3]);
+        q0 += float4(h0 >> shift & (uchar4)3u) * 16.0f;
+        q1 += float4(h1 >> shift & (uchar4)3u) * 16.0f;
+        q2 += float4(h2 >> shift & (uchar4)3u) * 16.0f;
+        q3 += float4(h3 >> shift & (uchar4)3u) * 16.0f;
+        q0 -= 32.0f;
+        q1 -= 32.0f;
+        q2 -= 32.0f;
+        q3 -= 32.0f;
+        const uint col = blk * 256u + k * 16u;
+        for (uint b = 0; b < batch; ++b) {
+            const device packed_float4 *xv =
+                (const device packed_float4 *)(x + x_off + b * cols + col);
+            acc[b] += ds * (dot(q0, float4(xv[0])) + dot(q1, float4(xv[1]))
+                          + dot(q2, float4(xv[2])) + dot(q3, float4(xv[3])));
+        }
+    }
+    for (uint b = 0; b < batch; ++b) {
+        const float total = simd_sum(acc[b]);
+        if (lane == 0u) {
+            y[y_off + b * rows + row] = total;
+        }
+    }
+}
+
+/* Batched Q6_K GEMM on the SIMD-group matrix units (f32 operands). The
+ * 32-value K-step spans two 16-value slices; each staging thread's 16
+ * values sit inside one slice, so one int8 scale per thread per step. */
+kernel void ch_q6_k_gemm_mma(device const uchar *w [[buffer(0)]],
+                             device const float *x [[buffer(1)]],
+                             device float *y [[buffer(2)]],
+                             constant uint &rows [[buffer(3)]],
+                             constant uint &cols [[buffer(4)]],
+                             constant uint &batch [[buffer(5)]],
+                             constant uint &x_off [[buffer(6)]],
+                             constant uint &y_off [[buffer(7)]],
+                             uint tg [[threadgroup_position_in_grid]],
+                             uint tid [[thread_position_in_threadgroup]],
+                             uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sa[CH_MMA_ROWS * 32u];
+    threadgroup float sb[CH_MMA_TOK * 32u];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)(cols / 256u) * 210u;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    threadgroup float *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup float *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup float *lsa = sa + 64u * sg_r;
+    const threadgroup float *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
+        const device uchar *block = wrow + (size_t)(blk >> 3) * 210u;
+        const float d = (float)(*(const device half *)(block + 208u));
+        const uint v0 = blk * 32u + w_k;
+        const uint r0 = v0 & 255u;
+        const float s = (float)((const device int8_t *)(block + 192u))[(r0 / 16u) & 15u];
+        const float ds = d * s;
+        const device uchar *qlb = block;
+        const device uchar *qhb = block + 128u;
+        float wv[16];
+        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+            const uint r = r0 + i;
+            const uint c = r / 128u;
+            const uint jj = (r % 128u) / 32u;
+            const uint l = r % 32u;
+            const uint nib = jj < 2u ? (qlb[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
+                                     : (qlb[64u * c + 32u * (jj % 2u) + l] >> 4);
+            const uint qh = (qhb[32u * c + l] >> (2u * jj)) & 3u;
+            wv[i] = ds * ((float)(nib | (qh << 4)) - 32.0f);
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+        }
+        *(threadgroup float4 *)(sb_dst) = xv0;
+        *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_float8x8 ma[4];
+            simdgroup_float8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *ot = sa;
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * CH_MMA_ROWS + (sg_r + i) * 8u,
+                            CH_MMA_ROWS);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tid; idx < CH_MMA_ROWS * CH_MMA_TOK; idx += 128u) {
+        const uint r = idx % CH_MMA_ROWS;
+        const uint b = idx / CH_MMA_ROWS;
+        if (row0 + r < rows && b < tile_batch) {
+            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * CH_MMA_ROWS + r];
+        }
+    }
+}
+
+/* Batched Q6_K GEMM with f16 operand tiles (metal-f16-act). */
+kernel void ch_q6_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
+                                   device const float *x [[buffer(1)]],
+                                   device float *y [[buffer(2)]],
+                                   constant uint &rows [[buffer(3)]],
+                                   constant uint &cols [[buffer(4)]],
+                                   constant uint &batch [[buffer(5)]],
+                                   constant uint &x_off [[buffer(6)]],
+                                   constant uint &y_off [[buffer(7)]],
+                                   uint tg [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_position_in_threadgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half sa[CH_MMA_ROWS * 32u];
+    threadgroup half sb[CH_MMA_TOK * 32u];
+    threadgroup float edge_frag[4][64];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)(cols / 256u) * 210u;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    threadgroup half *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup half *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup half *lsa = sa + 64u * sg_r;
+    const threadgroup half *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
+        const device uchar *block = wrow + (size_t)(blk >> 3) * 210u;
+        const float d = (float)(*(const device half *)(block + 208u));
+        const uint v0 = blk * 32u + w_k;
+        const uint r0 = v0 & 255u;
+        const float s = (float)((const device int8_t *)(block + 192u))[(r0 / 16u) & 15u];
+        const float ds = d * s;
+        const device uchar *qlb = block;
+        const device uchar *qhb = block + 128u;
+        float wv[16];
+        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+            const uint r = r0 + i;
+            const uint c = r / 128u;
+            const uint jj = (r % 128u) / 32u;
+            const uint l = r % 32u;
+            const uint nib = jj < 2u ? (qlb[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
+                                     : (qlb[64u * c + 32u * (jj % 2u) + l] >> 4);
+            const uint qh = (qhb[32u * c + l] >> (2u * jj)) & 3u;
+            wv[i] = ds * ((float)(nib | (qh << 4)) - 32.0f);
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+        }
+        *(threadgroup half4 *)(sb_dst) = half4(xv0);
+        *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_half8x8 ma[4];
+            simdgroup_half8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    const uint tok_end = tok0 + tile_batch;
+    {
+        threadgroup float * const edge_frag_mine = edge_frag[sg];
+        const uint rb_base = row0 + sg_r * 8u;
+        const uint tb_base = tok0 + sg_t * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                const uint rb = rb_base + i * 8u;
+                const uint tb = tb_base + j * 8u;
+                if (rb >= rows || tb >= tok_end) {
+                    continue;
+                }
+                if (rb + 8u <= rows && tb + 8u <= tok_end) {
+                    simdgroup_store(mc[j][i], y + y_off + (size_t)tb * rows + rb, rows);
+                } else {
+                    simdgroup_store(mc[j][i], edge_frag_mine, 8);
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                    for (uint lane = tid % 32u; lane < 64u; lane += 32u) {
+                        const uint fr = lane / 8u;
+                        const uint ft = lane % 8u;
+                        if (tb + fr < tok_end && rb + ft < rows) {
+                            y[y_off + (size_t)(tb + fr) * rows + rb + ft] =
+                                edge_frag_mine[fr * 8u + ft];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/* ---------------- Q5_K kernels (2026-11-22) ----------------
+ * Pinned to llama.cpp b11695 (block_q5_K, dequantize_row_q5_K):
+ * 256-value super-blocks, bytes [f16 d][f16 dmin][u8 scales; 12][u8
+ * qh; 32][u8 qs; 128]. Same eight-slice layout and 6-bit scale packing
+ * as Q4_K; slice k reads ql bytes [48 + 32*(k/2), +32) (low nibble
+ * for even k, high for odd) with its high bit in qh[l] at shift
+ * 2*(k/2) + (k%2), and value = d*sc*(nib + (hbit << 4)) - dmin*m. */
+
+kernel void ch_q5_k_gemv(device const uchar *w [[buffer(0)]],
+                         device const float *x [[buffer(1)]],
+                         device float *y [[buffer(2)]],
+                         constant uint &rows [[buffer(3)]],
+                         constant uint &cols [[buffer(4)]],
+                         uint tg [[threadgroup_position_in_grid]],
+                         uint sg [[simdgroup_index_in_threadgroup]],
+                         uint lane [[thread_index_in_simdgroup]]) {
+    const uint blocks = cols / 256u;
+    const size_t row_bytes = (size_t)blocks * 176u;
+    const uint first = (tg * CH_Q8_SG + sg) * CH_Q8_ROWS;
+    if (first >= rows) {
+        return;
+    }
+    const uint k = lane % 8u;
+    const uint lane_sb = lane / 8u;
+    const bool hi = k % 2u == 1u;
+    const uint shift = 2u * (k / 2u) + (k % 2u);
+
+    float acc[CH_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint b = lane_sb; b < blocks; b += 4u) {
+        const device packed_float4 *xv =
+            (const device packed_float4 *)(x + (size_t)b * 256u + k * 32u);
+        float4 x0 = float4(xv[0]);
+        float4 x1 = float4(xv[1]);
+        float4 x2 = float4(xv[2]);
+        float4 x3 = float4(xv[3]);
+        float4 x4 = float4(xv[4]);
+        float4 x5 = float4(xv[5]);
+        float4 x6 = float4(xv[6]);
+        float4 x7 = float4(xv[7]);
+        for (uint r = 0; r < CH_Q8_ROWS; ++r) {
+            const uint row = first + r;
+            if (row >= rows) {
+                break;
+            }
+            const device uchar *blk = w + (size_t)row * row_bytes + (size_t)b * 176u;
+            const float d = (float)(*(const device half *)blk);
+            const float dmin = (float)(*(const device half *)(blk + 2u));
+            const device uchar *sc = blk + 4u;
+            float a, mn;
+            if (k < 4u) {
+                a = (float)(sc[k] & 63u);
+                mn = (float)(sc[k + 4u] & 63u);
+            } else {
+                a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+                mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+            }
+            const float ds = d * a;
+            const float dm = dmin * mn;
+            const device packed_uchar4 *qv =
+                (const device packed_uchar4 *)(blk + 48u + 32u * (k / 2u));
+            const device packed_uchar4 *hv = (const device packed_uchar4 *)(blk + 16u);
+            const uchar4 h0 = uchar4(hv[0]);
+            const uchar4 h1 = uchar4(hv[1]);
+            const uchar4 h2 = uchar4(hv[2]);
+            const uchar4 h3 = uchar4(hv[3]);
+            const uchar4 h4 = uchar4(hv[4]);
+            const uchar4 h5 = uchar4(hv[5]);
+            const uchar4 h6 = uchar4(hv[6]);
+            const uchar4 h7 = uchar4(hv[7]);
+            const uchar4 hb0 = (h0 >> shift) & (uchar4)1u;
+            const uchar4 hb1 = (h1 >> shift) & (uchar4)1u;
+            const uchar4 hb2 = (h2 >> shift) & (uchar4)1u;
+            const uchar4 hb3 = (h3 >> shift) & (uchar4)1u;
+            const uchar4 hb4 = (h4 >> shift) & (uchar4)1u;
+            const uchar4 hb5 = (h5 >> shift) & (uchar4)1u;
+            const uchar4 hb6 = (h6 >> shift) & (uchar4)1u;
+            const uchar4 hb7 = (h7 >> shift) & (uchar4)1u;
+            float4 q0, q1, q2, q3, q4, q5, q6, q7;
+            if (!hi) {
+                q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu) + float4(hb0) * 16.0f;
+                q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu) + float4(hb1) * 16.0f;
+                q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu) + float4(hb2) * 16.0f;
+                q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu) + float4(hb3) * 16.0f;
+                q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu) + float4(hb4) * 16.0f;
+                q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu) + float4(hb5) * 16.0f;
+                q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu) + float4(hb6) * 16.0f;
+                q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu) + float4(hb7) * 16.0f;
+            } else {
+                q0 = float4(uchar4(qv[0]) >> 4) + float4(hb0) * 16.0f;
+                q1 = float4(uchar4(qv[1]) >> 4) + float4(hb1) * 16.0f;
+                q2 = float4(uchar4(qv[2]) >> 4) + float4(hb2) * 16.0f;
+                q3 = float4(uchar4(qv[3]) >> 4) + float4(hb3) * 16.0f;
+                q4 = float4(uchar4(qv[4]) >> 4) + float4(hb4) * 16.0f;
+                q5 = float4(uchar4(qv[5]) >> 4) + float4(hb5) * 16.0f;
+                q6 = float4(uchar4(qv[6]) >> 4) + float4(hb6) * 16.0f;
+                q7 = float4(uchar4(qv[7]) >> 4) + float4(hb7) * 16.0f;
+            }
+            acc[r] += (dot(q0 * ds - dm, x0) + dot(q1 * ds - dm, x1)
+                     + dot(q2 * ds - dm, x2) + dot(q3 * ds - dm, x3)
+                     + dot(q4 * ds - dm, x4) + dot(q5 * ds - dm, x5)
+                     + dot(q6 * ds - dm, x6) + dot(q7 * ds - dm, x7));
+        }
+    }
+    for (uint r = 0; r < CH_Q8_ROWS; ++r) {
+        const float total = simd_sum(acc[r]);
+        const uint row = first + r;
+        if (lane == 0u && row < rows) {
+            y[row] = total;
+        }
+    }
+}
+
+/* Dequantize one Q5_K matrix row (or embedding row) to f32: one thread
+ * per output element. */
+kernel void ch_q5_k_row_f32(device const uchar *w [[buffer(0)]],
+                            device float *out [[buffer(1)]],
+                            constant uint &row [[buffer(2)]],
+                            constant uint &cols [[buffer(3)]],
+                            constant uint &out_off [[buffer(4)]],
+                            uint gid [[thread_position_in_grid]]) {
+    if (gid >= cols) {
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *blk =
+        w + (size_t)row * (size_t)blocks * 176u + (size_t)(gid / 256u) * 176u;
+    const uint k = (gid % 256u) / 32u;
+    const float d = (float)(*(const device half *)blk);
+    const float dmin = (float)(*(const device half *)(blk + 2u));
+    const device uchar *sc = blk + 4u;
+    float a, mn;
+    if (k < 4u) {
+        a = (float)(sc[k] & 63u);
+        mn = (float)(sc[k + 4u] & 63u);
+    } else {
+        a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+        mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+    }
+    const uint j = gid % 32u;
+    const device uchar *qs = blk + 48u + 32u * (k / 2u) + j;
+    const uint nib = k % 2u == 0u ? (qs[0] & 0x0fu) : (qs[0] >> 4);
+    const uint hb = (blk[16u + j] >> (2u * (k / 2u) + (k % 2u))) & 1u;
+    out[out_off + gid] = d * a * ((float)(nib | (hb << 4)) - 0.0f) - dmin * mn;
+}
+
+kernel void ch_q5_k_row_indirect_f32(device const uchar *w [[buffer(0)]],
+                                     device float *out [[buffer(1)]],
+                                     device const uint *ids [[buffer(2)]],
+                                     constant uint &slot [[buffer(3)]],
+                                     constant uint &rows [[buffer(4)]],
+                                     constant uint &cols [[buffer(5)]],
+                                     uint gid [[thread_position_in_grid]]) {
+    if (gid >= cols) {
+        return;
+    }
+    const uint row = ids[slot];
+    if (row >= rows) {
+        out[gid] = 0.0f;
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *blk =
+        w + ((size_t)row * (size_t)blocks + gid / 256u) * 176u;
+    const uint k = (gid % 256u) / 32u;
+    const float d = (float)(*(const device half *)blk);
+    const float dmin = (float)(*(const device half *)(blk + 2u));
+    const device uchar *sc = blk + 4u;
+    float a, mn;
+    if (k < 4u) {
+        a = (float)(sc[k] & 63u);
+        mn = (float)(sc[k + 4u] & 63u);
+    } else {
+        a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+        mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+    }
+    const uint j = gid % 32u;
+    const device uchar *qs = blk + 48u + 32u * (k / 2u) + j;
+    const uint nib = k % 2u == 0u ? (qs[0] & 0x0fu) : (qs[0] >> 4);
+    const uint hb = (blk[16u + j] >> (2u * (k / 2u) + (k % 2u))) & 1u;
+    out[gid] = d * a * (float)(nib | (hb << 4)) - dmin * mn;
+}
+
+/* Mid-batch Q5_K GEMV projection: one threadgroup per output row. */
+kernel void ch_q5_k_gemm(device const uchar *w [[buffer(0)]],
+                         device const float *x [[buffer(1)]],
+                         device float *y [[buffer(2)]],
+                         constant uint &rows [[buffer(3)]],
+                         constant uint &cols [[buffer(4)]],
+                         constant uint &batch [[buffer(5)]],
+                         constant uint &x_off [[buffer(6)]],
+                         constant uint &y_off [[buffer(7)]],
+                         uint row [[threadgroup_position_in_grid]],
+                         uint lane [[thread_position_in_threadgroup]]) {
+    if (row >= rows || batch == 0u || batch > 32u) {
+        return;
+    }
+    const uint blocks = cols / 256u;
+    const device uchar *wrow = w + (size_t)row * (size_t)blocks * 176u;
+    const uint k = lane % 8u;
+    const uint lane_sb = lane / 8u;
+    const bool hi = k % 2u == 1u;
+    const uint shift = 2u * (k / 2u) + (k % 2u);
+    float acc[32];
+    for (uint b = 0; b < batch; ++b) {
+        acc[b] = 0.0f;
+    }
+    for (uint blk = lane_sb; blk < blocks; blk += 4u) {
+        const device uchar *block = wrow + (size_t)blk * 176u;
+        const float d = (float)(*(const device half *)block);
+        const float dmin = (float)(*(const device half *)(block + 2u));
+        const device uchar *sc = block + 4u;
+        float a, mn;
+        if (k < 4u) {
+            a = (float)(sc[k] & 63u);
+            mn = (float)(sc[k + 4u] & 63u);
+        } else {
+            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+        }
+        const float ds = d * a;
+        const float dm = dmin * mn;
+        const device packed_uchar4 *qv =
+            (const device packed_uchar4 *)(block + 48u + 32u * (k / 2u));
+        const device packed_uchar4 *hv = (const device packed_uchar4 *)(block + 16u);
+        const uchar4 h0 = (uchar4(hv[0]) >> shift) & (uchar4)1u;
+        const uchar4 h1 = (uchar4(hv[1]) >> shift) & (uchar4)1u;
+        const uchar4 h2 = (uchar4(hv[2]) >> shift) & (uchar4)1u;
+        const uchar4 h3 = (uchar4(hv[3]) >> shift) & (uchar4)1u;
+        const uchar4 h4 = (uchar4(hv[4]) >> shift) & (uchar4)1u;
+        const uchar4 h5 = (uchar4(hv[5]) >> shift) & (uchar4)1u;
+        const uchar4 h6 = (uchar4(hv[6]) >> shift) & (uchar4)1u;
+        const uchar4 h7 = (uchar4(hv[7]) >> shift) & (uchar4)1u;
+        float4 q0, q1, q2, q3, q4, q5, q6, q7;
+        if (!hi) {
+            q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu) + float4(h0) * 16.0f;
+            q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu) + float4(h1) * 16.0f;
+            q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu) + float4(h2) * 16.0f;
+            q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu) + float4(h3) * 16.0f;
+            q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu) + float4(h4) * 16.0f;
+            q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu) + float4(h5) * 16.0f;
+            q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu) + float4(h6) * 16.0f;
+            q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu) + float4(h7) * 16.0f;
+        } else {
+            q0 = float4(uchar4(qv[0]) >> 4) + float4(h0) * 16.0f;
+            q1 = float4(uchar4(qv[1]) >> 4) + float4(h1) * 16.0f;
+            q2 = float4(uchar4(qv[2]) >> 4) + float4(h2) * 16.0f;
+            q3 = float4(uchar4(qv[3]) >> 4) + float4(h3) * 16.0f;
+            q4 = float4(uchar4(qv[4]) >> 4) + float4(h4) * 16.0f;
+            q5 = float4(uchar4(qv[5]) >> 4) + float4(h5) * 16.0f;
+            q6 = float4(uchar4(qv[6]) >> 4) + float4(h6) * 16.0f;
+            q7 = float4(uchar4(qv[7]) >> 4) + float4(h7) * 16.0f;
+        }
+        q0 = q0 * ds - dm;
+        q1 = q1 * ds - dm;
+        q2 = q2 * ds - dm;
+        q3 = q3 * ds - dm;
+        q4 = q4 * ds - dm;
+        q5 = q5 * ds - dm;
+        q6 = q6 * ds - dm;
+        q7 = q7 * ds - dm;
+        const uint col = blk * 256u + k * 32u;
+        for (uint b = 0; b < batch; ++b) {
+            const device packed_float4 *xv =
+                (const device packed_float4 *)(x + x_off + b * cols + col);
+            acc[b] += dot(q0, float4(xv[0])) + dot(q1, float4(xv[1]))
+                    + dot(q2, float4(xv[2])) + dot(q3, float4(xv[3]))
+                    + dot(q4, float4(xv[4])) + dot(q5, float4(xv[5]))
+                    + dot(q6, float4(xv[6])) + dot(q7, float4(xv[7]));
+        }
+    }
+    for (uint b = 0; b < batch; ++b) {
+        const float total = simd_sum(acc[b]);
+        if (lane == 0u) {
+            y[y_off + b * rows + row] = total;
+        }
+    }
+}
+
+/* Batched Q5_K GEMM on the SIMD-group matrix units (f32 operands). The
+ * 32-value K-step tiles the super-block's eight slices exactly
+ * (slice k = blk & 7), so each thread stages one (scale, min) pair. */
+kernel void ch_q5_k_gemm_mma(device const uchar *w [[buffer(0)]],
+                             device const float *x [[buffer(1)]],
+                             device float *y [[buffer(2)]],
+                             constant uint &rows [[buffer(3)]],
+                             constant uint &cols [[buffer(4)]],
+                             constant uint &batch [[buffer(5)]],
+                             constant uint &x_off [[buffer(6)]],
+                             constant uint &y_off [[buffer(7)]],
+                             uint tg [[threadgroup_position_in_grid]],
+                             uint tid [[thread_position_in_threadgroup]],
+                             uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sa[CH_MMA_ROWS * 32u];
+    threadgroup float sb[CH_MMA_TOK * 32u];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)(cols / 256u) * 176u;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    threadgroup float *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup float *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup float *lsa = sa + 64u * sg_r;
+    const threadgroup float *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
+        const uint k = blk & 7u;
+        const device uchar *block = wrow + (size_t)(blk >> 3) * 176u;
+        const float d = (float)(*(const device half *)block);
+        const float dmin = (float)(*(const device half *)(block + 2u));
+        const device uchar *sc = block + 4u;
+        float a, mn;
+        if (k < 4u) {
+            a = (float)(sc[k] & 63u);
+            mn = (float)(sc[k + 4u] & 63u);
+        } else {
+            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+        }
+        const float ds = d * a;
+        const float dm = dmin * mn;
+        const device uchar *qs = block + 48u + 32u * (k / 2u) + w_k;
+        const device uchar *qh = block + 16u + w_k;
+        const uint shift = 2u * (k / 2u) + (k % 2u);
+        float wv[16];
+        if (k % 2u == 0u) {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] & 0x0fu;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
+        } else {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] >> 4;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+        }
+        *(threadgroup float4 *)(sb_dst) = xv0;
+        *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_float8x8 ma[4];
+            simdgroup_float8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *ot = sa;
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * CH_MMA_ROWS + (sg_r + i) * 8u,
+                            CH_MMA_ROWS);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tid; idx < CH_MMA_ROWS * CH_MMA_TOK; idx += 128u) {
+        const uint r = idx % CH_MMA_ROWS;
+        const uint b = idx / CH_MMA_ROWS;
+        if (row0 + r < rows && b < tile_batch) {
+            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * CH_MMA_ROWS + r];
+        }
+    }
+}
+
+/* Batched Q5_K GEMM with f16 operand tiles (metal-f16-act). */
+kernel void ch_q5_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
+                                   device const float *x [[buffer(1)]],
+                                   device float *y [[buffer(2)]],
+                                   constant uint &rows [[buffer(3)]],
+                                   constant uint &cols [[buffer(4)]],
+                                   constant uint &batch [[buffer(5)]],
+                                   constant uint &x_off [[buffer(6)]],
+                                   constant uint &y_off [[buffer(7)]],
+                                   uint tg [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_position_in_threadgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half sa[CH_MMA_ROWS * 32u];
+    threadgroup half sb[CH_MMA_TOK * 32u];
+    threadgroup float edge_frag[4][64];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint blocks = cols / 32u;
+    const size_t row_bytes = (size_t)(cols / 256u) * 176u;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device uchar *wrow = w + (size_t)min(row0 + w_r, rows - 1u) * row_bytes;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow = x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * cols + x_k;
+
+    threadgroup half *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup half *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup half *lsa = sa + 64u * sg_r;
+    const threadgroup half *lsb = sb + 64u * sg_t;
+    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
+        const uint k = blk & 7u;
+        const device uchar *block = wrow + (size_t)(blk >> 3) * 176u;
+        const float d = (float)(*(const device half *)block);
+        const float dmin = (float)(*(const device half *)(block + 2u));
+        const device uchar *sc = block + 4u;
+        float a, mn;
+        if (k < 4u) {
+            a = (float)(sc[k] & 63u);
+            mn = (float)(sc[k + 4u] & 63u);
+        } else {
+            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
+            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+        }
+        const float ds = d * a;
+        const float dm = dmin * mn;
+        const device uchar *qs = block + 48u + 32u * (k / 2u) + w_k;
+        const device uchar *qh = block + 16u + w_k;
+        const uint shift = 2u * (k / 2u) + (k % 2u);
+        float wv[16];
+        if (k % 2u == 0u) {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] & 0x0fu;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
+        } else {
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] >> 4;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
+        }
+        const device packed_float4 *xp = (const device packed_float4 *)xblk;
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+        }
+        *(threadgroup half4 *)(sb_dst) = half4(xv0);
+        *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_half8x8 ma[4];
+            simdgroup_half8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    const uint tok_end = tok0 + tile_batch;
+    {
+        threadgroup float * const edge_frag_mine = edge_frag[sg];
+        const uint rb_base = row0 + sg_r * 8u;
+        const uint tb_base = tok0 + sg_t * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                const uint rb = rb_base + i * 8u;
+                const uint tb = tb_base + j * 8u;
+                if (rb >= rows || tb >= tok_end) {
+                    continue;
+                }
+                if (rb + 8u <= rows && tb + 8u <= tok_end) {
+                    simdgroup_store(mc[j][i], y + y_off + (size_t)tb * rows + rb, rows);
+                } else {
+                    simdgroup_store(mc[j][i], edge_frag_mine, 8);
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                    for (uint lane = tid % 32u; lane < 64u; lane += 32u) {
+                        const uint fr = lane / 8u;
+                        const uint ft = lane % 8u;
+                        if (tb + fr < tok_end && rb + ft < rows) {
+                            y[y_off + (size_t)(tb + fr) * rows + rb + ft] =
+                                edge_frag_mine[fr * 8u + ft];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/* ---------------- F32 matrix kernels (2026-11-22) ----------------
+ * Unsloth's K-quant artifacts store the small GDN projections
+ * (ssm_alpha/beta, ssm_conv1d) as F32 matrices; the engine's Matrix
+ * path needs a type-0 gemv/gemm. One row per threadgroup, 32 lanes. */
+
+kernel void ch_f32_gemv(device const float *w [[buffer(0)]],
+                        device const float *x [[buffer(1)]],
+                        device float *y [[buffer(2)]],
+                        constant uint &rows [[buffer(3)]],
+                        constant uint &cols [[buffer(4)]],
+                        uint row [[threadgroup_position_in_grid]],
+                        uint lane [[thread_position_in_threadgroup]]) {
+    if (row >= rows) {
+        return;
+    }
+    const device float *wrow = w + (size_t)row * (size_t)cols;
+    float acc = 0.0f;
+    for (uint i = lane; i < cols; i += 32u) {
+        acc += wrow[i] * x[i];
+    }
+    const float total = simd_sum(acc);
+    if (lane == 0u) {
+        y[row] = total;
+    }
+}
+
+/* Mid-batch F32 GEMV projection: one threadgroup per output row. */
+kernel void ch_f32_gemm(device const float *w [[buffer(0)]],
+                        device const float *x [[buffer(1)]],
+                        device float *y [[buffer(2)]],
+                        constant uint &rows [[buffer(3)]],
+                        constant uint &cols [[buffer(4)]],
+                        constant uint &batch [[buffer(5)]],
+                        constant uint &x_off [[buffer(6)]],
+                        constant uint &y_off [[buffer(7)]],
+                        uint row [[threadgroup_position_in_grid]],
+                        uint lane [[thread_position_in_threadgroup]]) {
+    if (row >= rows || batch == 0u || batch > 32u) {
+        return;
+    }
+    const device float *wrow = w + (size_t)row * (size_t)cols;
+    float acc[32];
+    for (uint b = 0; b < batch; ++b) {
+        acc[b] = 0.0f;
+    }
+    for (uint i = lane; i < cols; i += 32u) {
+        const float wv = wrow[i];
+        for (uint b = 0; b < batch; ++b) {
+            acc[b] += wv * x[x_off + b * cols + i];
+        }
+    }
+    for (uint b = 0; b < batch; ++b) {
+        const float total = simd_sum(acc[b]);
+        if (lane == 0u) {
+            y[y_off + b * rows + row] = total;
+        }
+    }
+}

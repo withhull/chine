@@ -1289,3 +1289,42 @@ three passes each; full prefill ~330 ms):
   (gate/up 5.09-5.62 ms/token), and every further in-place
   variant measured this arc (shuffle, pair-step, one-row at high
   rows) lost on the instrument.
+
+- **K-quants execute: Q4_K, Q5_K, Q6_K through the full Metal stack
+  (2026-11-22).** The dequant semantics are pinned to the llama.cpp
+  b11695 source (`ggml-common.h` block structs, `ggml-quants.c`
+  dequantize_row_q4_K/q5_K/q6_K and get_scale_min_k4 — fetched from
+  the pinned revision, never hand-derived): 256-value super-blocks
+  with 6-bit packed (scale, min) pairs (Q4_K/Q5_K) or int8 per-16
+  scales (Q6_K). Eight kernels per family (gemv, row, row-indirect,
+  mid-batch gemm, MMA f32-operand, MMA f16op) on the Q4_0 arc's
+  dispatch surface; the Q5_K set was pulled in because the target
+  artifact carries it (see below), and one more format came with it:
+  unsloth's K-quant convention stores the small GDN projections
+  (ssm_alpha/beta, ssm_conv1d) as **F32 matrices**, which the
+  engine's Matrix path had never carried — a minimal f32 gemv/gemm
+  pair (one row per threadgroup) completes the artifact's type set.
+  Two bugs found by the gates and fixed before any real artifact
+  ran: the Q4_K kernels read `qs` at block offset 4 (the scales
+  region — the CPU gate caught the permuted values) and the Q5_K MMA
+  staged `qh[i]` where the element's byte is `qh[w_k + i]`.
+  **Gates:** 16 kernel gates (CPU references transcribing the pinned
+  formulas; the Qwen3.5-0.8B Q4_K_M geometry plus vocabulary and
+  tail shapes), worst f16op relative 7.08e-4 (Q4_K) / 7.52e-4
+  (Q5_K) / 2.94e-4 (Q6_K), bound 1e-3; the half-domain generators
+  keep staged values finite (Q5_K's bound was tightened twice —
+  448*63*31 and 16*128*32 both overflow half before the fix).
+  **Real-artifact qualification:** the pinned unsloth
+  Qwen3.5-0.8B-Q4_K_M (sha256 pinned at import; the Q8_0 pin's own
+  source repo carries no Q4_K_M) — type mix F32 4.2 + Q4_K 196.0 +
+  Q5_K 24.8 + Q6_K 286.7 MiB + Q8_0 2.1, all executed, nothing
+  refused: `verify --reference` **PASS (calibration)** with texts
+  equal, top-5 overlap 0.90, max |d| 1.045 — the K-quant envelope is
+  ~3x Q8_0's 0.34 (the 6-bit scale arithmetic amplifies the
+  CPU-vs-Metal activation gap); the registered policy for
+  K-dominant artifacts is 1.5 (the same margin convention as Q8_0's
+  0.5 over 0.34), registered from this measurement. The CLI runs
+  the artifact resident on Metal; speculative decoding is
+  token-identical to plain greedy on a 96-token continuation. The
+  honest record tag derives `q6_k` (the dominant weight bytes) —
+  Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K now all label correctly.

@@ -94,6 +94,8 @@ struct ch_metal_ctx {
     id<MTLComputePipelineState> pso_q4gemv_one;
     id<MTLComputePipelineState> pso_q41gemv;
     id<MTLComputePipelineState> pso_f16gemv;
+    id<MTLComputePipelineState> pso_f32gemv;
+    id<MTLComputePipelineState> pso_f32gemm;
     id<MTLComputePipelineState> pso_q8row;
     id<MTLComputePipelineState> pso_q4row;
     id<MTLComputePipelineState> pso_q41row;
@@ -112,6 +114,24 @@ struct ch_metal_ctx {
     id<MTLComputePipelineState> pso_q8gemm_mma_f16op;
     id<MTLComputePipelineState> pso_q4gemm_mma_f16op;
     id<MTLComputePipelineState> pso_q41gemm_mma_f16op;
+    id<MTLComputePipelineState> pso_q4kgemv;
+    id<MTLComputePipelineState> pso_q4krow;
+    id<MTLComputePipelineState> pso_q4krow_indirect;
+    id<MTLComputePipelineState> pso_q4kgemm;
+    id<MTLComputePipelineState> pso_q4kgemm_mma;
+    id<MTLComputePipelineState> pso_q4kgemm_mma_f16op;
+    id<MTLComputePipelineState> pso_q5kgemv;
+    id<MTLComputePipelineState> pso_q5krow;
+    id<MTLComputePipelineState> pso_q5krow_indirect;
+    id<MTLComputePipelineState> pso_q5kgemm;
+    id<MTLComputePipelineState> pso_q5kgemm_mma;
+    id<MTLComputePipelineState> pso_q5kgemm_mma_f16op;
+    id<MTLComputePipelineState> pso_q6kgemv;
+    id<MTLComputePipelineState> pso_q6krow;
+    id<MTLComputePipelineState> pso_q6krow_indirect;
+    id<MTLComputePipelineState> pso_q6kgemm;
+    id<MTLComputePipelineState> pso_q6kgemm_mma;
+    id<MTLComputePipelineState> pso_q6kgemm_mma_f16op;
     id<MTLComputePipelineState> pso_f16gemm;
     id<MTLComputePipelineState> pso_q35_conv;
     id<MTLComputePipelineState> pso_q35_conv_shift;
@@ -515,6 +535,8 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_q4gemv_one = ch_pipeline(ctx, @"ch_q4_0_gemv_one", &error);
         ctx->pso_q41gemv = ch_pipeline(ctx, @"ch_q4_1_gemv", &error);
         ctx->pso_f16gemv = ch_pipeline(ctx, @"ch_f16_gemv", &error);
+        ctx->pso_f32gemv = ch_pipeline(ctx, @"ch_f32_gemv", &error);
+        ctx->pso_f32gemm = ch_pipeline(ctx, @"ch_f32_gemm", &error);
         ctx->pso_q8row = ch_pipeline(ctx, @"ch_q8_0_row_f32", &error);
         ctx->pso_q4row = ch_pipeline(ctx, @"ch_q4_0_row_f32", &error);
         ctx->pso_q41row = ch_pipeline(ctx, @"ch_q4_1_row_f32", &error);
@@ -533,6 +555,24 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_q8gemm_mma_f16op = ch_pipeline(ctx, @"ch_q8_0_gemm_mma_f16op", &error);
         ctx->pso_q4gemm_mma_f16op = ch_pipeline(ctx, @"ch_q4_0_gemm_mma_f16op", &error);
         ctx->pso_q41gemm_mma_f16op = ch_pipeline(ctx, @"ch_q4_1_gemm_mma_f16op", &error);
+        ctx->pso_q4kgemv = ch_pipeline(ctx, @"ch_q4_k_gemv", &error);
+        ctx->pso_q4krow = ch_pipeline(ctx, @"ch_q4_k_row_f32", &error);
+        ctx->pso_q4krow_indirect = ch_pipeline(ctx, @"ch_q4_k_row_indirect_f32", &error);
+        ctx->pso_q4kgemm = ch_pipeline(ctx, @"ch_q4_k_gemm", &error);
+        ctx->pso_q4kgemm_mma = ch_pipeline(ctx, @"ch_q4_k_gemm_mma", &error);
+        ctx->pso_q4kgemm_mma_f16op = ch_pipeline(ctx, @"ch_q4_k_gemm_mma_f16op", &error);
+        ctx->pso_q5kgemv = ch_pipeline(ctx, @"ch_q5_k_gemv", &error);
+        ctx->pso_q5krow = ch_pipeline(ctx, @"ch_q5_k_row_f32", &error);
+        ctx->pso_q5krow_indirect = ch_pipeline(ctx, @"ch_q5_k_row_indirect_f32", &error);
+        ctx->pso_q5kgemm = ch_pipeline(ctx, @"ch_q5_k_gemm", &error);
+        ctx->pso_q5kgemm_mma = ch_pipeline(ctx, @"ch_q5_k_gemm_mma", &error);
+        ctx->pso_q5kgemm_mma_f16op = ch_pipeline(ctx, @"ch_q5_k_gemm_mma_f16op", &error);
+        ctx->pso_q6kgemv = ch_pipeline(ctx, @"ch_q6_k_gemv", &error);
+        ctx->pso_q6krow = ch_pipeline(ctx, @"ch_q6_k_row_f32", &error);
+        ctx->pso_q6krow_indirect = ch_pipeline(ctx, @"ch_q6_k_row_indirect_f32", &error);
+        ctx->pso_q6kgemm = ch_pipeline(ctx, @"ch_q6_k_gemm", &error);
+        ctx->pso_q6kgemm_mma = ch_pipeline(ctx, @"ch_q6_k_gemm_mma", &error);
+        ctx->pso_q6kgemm_mma_f16op = ch_pipeline(ctx, @"ch_q6_k_gemm_mma_f16op", &error);
         ctx->pso_f16gemm = ch_pipeline(ctx, @"ch_f16_gemm", &error);
         ctx->pso_q35_conv = ch_pipeline(ctx, @"ch_qwen35_conv_step", &error);
         ctx->pso_q35_conv_shift = ch_pipeline(ctx, @"ch_qwen35_conv_shift", &error);
@@ -570,11 +610,11 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_q35_attention_gqa_f32_128x4 == nil ||
             ctx->pso_q35_attention_chunk_f32 == nil || ctx->pso_q35_kv_store_chunk_f32 == nil ||
             ctx->pso_f16f32 == nil ||
-            ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_q4gemv == nil || ctx->pso_q4gemv_one == nil || ctx->pso_q41gemv == nil || ctx->pso_f16gemv == nil ||
+            ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_q4gemv == nil || ctx->pso_q4gemv_one == nil || ctx->pso_q41gemv == nil || ctx->pso_f16gemv == nil || ctx->pso_f32gemv == nil || ctx->pso_f32gemm == nil ||
             ctx->pso_q8row == nil || ctx->pso_q4row == nil || ctx->pso_q41row == nil || ctx->pso_rmsnorm == nil || ctx->pso_norm_add == nil ||
             ctx->pso_qk_norm == nil || ctx->pso_silu == nil ||
             ctx->pso_f16row == nil || ctx->pso_q8gemm == nil || ctx->pso_q4gemm == nil || ctx->pso_q41gemm == nil || ctx->pso_q8gemm_mma == nil || ctx->pso_q4gemm_mma == nil || ctx->pso_q41gemm_mma == nil ||
-            ctx->pso_q8gemm_mma_f16op == nil || ctx->pso_q4gemm_mma_f16op == nil || ctx->pso_q41gemm_mma_f16op == nil || ctx->pso_f16gemm == nil ||
+            ctx->pso_q8gemm_mma_f16op == nil || ctx->pso_q4gemm_mma_f16op == nil || ctx->pso_q41gemm_mma_f16op == nil || ctx->pso_q4kgemv == nil || ctx->pso_q4krow == nil || ctx->pso_q4krow_indirect == nil || ctx->pso_q4kgemm == nil || ctx->pso_q4kgemm_mma == nil || ctx->pso_q4kgemm_mma_f16op == nil || ctx->pso_q5kgemv == nil || ctx->pso_q5krow == nil || ctx->pso_q5krow_indirect == nil || ctx->pso_q5kgemm == nil || ctx->pso_q5kgemm_mma == nil || ctx->pso_q5kgemm_mma_f16op == nil || ctx->pso_q6kgemv == nil || ctx->pso_q6krow == nil || ctx->pso_q6krow_indirect == nil || ctx->pso_q6kgemm == nil || ctx->pso_q6kgemm_mma == nil || ctx->pso_q6kgemm_mma_f16op == nil || ctx->pso_f16gemm == nil ||
             ctx->pso_q35_conv == nil || ctx->pso_q35_conv_shift == nil ||
             ctx->pso_q35_l2norm == nil || ctx->pso_q35_beta_decay == nil ||
             ctx->pso_q35_gdn_step == nil || ctx->pso_q35_gated_norm == nil ||
@@ -638,6 +678,24 @@ void ch_metal_destroy(ch_metal_ctx *ctx) {
         [ctx->pso_q8gemm_mma_f16op release];
         [ctx->pso_q4gemm_mma_f16op release];
         [ctx->pso_q41gemm_mma_f16op release];
+        [ctx->pso_q4kgemv release];
+        [ctx->pso_q4krow release];
+        [ctx->pso_q4krow_indirect release];
+        [ctx->pso_q4kgemm release];
+        [ctx->pso_q4kgemm_mma release];
+        [ctx->pso_q4kgemm_mma_f16op release];
+        [ctx->pso_q5kgemv release];
+        [ctx->pso_q5krow release];
+        [ctx->pso_q5krow_indirect release];
+        [ctx->pso_q5kgemm release];
+        [ctx->pso_q5kgemm_mma release];
+        [ctx->pso_q5kgemm_mma_f16op release];
+        [ctx->pso_q6kgemv release];
+        [ctx->pso_q6krow release];
+        [ctx->pso_q6krow_indirect release];
+        [ctx->pso_q6kgemm release];
+        [ctx->pso_q6kgemm_mma release];
+        [ctx->pso_q6kgemm_mma_f16op release];
         [ctx->pso_f16row release];
         [ctx->pso_silu release];
         [ctx->pso_rmsnorm release];
@@ -647,6 +705,8 @@ void ch_metal_destroy(ch_metal_ctx *ctx) {
         [ctx->pso_q4row release];
         [ctx->pso_q41row release];
         [ctx->pso_f16gemv release];
+        [ctx->pso_f32gemv release];
+        [ctx->pso_f32gemm release];
         [ctx->pso_q8gemv release];
         [ctx->pso_q4gemv release];
         [ctx->pso_q4gemv_one release];
@@ -1099,6 +1159,15 @@ int ch_metal_row_indirect_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, uint32_t ty
     } else if (type_id == 3u && cols > 0 && (cols % 32u) == 0u) {
         pso = ctx->pso_q41row_indirect;
         w_need = (size_t)rows * ((size_t)cols / 32u) * 20u;
+    } else if (type_id == 12u && cols > 0 && (cols % 256u) == 0u) {
+        pso = ctx->pso_q4krow_indirect;
+        w_need = (size_t)rows * ((size_t)cols / 256u) * 144u;
+    } else if (type_id == 13u && cols > 0 && (cols % 256u) == 0u) {
+        pso = ctx->pso_q5krow_indirect;
+        w_need = (size_t)rows * ((size_t)cols / 256u) * 176u;
+    } else if (type_id == 14u && cols > 0 && (cols % 256u) == 0u) {
+        pso = ctx->pso_q6krow_indirect;
+        w_need = (size_t)rows * ((size_t)cols / 256u) * 210u;
     } else if (type_id == 1u && cols > 0) {
         pso = ctx->pso_f16row_indirect;
         w_need = (size_t)rows * (size_t)cols * 2u;
@@ -1950,6 +2019,443 @@ int ch_metal_q4_1_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
     size_t w_need = (size_t)rows * ((size_t)cols / 32u) * 20u;
     return ch_gemm_dispatch(ctx, ctx->pso_q41gemm, w, w_need, x, y, rows, cols, batch, x_off,
                             y_off, err, err_cap, "q4_1_gemm");
+}
+
+
+int ch_metal_q4_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                       char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "q4_k_gemv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (rows == 0 || cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q4_k_gemv: rows %u, cols %u (cols must be a positive multiple of 256)",
+                                                  rows, cols]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 144u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q4_k_gemv.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, (size_t)cols * 4u, err, err_cap, "q4_k_gemv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, (size_t)rows * 4u, err, err_cap, "q4_k_gemv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q4_k_gemv: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_q4kgemv];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:x->buffer offset:0 atIndex:1];
+        [enc setBuffer:y->buffer offset:0 atIndex:2];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:x->buffer];
+        [f.keep addObject:y->buffer];
+        [enc setBytes:&rows length:sizeof(rows) atIndex:3];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:4];
+        NSUInteger lanes = ctx->pso_q4kgemv.threadExecutionWidth;
+        if (lanes != 32) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
+                           [NSString stringWithFormat:@"q4_k_gemv: device simd width %lu != 32", (unsigned long)lanes]);
+        }
+        const NSUInteger rows_per_tg = 8;
+        NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        char label[CH_PROFILE_NAME];
+        if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed)) {
+            snprintf(label, sizeof label, "q4_k_gemv:%ux%u", rows, cols);
+        } else {
+            strlcpy(label, "q4_k_gemv", sizeof label);
+        }
+        return ch_frame_commit(ctx, &f, err, err_cap, label);
+    }
+}
+
+int ch_metal_q6_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                       char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "q6_k_gemv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (rows == 0 || cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q6_k_gemv: rows %u, cols %u (cols must be a positive multiple of 256)",
+                                                  rows, cols]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 210u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q6_k_gemv.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, (size_t)cols * 4u, err, err_cap, "q6_k_gemv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, (size_t)rows * 4u, err, err_cap, "q6_k_gemv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q6_k_gemv: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_q6kgemv];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:x->buffer offset:0 atIndex:1];
+        [enc setBuffer:y->buffer offset:0 atIndex:2];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:x->buffer];
+        [f.keep addObject:y->buffer];
+        [enc setBytes:&rows length:sizeof(rows) atIndex:3];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:4];
+        NSUInteger lanes = ctx->pso_q6kgemv.threadExecutionWidth;
+        if (lanes != 32) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
+                           [NSString stringWithFormat:@"q6_k_gemv: device simd width %lu != 32", (unsigned long)lanes]);
+        }
+        const NSUInteger rows_per_tg = 8;
+        NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        char label[CH_PROFILE_NAME];
+        if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed)) {
+            snprintf(label, sizeof label, "q6_k_gemv:%ux%u", rows, cols);
+        } else {
+            strlcpy(label, "q6_k_gemv", sizeof label);
+        }
+        return ch_frame_commit(ctx, &f, err, err_cap, label);
+    }
+}
+
+int ch_metal_q4_k_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "q4_k_row") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       @"q4_k_row: cols must be a positive multiple of 256");
+    }
+    size_t w_need = ((size_t)row + 1u) * ((size_t)cols / 256u) * 144u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q4_k_row.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "q4_k_row.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q4_k_row: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_q4krow];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:out->buffer offset:0 atIndex:1];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:out->buffer];
+        [enc setBytes:&row length:sizeof(row) atIndex:2];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+        [enc setBytes:&out_off length:sizeof(out_off) atIndex:4];
+        NSUInteger tg = 256;
+        NSUInteger width = ctx->pso_q4krow.threadExecutionWidth;
+        if (width > 0 && width < tg) { tg = width * 8; }
+        [enc dispatchThreads:MTLSizeMake((NSUInteger)cols, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        return ch_frame_commit(ctx, &f, err, err_cap, "q4_k_row");
+    }
+}
+
+int ch_metal_q6_k_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "q6_k_row") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       @"q6_k_row: cols must be a positive multiple of 256");
+    }
+    size_t w_need = ((size_t)row + 1u) * ((size_t)cols / 256u) * 210u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q6_k_row.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "q6_k_row.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q6_k_row: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_q6krow];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:out->buffer offset:0 atIndex:1];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:out->buffer];
+        [enc setBytes:&row length:sizeof(row) atIndex:2];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+        [enc setBytes:&out_off length:sizeof(out_off) atIndex:4];
+        NSUInteger tg = 256;
+        NSUInteger width = ctx->pso_q6krow.threadExecutionWidth;
+        if (width > 0 && width < tg) { tg = width * 8; }
+        [enc dispatchThreads:MTLSizeMake((NSUInteger)cols, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        return ch_frame_commit(ctx, &f, err, err_cap, "q6_k_row");
+    }
+}
+
+int ch_metal_q4_k_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       @"q4_k_gemm: cols must be a positive multiple of 256");
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 144u;
+    return ch_gemm_dispatch(ctx, ctx->pso_q4kgemm, w, w_need, x, y, rows, cols, batch, x_off,
+                            y_off, err, err_cap, "q4_k_gemm");
+}
+
+int ch_metal_q6_k_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       @"q6_k_gemm: cols must be a positive multiple of 256");
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 210u;
+    return ch_gemm_dispatch(ctx, ctx->pso_q6kgemm, w, w_need, x, y, rows, cols, batch, x_off,
+                            y_off, err, err_cap, "q6_k_gemm");
+}
+
+int ch_metal_q4_k_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q4_k_gemm_mma: cols %u (positive multiple of 256), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 144u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q4kgemm_mma, w, w_need, x, y, rows, cols, batch,
+                                 x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32, err,
+                                 err_cap, "q4_k_gemm_mma");
+}
+
+int ch_metal_q4_k_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q4_k_gemm_mma_f16op: cols %u (positive multiple of 256), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 144u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q4kgemm_mma_f16op, w, w_need, x, y, rows, cols,
+                                 batch, x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32,
+                                 err, err_cap, "q4_k_gemm_mma_f16op");
+}
+
+int ch_metal_q5_k_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q5_k_gemm_mma_f16op: cols %u (positive multiple of 256), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 176u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q5kgemm_mma_f16op, w, w_need, x, y, rows, cols,
+                                 batch, x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32,
+                                 err, err_cap, "q5_k_gemm_mma_f16op");
+}
+
+int ch_metal_q6_k_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q6_k_gemm_mma: cols %u (positive multiple of 256), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 210u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q6kgemm_mma, w, w_need, x, y, rows, cols, batch,
+                                 x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32, err,
+                                 err_cap, "q6_k_gemm_mma");
+}
+
+int ch_metal_q6_k_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q6_k_gemm_mma_f16op: cols %u (positive multiple of 256), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 210u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q6kgemm_mma_f16op, w, w_need, x, y, rows, cols,
+                                 batch, x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32,
+                                 err, err_cap, "q6_k_gemm_mma_f16op");
+}
+
+int ch_metal_q5_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                       char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "q5_k_gemv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (rows == 0 || cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q5_k_gemv: rows %u, cols %u (cols must be a positive multiple of 256)",
+                                                  rows, cols]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 176u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q5_k_gemv.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, (size_t)cols * 4u, err, err_cap, "q5_k_gemv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, (size_t)rows * 4u, err, err_cap, "q5_k_gemv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q5_k_gemv: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_q5kgemv];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:x->buffer offset:0 atIndex:1];
+        [enc setBuffer:y->buffer offset:0 atIndex:2];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:x->buffer];
+        [f.keep addObject:y->buffer];
+        [enc setBytes:&rows length:sizeof(rows) atIndex:3];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:4];
+        NSUInteger lanes = ctx->pso_q5kgemv.threadExecutionWidth;
+        if (lanes != 32) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
+                           [NSString stringWithFormat:@"q5_k_gemv: device simd width %lu != 32", (unsigned long)lanes]);
+        }
+        const NSUInteger rows_per_tg = 8;
+        NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        char label[CH_PROFILE_NAME];
+        if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed)) {
+            snprintf(label, sizeof label, "q5_k_gemv:%ux%u", rows, cols);
+        } else {
+            strlcpy(label, "q5_k_gemv", sizeof label);
+        }
+        return ch_frame_commit(ctx, &f, err, err_cap, label);
+    }
+}
+
+
+int ch_metal_q5_k_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "q5_k_row") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       @"q5_k_row: cols must be a positive multiple of 256");
+    }
+    size_t w_need = ((size_t)row + 1u) * ((size_t)cols / 256u) * 176u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q5_k_row.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "q5_k_row.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q5_k_row: no encoder");
+        }
+        [enc setComputePipelineState:ctx->pso_q5krow];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:out->buffer offset:0 atIndex:1];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:out->buffer];
+        [enc setBytes:&row length:sizeof(row) atIndex:2];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:3];
+        [enc setBytes:&out_off length:sizeof(out_off) atIndex:4];
+        NSUInteger tg = 256;
+        NSUInteger width = ctx->pso_q5krow.threadExecutionWidth;
+        if (width > 0 && width < tg) { tg = width * 8; }
+        [enc dispatchThreads:MTLSizeMake((NSUInteger)cols, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        return ch_frame_commit(ctx, &f, err, err_cap, "q5_k_row");
+    }
+}
+
+
+int ch_metal_q5_k_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       @"q5_k_gemm: cols must be a positive multiple of 256");
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 176u;
+    return ch_gemm_dispatch(ctx, ctx->pso_q5kgemm, w, w_need, x, y, rows, cols, batch, x_off,
+                            y_off, err, err_cap, "q5_k_gemm");
+}
+
+
+int ch_metal_q5_k_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 256u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"q5_k_gemm_mma: cols %u (positive multiple of 256), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * ((size_t)cols / 256u) * 176u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q5kgemm_mma, w, w_need, x, y, rows, cols, batch,
+                                 x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32, err,
+                                 err_cap, "q5_k_gemm_mma");
+}
+
+
+
+
+int ch_metal_f32_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                      ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                      char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "f32_gemv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
+    }
+    if (rows == 0 || cols == 0) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED, @"f32_gemv: zero shape");
+    }
+    size_t w_need = (size_t)rows * (size_t)cols * 4u;
+    size_t x_need = (size_t)cols * 4u;
+    size_t y_need = (size_t)rows * 4u;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "f32_gemv.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, x_need, err, err_cap, "f32_gemv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, y_need, err, err_cap, "f32_gemv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
+    }
+    @autoreleasepool {
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
+        if (enc == nil) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
+                           @"f32_gemv: command encoder unavailable");
+        }
+        [enc setComputePipelineState:ctx->pso_f32gemv];
+        [enc setBuffer:w->buffer offset:0 atIndex:0];
+        [enc setBuffer:x->buffer offset:0 atIndex:1];
+        [enc setBuffer:y->buffer offset:0 atIndex:2];
+        [f.keep addObject:w->buffer];
+        [f.keep addObject:x->buffer];
+        [f.keep addObject:y->buffer];
+        [enc setBytes:&rows length:sizeof(rows) atIndex:3];
+        [enc setBytes:&cols length:sizeof(cols) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        return ch_frame_commit(ctx, &f, err, err_cap, "f32_gemv");
+    }
+}
+int ch_metal_f32_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                      ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                      uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    size_t w_need = (size_t)rows * (size_t)cols * 4u;
+    return ch_gemm_dispatch(ctx, ctx->pso_f32gemm, w, w_need, x, y, rows, cols, batch, x_off,
+                            y_off, err, err_cap, "f32_gemm");
 }
 
 int ch_metal_fence(ch_metal_ctx *ctx, char *err, size_t err_cap) {

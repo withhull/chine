@@ -54,6 +54,13 @@ pub fn registered_tolerance_for(dominant_dtype: &str) -> Option<f64> {
     match dominant_dtype {
         "F32" | "F16" | "BF16" => Some(5e-2),
         "Q8_0" => Some(5e-1),
+        // K-quant dominant (registered 2026-11-22 from the pinned
+        // Qwen3.5-0.8B Q4_K_M, dominant Q6_K: observed max |Δ| 1.045 vs
+        // the CPU reference with texts equal and top-5 overlap 0.90 —
+        // the 6-bit scale arithmetic amplifies the CPU-vs-Metal
+        // activation gap ~3x over Q8_0's 0.34; 1.5 keeps the same
+        // margin convention as Q8_0's 0.5 over 0.34).
+        "Q4_K" | "Q5_K" | "Q6_K" => Some(1.5),
         _ => None,
     }
 }
@@ -1206,8 +1213,10 @@ mod tests {
     fn registered_policy_covers_measured_dtypes_only() {
         assert_eq!(registered_tolerance_for("F16"), Some(5e-2));
         assert_eq!(registered_tolerance_for("Q8_0"), Some(5e-1));
+        assert_eq!(registered_tolerance_for("Q6_K"), Some(1.5));
+        assert_eq!(registered_tolerance_for("Q4_K"), Some(1.5));
         assert_eq!(
-            registered_tolerance_for("Q4_K"),
+            registered_tolerance_for("Q2_K"),
             None,
             "unmeasured dtypes never inherit a threshold"
         );

@@ -142,10 +142,64 @@ int ch_metal_q4_0_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer
 int ch_metal_q4_1_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
                           uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
 
+/* Q4_K / Q6_K (K-quants, pinned to llama.cpp b11695): 256-value
+ * super-blocks, cols a positive multiple of 256. Q4_K bytes per block
+ * 144, Q6_K 210. */
+int ch_metal_q4_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                       char *err, size_t err_cap);
+int ch_metal_q6_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                       char *err, size_t err_cap);
+int ch_metal_q4_k_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
+int ch_metal_q6_k_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
+int ch_metal_q4_k_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q6_k_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_k_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_k_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q6_k_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q6_k_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q5_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                       char *err, size_t err_cap);
+int ch_metal_q5_k_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
+int ch_metal_q5_k_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q5_k_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q5_k_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+
 /* F16 matvec: y[r] = dot(f32(w_row_r), x); `w` holds rows*cols f16 values. */
 int ch_metal_f16_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
                       char *err, size_t err_cap);
+/* F32 matvec: y[r] = dot(w_row_r, x); `w` holds rows*cols f32 values
+ * (the small GDN projections of unsloth K-quant artifacts). */
+int ch_metal_f32_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                      ch_metal_buffer *y, uint32_t rows, uint32_t cols,
+                      char *err, size_t err_cap);
+int ch_metal_f32_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                      ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                      uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
 
 /* y[row] = rmsnorm(x[row], weight, eps) for `rows` rows of `cols`. */
 int ch_metal_rmsnorm_f32(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *weight,

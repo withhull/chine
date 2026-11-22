@@ -38,11 +38,25 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 
 /// Types Stage 0 executes.
 pub fn is_supported(type_id: u32) -> bool {
-    matches!(type_id, 0 | 1 | 2 | 3 | 8 | 30)
+    matches!(type_id, 0 | 1 | 2 | 3 | 8 | 12 | 13 | 14 | 30)
 }
 
 pub fn supported_type_names() -> &'static str {
-    "F32, F16, BF16, Q8_0, Q4_0, Q4_1"
+    "F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K"
+}
+
+/// Decode one 6-bit (scale, min) pair from a Q4_K/Q5_K scale block
+/// exactly as llama.cpp b11695's `get_scale_min_k4` does (the same
+/// packing backs both formats).
+fn get_scale_min_k4(j: usize, q: &[u8]) -> (u32, u32) {
+    if j < 4 {
+        ((q[j] & 63) as u32, (q[j + 4] & 63) as u32)
+    } else {
+        (
+            ((q[j + 4] & 0xF) as u32) | (((q[j - 4] >> 6) as u32) << 4),
+            ((q[j + 4] >> 4) as u32) | (((q[j] >> 6) as u32) << 4),
+        )
+    }
 }
 
 /// Decode `bytes` (a whole number of blocks) of `type_id` into `out`
@@ -115,6 +129,98 @@ pub fn dequant_into(type_id: u32, bytes: &[u8], out: &mut Vec<f32>) -> Result<us
                 }
                 for &b in qs {
                     out.push(d * ((b >> 4) as i32 - 8) as f32);
+                }
+            }
+        }
+        12 => {
+            // Q4_K: [f16 d][f16 dmin][u8 scales; 12][u8 qs; 128]; 256
+            // values per super-block, eight 32-value slices; slice k
+            // reads bytes [32*(k/2), +32) low (even k) or high (odd k)
+            // nibbles with its own (scale, min) pair from the packed
+            // 6-bit form (llama.cpp b11695 dequantize_row_q4_K).
+            let (chunks, rest) = bytes.as_chunks::<144>();
+            debug_assert!(rest.is_empty(), "block-aligned above");
+            for block in chunks {
+                let d = f16_to_f32(read_u16(block, 0));
+                let dmin = f16_to_f32(read_u16(block, 2));
+                let scales = &block[4..16];
+                let qs = &block[16..144];
+                for k in 0..8usize {
+                    let (a, mn) = get_scale_min_k4(k, scales);
+                    let base = 32 * (k / 2);
+                    let (lo, m) = (d * a as f32, dmin * mn as f32);
+                    if k % 2 == 0 {
+                        for i in 0..32 {
+                            out.push(lo * (qs[base + i] & 0x0f) as f32 - m);
+                        }
+                    } else {
+                        for i in 0..32 {
+                            out.push(lo * (qs[base + i] >> 4) as f32 - m);
+                        }
+                    }
+                }
+            }
+        }
+        13 => {
+            // Q5_K: [f16 d][f16 dmin][u8 scales; 12][u8 qh; 32][u8 qs;
+            // 128]; 256 values per super-block. Same slice/scale layout
+            // as Q4_K; slice k's high bit sits in qh[k%32] at shift
+            // 2*(k/2) + (k%2) (llama.cpp b11695 dequantize_row_q5_K).
+            let (chunks, rest) = bytes.as_chunks::<176>();
+            debug_assert!(rest.is_empty(), "block-aligned above");
+            for block in chunks {
+                let d = f16_to_f32(read_u16(block, 0));
+                let dmin = f16_to_f32(read_u16(block, 2));
+                let scales = &block[4..16];
+                let qh = &block[16..48];
+                let qs = &block[48..176];
+                for k in 0..8usize {
+                    let (a, mn) = get_scale_min_k4(k, scales);
+                    let (lo, m) = (d * a as f32, dmin * mn as f32);
+                    let base = 32 * (k / 2);
+                    let shift = 2 * (k / 2) + (k % 2);
+                    if k % 2 == 0 {
+                        for i in 0..32 {
+                            let nib = (qs[base + i] & 0x0f) as u32;
+                            let hb = ((qh[i] >> shift) & 1) as u32;
+                            out.push(lo * (nib | (hb << 4)) as f32 - m);
+                        }
+                    } else {
+                        for i in 0..32 {
+                            let nib = (qs[base + i] >> 4) as u32;
+                            let hb = ((qh[i] >> shift) & 1) as u32;
+                            out.push(lo * (nib | (hb << 4)) as f32 - m);
+                        }
+                    }
+                }
+            }
+        }
+        14 => {
+            // Q6_K: [u8 ql; 128][u8 qh; 64][i8 scales; 16][f16 d]; 256
+            // values per super-block. Value v: c = (v%256)/128,
+            // jj = (v%128)/32, l = v%32; ql byte 64c + 32*(jj%2) + l
+            // (low nibble for jj < 2, high otherwise), qh byte 32c + l
+            // at bit shift 2jj; x = d * scales[v%256/16] * (q - 32)
+            // (llama.cpp b11695 dequantize_row_q6_K).
+            let (chunks, rest) = bytes.as_chunks::<210>();
+            debug_assert!(rest.is_empty(), "block-aligned above");
+            for block in chunks {
+                let ql = &block[0..128];
+                let qh = &block[128..192];
+                let scales = &block[192..208];
+                let d = f16_to_f32(read_u16(block, 208));
+                for v in 0..256usize {
+                    let c = v / 128;
+                    let jj = (v % 128) / 32;
+                    let l = v % 32;
+                    let nib = if jj < 2 {
+                        (ql[64 * c + 32 * (jj % 2) + l] & 0x0f) as u32
+                    } else {
+                        (ql[64 * c + 32 * (jj % 2) + l] >> 4) as u32
+                    };
+                    let h = ((qh[32 * c + l] >> (2 * jj)) & 3) as u32;
+                    let s = scales[v / 16] as i8;
+                    out.push(d * s as f32 * ((nib | (h << 4)) as f32 - 32.0));
                 }
             }
         }
@@ -349,9 +455,14 @@ mod tests {
 
     #[test]
     fn unsupported_types_are_refused_with_the_supported_list() {
-        let err = dequant_into(12, &[0u8; 144], &mut Vec::new()).unwrap_err();
+        // Q8_K (type 15) is known to the layout table but outside the
+        // executed set; the message must list what IS supported.
+        let err = dequant_into(15, &[0u8; 292], &mut Vec::new()).unwrap_err();
         assert_eq!(err.code(), ErrorCode::UnsupportedQuantization);
         assert!(err.message().contains("F16"), "{}", err.message());
+        assert!(err.message().contains("Q4_K"), "{}", err.message());
+        assert!(err.message().contains("Q6_K"), "{}", err.message());
+        assert!(!err.message().contains("Q8_K;"), "{}", err.message());
     }
 
     #[test]
