@@ -192,6 +192,65 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
+        pub fn ch_metal_q4_0_gemv(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_0_row_f32(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            out: *mut TmMetalBuffer,
+            row: u32,
+            cols: u32,
+            out_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_0_gemm_mma(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_0_gemm_mma_f16op(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_0_gemm(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
         pub fn ch_metal_fence(ctx: *mut TmMetalCtx, err: *mut c_char, err_cap: usize) -> c_int;
         pub fn ch_metal_begin_group(
             ctx: *mut TmMetalCtx,
@@ -712,6 +771,65 @@ mod imp {
         ) -> c_int;
         pub fn ch_metal_allocated_bytes(ctx: *const TmMetalCtx) -> u64;
         pub fn ch_metal_in_flight_bytes(ctx: *const TmMetalCtx) -> u64;
+        pub fn ch_metal_q4_1_gemv(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_1_row_f32(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            out: *mut TmMetalBuffer,
+            row: u32,
+            cols: u32,
+            out_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_1_gemm_mma(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_1_gemm_mma_f16op(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_q4_1_gemm(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
     }
 }
 
@@ -1762,6 +1880,351 @@ impl MetalContext {
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
                 imp::ch_metal_q8_0_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
+            };
+            (code, err)
+        })
+    }
+
+    /// Q4_0 matvec (`y = W x`), the Q8_0 kernel's structure with the
+    /// nibble dequant (value = d * (nibble - 8); low nibble is element j,
+    /// high is j+16).
+    pub fn q4_0_gemv(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_0_gemv", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_0_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
+            };
+            (code, err)
+        })
+    }
+
+    /// Dequantize one Q4_0 row into `out` at `out_off`.
+    pub fn q4_0_row_f32(
+        &self,
+        w: &MetalBuffer,
+        out: &MetalBuffer,
+        row: u32,
+        cols: u32,
+        out_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (out, "out")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, oc) = (w.raw, out.raw);
+        self.operate("q4_0_row_f32", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_0_row_f32(
+                    ctx,
+                    wc,
+                    oc,
+                    row,
+                    cols,
+                    out_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// Batched Q4_0 GEMM on the SIMD-group matrix units (f32 operands).
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4_0_gemm_mma(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_0_gemm_mma", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_0_gemm_mma(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// [`Self::q4_0_gemm_mma`] with f16 operand tiles (metal-f16-act).
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4_0_gemm_mma_f16op(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_0_gemm_mma_f16op", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_0_gemm_mma_f16op(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// Per-row Q4_0 GEMM in slices of at most 32 tokens.
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4_0_gemm(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_0_gemm", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_0_gemm(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    pub fn q4_1_gemv(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_1_gemv", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_1_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
+            };
+            (code, err)
+        })
+    }
+
+    /// Dequantize one Q4_0 row into `out` at `out_off`.
+    pub fn q4_1_row_f32(
+        &self,
+        w: &MetalBuffer,
+        out: &MetalBuffer,
+        row: u32,
+        cols: u32,
+        out_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (out, "out")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, oc) = (w.raw, out.raw);
+        self.operate("q4_1_row_f32", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_1_row_f32(
+                    ctx,
+                    wc,
+                    oc,
+                    row,
+                    cols,
+                    out_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// Batched Q4_0 GEMM on the SIMD-group matrix units (f32 operands).
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4_1_gemm_mma(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_1_gemm_mma", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_1_gemm_mma(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// [`Self::q4_1_gemm_mma`] with f16 operand tiles (metal-f16-act).
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4_1_gemm_mma_f16op(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_1_gemm_mma_f16op", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_1_gemm_mma_f16op(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+
+    /// Per-row Q4_0 GEMM in slices of at most 32 tokens.
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4_1_gemm(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("q4_1_gemm", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_q4_1_gemm(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
             };
             (code, err)
         })

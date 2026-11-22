@@ -2243,3 +2243,846 @@ fn q8_0_gemm_mma_grouped_wall_timing_when_requested() {
         }
     }
 }
+
+// ------------------------------------------------------------ Q4_0 --------
+
+/// Q4_0 weights with boundary scales and nibble extremes: the f16 scale
+/// set of the Q8_0 generator with payload bytes whose low and high
+/// nibbles both cover 0x0, 0xF and mixed patterns (the layout: low
+/// nibble of byte j is element j, high is element j+16, value =
+/// d * (nibble - 8)).
+fn boundary_q4_0_weights(rows: usize, cols: usize, seed: u64) -> Vec<u8> {
+    let blocks = cols / 32;
+    let mut rng = Rng(seed);
+    let scales = [
+        1.0f32,
+        -0.5,
+        2f32.powi(-12),
+        65504.0,
+        -65504.0,
+        5.96e-8,
+        0.0,
+        -0.0,
+        448.0,
+        6e-5,
+    ];
+    let mut bytes = Vec::with_capacity(rows * blocks * 18);
+    for _ in 0..rows * blocks {
+        let scale = scales[(rng.next() % scales.len() as u64) as usize];
+        bytes.extend_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
+        for _ in 0..16 {
+            let nib_lo = (rng.next() % 16) as u8;
+            let nib_hi = match rng.next() % 4 {
+                0 => 0u8,
+                1 => 0xF,
+                _ => (rng.next() % 16) as u8,
+            };
+            bytes.push(nib_lo | (nib_hi << 4));
+        }
+    }
+    bytes
+}
+
+fn cpu_q4_0_dequant_block(block: &[u8], out: &mut Vec<f32>) {
+    let d = f16_bits_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    for b in &block[2..18] {
+        out.push(d * ((b & 0x0f) as i32 - 8) as f32);
+    }
+    for b in &block[2..18] {
+        out.push(d * ((b >> 4) as i32 - 8) as f32);
+    }
+}
+
+fn cpu_q4_0_gemv(w: &[u8], x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let blocks = cols / 32;
+    let mut y = vec![0f32; rows];
+    for (r, slot) in y.iter_mut().enumerate() {
+        let mut acc = 0f32;
+        for b in 0..blocks {
+            let off = (r * blocks + b) * 18;
+            let mut vals = Vec::with_capacity(32);
+            cpu_q4_0_dequant_block(&w[off..off + 18], &mut vals);
+            for (l, xv) in x[b * 32..(b + 1) * 32].iter().enumerate() {
+                acc += vals[l] * xv;
+            }
+        }
+        *slot = acc;
+    }
+    y
+}
+
+fn cpu_q4_0_row(w: &[u8], row: usize, cols: usize) -> Vec<f32> {
+    let blocks = cols / 32;
+    let mut out = Vec::with_capacity(cols);
+    for b in 0..blocks {
+        let off = (row * blocks + b) * 18;
+        cpu_q4_0_dequant_block(&w[off..off + 18], &mut out);
+    }
+    out
+}
+
+/// Q4_0 weights whose dequantized values fit the f16 domain (the
+/// metal-f16-act stage rounds them to half): scales bounded so
+/// d * 7 stays below half's max magnitude.
+fn half_domain_q4_0_weights(rows: usize, cols: usize, seed: u64) -> Vec<u8> {
+    let blocks = cols / 32;
+    let mut rng = Rng(seed);
+    let scales = [
+        1.0f32,
+        -0.5,
+        2f32.powi(-12),
+        8000.0,
+        -8000.0,
+        5.96e-8,
+        0.0,
+        -0.0,
+        448.0,
+        6e-5,
+    ];
+    let mut bytes = Vec::with_capacity(rows * blocks * 18);
+    for _ in 0..rows * blocks {
+        let scale = scales[(rng.next() % scales.len() as u64) as usize];
+        bytes.extend_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
+        for _ in 0..16 {
+            let nib_lo = (rng.next() % 16) as u8;
+            let nib_hi = match rng.next() % 4 {
+                0 => 0u8,
+                1 => 0xF,
+                _ => (rng.next() % 16) as u8,
+            };
+            bytes.push(nib_lo | (nib_hi << 4));
+        }
+    }
+    bytes
+}
+
+#[test]
+fn q4_0_gemv_matches_the_scalar_reference_across_real_shapes() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    let shapes: [(usize, usize, u64); 7] = [
+        (1, 32, 1),
+        (3, 32, 2),
+        (17, 64, 3),
+        (1024, 1024, 4),
+        (2048, 1024, 5),
+        (3072, 1024, 6),
+        (151_936, 1024, 7),
+    ];
+    for (rows, cols, seed) in shapes {
+        let w = boundary_q4_0_weights(rows, cols, seed);
+        let x = boundary_input(cols, seed ^ 0x9e37);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        let xb = ctx.buffer(cols * 4, true).unwrap();
+        let yb = ctx.buffer(rows * 4, true).unwrap();
+        wb.upload(0, &w).unwrap();
+        xb.upload(0, &f32_bytes(&x)).unwrap();
+        ctx.q4_0_gemv(&wb, &xb, &yb, rows as u32, cols as u32)
+            .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; rows * 4];
+        yb.download(0, &mut out).unwrap();
+        let gpu: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let cpu = cpu_q4_0_gemv(&w, &x, rows, cols);
+        let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+        let check_rows: Vec<usize> = if rows <= 32 {
+            (0..rows).collect()
+        } else {
+            vec![0, 1, 2, rows / 2, rows - 3, rows - 2, rows - 1]
+        };
+        for &r in &check_rows {
+            let diff = (gpu[r] - cpu[r]).abs();
+            assert!(
+                diff <= 1e-4 * scale,
+                "shape ({rows},{cols}) row {r}: gpu {}, cpu {}, diff {diff} over scale {scale}",
+                gpu[r],
+                cpu[r]
+            );
+        }
+    }
+}
+
+#[test]
+fn q4_0_gemv_rejects_malformed_arguments() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    let wb = ctx.buffer(2 * 18, true).unwrap(); // one row of 32 cols
+    let xb = ctx.buffer(32 * 4, true).unwrap();
+    let yb = ctx.buffer(4, true).unwrap();
+    assert!(ctx.q4_0_gemv(&wb, &xb, &yb, 2, 30).is_err());
+    assert!(ctx.q4_0_gemv(&wb, &xb, &yb, 0, 32).is_err());
+    let err = ctx.q4_0_gemv(&wb, &xb, &yb, 2, 32).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::InvalidRequest);
+    let big_w = ctx.buffer(18, true).unwrap();
+    let big_y = ctx.buffer(8, true).unwrap();
+    assert!(ctx.q4_0_gemv(&big_w, &xb, &big_y, 2, 32).is_err());
+}
+
+#[test]
+fn q4_0_row_and_indirect_match_the_scalar_reference() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    let (rows, cols) = (64usize, 1024usize);
+    let w = boundary_q4_0_weights(rows, cols, 21);
+    let wb = ctx.buffer(w.len(), true).unwrap();
+    wb.upload(0, &w).unwrap();
+    // Direct row dequant at an offset.
+    let out = ctx.buffer((8 + cols) * 4, true).unwrap();
+    ctx.q4_0_row_f32(&wb, &out, 17, cols as u32, 8).unwrap();
+    let mut got = vec![0u8; (8 + cols) * 4];
+    ctx.fence().unwrap();
+    out.download(0, &mut got).unwrap();
+    let g: Vec<f32> = got
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let cpu = cpu_q4_0_row(&w, 17, cols);
+    assert!(g[..8].iter().all(|v| *v == 0.0), "nothing before off");
+    for i in 0..cols {
+        assert!(
+            (g[8 + i] - cpu[i]).abs() <= 1e-6 + cpu[i].abs() * 1e-6,
+            "row 17 col {i}: {} vs {}",
+            g[8 + i],
+            cpu[i]
+        );
+    }
+    // Indirect through the type-dispatched lookup with a device id.
+    let ids = ctx.buffer(8, true).unwrap();
+    ids.upload(0, &23u32.to_le_bytes()).unwrap();
+    let out2 = ctx.buffer(cols * 4, true).unwrap();
+    ctx.row_indirect_f32(&wb, 2u32, rows as u32, cols as u32, &ids, 0, &out2)
+        .unwrap();
+    ctx.fence().unwrap();
+    let mut got2 = vec![0u8; cols * 4];
+    out2.download(0, &mut got2).unwrap();
+    let g2: Vec<f32> = got2
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let cpu2 = cpu_q4_0_row(&w, 23, cols);
+    for i in 0..cols {
+        assert!(
+            (g2[i] - cpu2[i]).abs() <= 1e-6 + cpu2[i].abs() * 1e-6,
+            "indirect row 23 col {i}: {} vs {}",
+            g2[i],
+            cpu2[i]
+        );
+    }
+}
+
+#[test]
+fn q4_0_gemm_mma_matches_the_cpu_reference_within_tolerance() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    for (rows, cols, batch) in [
+        (16usize, 1024usize, 16usize),
+        (40, 64, 3),
+        (3584, 1024, 16),
+        (3584, 1024, 32),
+        (40, 64, 27),
+        (1024, 3584, 64),
+        (100, 96, 77),
+        (40, 64, 512),
+        (1024, 3584, 7),
+        (6144, 1024, 1),
+    ] {
+        let w = boundary_q4_0_weights(rows, cols, 11);
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        wb.upload(0, &w).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.q4_0_gemm_mma(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert!(
+            got[..y_off].iter().all(|v| *v == 0.0),
+            "nothing before y_off"
+        );
+        for b in 0..batch {
+            let cpu = cpu_q4_0_gemv(&w, &x[b * cols..(b + 1) * cols], rows, cols);
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                assert!(
+                    (g - cpu[r]).abs() <= 1e-4 * scale,
+                    "({rows},{cols},{batch}) b {b} r {r}: {g} vs {}",
+                    cpu[r]
+                );
+            }
+        }
+    }
+    assert!(
+        ctx.q4_0_gemm_mma(
+            &ctx.buffer(64, true).unwrap(),
+            &ctx.buffer(64, true).unwrap(),
+            &ctx.buffer(64, true).unwrap(),
+            1,
+            32,
+            GEMM_MMA_MAX_BATCH + 1,
+            0,
+            0
+        )
+        .is_err(),
+        "batch above the MMA maximum refused"
+    );
+}
+
+#[test]
+fn q4_0_gemm_mma_f16op_matches_the_f32_reference_within_tolerance() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // Registered bound 1e-3 x max|reference| for the nibble dequant
+    // staged as half (observed values printed; the Q8_0 f16op gate's
+    // 1e-4 was set from its own measured worst).
+    let mut worst_rel = 0f32;
+    let mut worst_at = (0usize, 0usize, 0usize, 0usize);
+    for (rows, cols, batch) in [
+        (16usize, 1024usize, 16usize),
+        (40, 64, 3),
+        (6144, 2048, 32),
+        (2048, 2048, 27),
+        (2048, 6144, 64),
+        (6912, 1152, 128),
+        (1152, 6912, 77),
+        (1024, 1152, 512),
+        (1152, 1024, 7),
+        (256, 1152, 1),
+    ] {
+        let w = half_domain_q4_0_weights(rows, cols, 11);
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        wb.upload(0, &w).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.q4_0_gemm_mma_f16op(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        for b in 0..batch {
+            let cpu = cpu_q4_0_gemv(&w, &x[b * cols..(b + 1) * cols], rows, cols);
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                let rel = (g - cpu[r]).abs() / scale;
+                if rel > worst_rel {
+                    worst_rel = rel;
+                    worst_at = (rows, cols, batch, r);
+                }
+                assert!(
+                    (g - cpu[r]).abs() <= 1e-3 * scale,
+                    "({rows},{cols},{batch}) b {b} r {r}: {g} vs {} (rel {rel})",
+                    cpu[r]
+                );
+            }
+        }
+    }
+    eprintln!("q4_0 f16op worst relative {worst_rel:.3e} at {worst_at:?} (bound 1e-3)");
+}
+
+// ------------------------------------------------------------ Q4_1 --------
+
+/// Q4_1 boundary weights: [f16 d][f16 m][16B nibbles], value = d * nib
+/// + m, with the m carrying its own boundary set.
+fn boundary_q4_1_weights(rows: usize, cols: usize, seed: u64) -> Vec<u8> {
+    let blocks = cols / 32;
+    let mut rng = Rng(seed);
+    let scales = [
+        1.0f32,
+        -0.5,
+        2f32.powi(-12),
+        65504.0,
+        -65504.0,
+        5.96e-8,
+        0.0,
+        -0.0,
+        448.0,
+        6e-5,
+    ];
+    let mins = [0.0f32, -1.0, 1e4, -1e4, 0.5];
+    let mut bytes = Vec::with_capacity(rows * blocks * 20);
+    for _ in 0..rows * blocks {
+        let scale = scales[(rng.next() % scales.len() as u64) as usize];
+        let m = mins[(rng.next() % mins.len() as u64) as usize];
+        bytes.extend_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
+        bytes.extend_from_slice(&f32_to_f16_bits(m).to_le_bytes());
+        for _ in 0..16 {
+            let nib_lo = (rng.next() % 16) as u8;
+            let nib_hi = match rng.next() % 4 {
+                0 => 0u8,
+                1 => 0xF,
+                _ => (rng.next() % 16) as u8,
+            };
+            bytes.push(nib_lo | (nib_hi << 4));
+        }
+    }
+    bytes
+}
+
+fn cpu_q4_1_row(w: &[u8], row: usize, cols: usize) -> Vec<f32> {
+    let blocks = cols / 32;
+    let mut out = Vec::with_capacity(cols);
+    for b in 0..blocks {
+        let off = (row * blocks + b) * 20;
+        let d = f16_bits_to_f32(u16::from_le_bytes([w[off], w[off + 1]]));
+        let m = f16_bits_to_f32(u16::from_le_bytes([w[off + 2], w[off + 3]]));
+        for byte in &w[off + 4..off + 20] {
+            out.push(d * (byte & 0x0f) as f32 + m);
+        }
+        for byte in &w[off + 4..off + 20] {
+            out.push(d * (byte >> 4) as f32 + m);
+        }
+    }
+    out
+}
+
+fn cpu_q4_1_gemv(w: &[u8], x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let mut y = vec![0f32; rows];
+    for (r, slot) in y.iter_mut().enumerate() {
+        let vals = cpu_q4_1_row(w, r, cols);
+        let mut acc = 0f32;
+        for (l, xv) in x.iter().enumerate() {
+            acc += vals[l] * xv;
+        }
+        *slot = acc;
+    }
+    y
+}
+
+/// Q4_1 weights whose dequantized values fit the f16 domain: d * 15 + m
+/// bounded below half's max magnitude.
+fn half_domain_q4_1_weights(rows: usize, cols: usize, seed: u64) -> Vec<u8> {
+    let blocks = cols / 32;
+    let mut rng = Rng(seed);
+    let scales = [
+        1.0f32,
+        -0.5,
+        2f32.powi(-12),
+        4000.0,
+        -4000.0,
+        5.96e-8,
+        0.0,
+        -0.0,
+        448.0,
+        6e-5,
+    ];
+    let mins = [0.0f32, -1.0, 100.0, -100.0, 0.5];
+    let mut bytes = Vec::with_capacity(rows * blocks * 20);
+    for _ in 0..rows * blocks {
+        let scale = scales[(rng.next() % scales.len() as u64) as usize];
+        let m = mins[(rng.next() % mins.len() as u64) as usize];
+        bytes.extend_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
+        bytes.extend_from_slice(&f32_to_f16_bits(m).to_le_bytes());
+        for _ in 0..16 {
+            let nib_lo = (rng.next() % 16) as u8;
+            let nib_hi = match rng.next() % 4 {
+                0 => 0u8,
+                1 => 0xF,
+                _ => (rng.next() % 16) as u8,
+            };
+            bytes.push(nib_lo | (nib_hi << 4));
+        }
+    }
+    bytes
+}
+
+#[test]
+fn q4_1_gemv_matches_the_scalar_reference_across_real_shapes() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    let shapes: [(usize, usize, u64); 7] = [
+        (1, 32, 1),
+        (3, 32, 2),
+        (17, 64, 3),
+        (1024, 1024, 4),
+        (2048, 1024, 5),
+        (3072, 1024, 6),
+        (151_936, 1024, 7),
+    ];
+    for (rows, cols, seed) in shapes {
+        let w = boundary_q4_1_weights(rows, cols, seed);
+        let x = boundary_input(cols, seed ^ 0x9e37);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        let xb = ctx.buffer(cols * 4, true).unwrap();
+        let yb = ctx.buffer(rows * 4, true).unwrap();
+        wb.upload(0, &w).unwrap();
+        xb.upload(0, &f32_bytes(&x)).unwrap();
+        ctx.q4_1_gemv(&wb, &xb, &yb, rows as u32, cols as u32)
+            .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; rows * 4];
+        yb.download(0, &mut out).unwrap();
+        let gpu: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let cpu = cpu_q4_1_gemv(&w, &x, rows, cols);
+        let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+        let check_rows: Vec<usize> = if rows <= 32 {
+            (0..rows).collect()
+        } else {
+            vec![0, 1, 2, rows / 2, rows - 3, rows - 2, rows - 1]
+        };
+        for &r in &check_rows {
+            let diff = (gpu[r] - cpu[r]).abs();
+            assert!(
+                diff <= 1e-4 * scale,
+                "shape ({rows},{cols}) row {r}: gpu {}, cpu {}, diff {diff} over scale {scale}",
+                gpu[r],
+                cpu[r]
+            );
+        }
+    }
+}
+
+#[test]
+fn q4_1_row_and_indirect_match_the_scalar_reference() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    let (rows, cols) = (64usize, 1024usize);
+    let w = boundary_q4_1_weights(rows, cols, 21);
+    let wb = ctx.buffer(w.len(), true).unwrap();
+    wb.upload(0, &w).unwrap();
+    let out = ctx.buffer((8 + cols) * 4, true).unwrap();
+    ctx.q4_1_row_f32(&wb, &out, 17, cols as u32, 8).unwrap();
+    let mut got = vec![0u8; (8 + cols) * 4];
+    ctx.fence().unwrap();
+    out.download(0, &mut got).unwrap();
+    let g: Vec<f32> = got
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let cpu = cpu_q4_1_row(&w, 17, cols);
+    assert!(g[..8].iter().all(|v| *v == 0.0), "nothing before off");
+    for i in 0..cols {
+        assert!(
+            (g[8 + i] - cpu[i]).abs() <= 1e-6 + cpu[i].abs() * 1e-6,
+            "row 17 col {i}: {} vs {}",
+            g[8 + i],
+            cpu[i]
+        );
+    }
+    let ids = ctx.buffer(8, true).unwrap();
+    ids.upload(0, &23u32.to_le_bytes()).unwrap();
+    let out2 = ctx.buffer(cols * 4, true).unwrap();
+    ctx.row_indirect_f32(&wb, 3u32, rows as u32, cols as u32, &ids, 0, &out2)
+        .unwrap();
+    ctx.fence().unwrap();
+    let mut got2 = vec![0u8; cols * 4];
+    out2.download(0, &mut got2).unwrap();
+    let g2: Vec<f32> = got2
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let cpu2 = cpu_q4_1_row(&w, 23, cols);
+    for i in 0..cols {
+        assert!(
+            (g2[i] - cpu2[i]).abs() <= 1e-6 + cpu2[i].abs() * 1e-6,
+            "indirect row 23 col {i}: {} vs {}",
+            g2[i],
+            cpu2[i]
+        );
+    }
+}
+
+#[test]
+fn q4_1_gemm_mma_matches_the_cpu_reference_within_tolerance() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    for (rows, cols, batch) in [
+        (16usize, 1024usize, 16usize),
+        (40, 64, 3),
+        (3584, 1024, 16),
+        (3584, 1024, 32),
+        (40, 64, 27),
+        (1024, 3584, 64),
+        (100, 96, 77),
+        (40, 64, 512),
+        (1024, 3584, 7),
+        (6144, 1024, 1),
+    ] {
+        let w = boundary_q4_1_weights(rows, cols, 11);
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        wb.upload(0, &w).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.q4_1_gemm_mma(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert!(
+            got[..y_off].iter().all(|v| *v == 0.0),
+            "nothing before y_off"
+        );
+        for b in 0..batch {
+            let cpu = cpu_q4_1_gemv(&w, &x[b * cols..(b + 1) * cols], rows, cols);
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                assert!(
+                    (g - cpu[r]).abs() <= 1e-4 * scale,
+                    "({rows},{cols},{batch}) b {b} r {r}: {g} vs {}",
+                    cpu[r]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn q4_1_gemm_mma_f16op_matches_the_f32_reference_within_tolerance() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // Registered bound 1e-3 x max|reference| (the half-domain analog of the
+    // Q4_0 f16op gate; observed worst printed).
+    let mut worst_rel = 0f32;
+    for (rows, cols, batch) in [
+        (16usize, 1024usize, 16usize),
+        (40, 64, 3),
+        (6144, 2048, 32),
+        (2048, 2048, 27),
+        (2048, 6144, 64),
+        (6912, 1152, 128),
+        (1152, 6912, 77),
+        (1024, 1152, 512),
+        (1152, 1024, 7),
+        (256, 1152, 1),
+    ] {
+        let w = half_domain_q4_1_weights(rows, cols, 11);
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len(), true).unwrap();
+        wb.upload(0, &w).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.q4_1_gemm_mma_f16op(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        for b in 0..batch {
+            let cpu = cpu_q4_1_gemv(&w, &x[b * cols..(b + 1) * cols], rows, cols);
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                let rel = (g - cpu[r]).abs() / scale;
+                worst_rel = worst_rel.max(rel);
+                assert!(
+                    (g - cpu[r]).abs() <= 1e-3 * scale,
+                    "({rows},{cols},{batch}) b {b} r {r}: {g} vs {} (rel {rel})",
+                    cpu[r]
+                );
+            }
+        }
+    }
+    eprintln!("q4_1 f16op worst relative {worst_rel:.3e} (bound 1e-3)");
+}
+
+#[test]
+fn q4_0_gemm_matches_the_scalar_reference_across_real_shapes() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // (rows, cols, all-rows?) — the mid-batch projection kernel that
+    // small batches fall back to; realistic Gemma/Qwen shapes with the
+    // vocabulary head spot-checked.
+    let shapes: [(usize, usize, bool); 6] = [
+        (32, 32, true),
+        (64, 1024, true),
+        (1152, 1152, true),
+        (6912, 1152, false),
+        (1152, 6912, false),
+        (151_936, 1024, false),
+    ];
+    for (rows, cols, all_rows) in shapes {
+        let w = boundary_q4_0_weights(rows, cols, 101 + rows as u64);
+        for batch in [1usize, 4, 12, 16] {
+            let xs: Vec<Vec<f32>> = (0..batch)
+                .map(|b| boundary_input(cols, 200 + b as u64))
+                .collect();
+            let mut flat = Vec::with_capacity(batch * cols);
+            for x in &xs {
+                flat.extend_from_slice(x);
+            }
+            let wb = ctx.buffer(w.len(), true).unwrap();
+            let xb = ctx.buffer(flat.len() * 4, true).unwrap();
+            let yb = ctx.buffer(batch * rows * 4, true).unwrap();
+            wb.upload(0, &w).unwrap();
+            xb.upload(0, &f32_bytes(&flat)).unwrap();
+            ctx.q4_0_gemm(&wb, &xb, &yb, rows as u32, cols as u32, batch as u32, 0, 0)
+                .unwrap();
+            ctx.fence().unwrap();
+            let mut out = vec![0u8; batch * rows * 4];
+            yb.download(0, &mut out).unwrap();
+            let gpu: Vec<f32> = out
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let check_rows: Vec<usize> = if all_rows {
+                (0..rows).collect()
+            } else {
+                vec![0, 1, rows / 2, rows - 2, rows - 1]
+            };
+            for (b, x) in xs.iter().enumerate() {
+                let cpu = cpu_q4_0_gemv(&w, x, rows, cols);
+                let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+                for &r in &check_rows {
+                    let diff = (gpu[b * rows + r] - cpu[r]).abs();
+                    assert!(
+                        diff <= 1e-4 * scale,
+                        "({rows},{cols}) batch {batch} b {b} row {r}: {} vs {}",
+                        gpu[b * rows + r],
+                        cpu[r]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn q4_1_gemm_matches_the_scalar_reference_across_real_shapes() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    let shapes: [(usize, usize, bool); 6] = [
+        (32, 32, true),
+        (64, 1024, true),
+        (1152, 1152, true),
+        (6912, 1152, false),
+        (1152, 6912, false),
+        (151_936, 1024, false),
+    ];
+    for (rows, cols, all_rows) in shapes {
+        let w = boundary_q4_1_weights(rows, cols, 101 + rows as u64);
+        for batch in [1usize, 4, 12, 16] {
+            let xs: Vec<Vec<f32>> = (0..batch)
+                .map(|b| boundary_input(cols, 200 + b as u64))
+                .collect();
+            let mut flat = Vec::with_capacity(batch * cols);
+            for x in &xs {
+                flat.extend_from_slice(x);
+            }
+            let wb = ctx.buffer(w.len(), true).unwrap();
+            let xb = ctx.buffer(flat.len() * 4, true).unwrap();
+            let yb = ctx.buffer(batch * rows * 4, true).unwrap();
+            wb.upload(0, &w).unwrap();
+            xb.upload(0, &f32_bytes(&flat)).unwrap();
+            ctx.q4_1_gemm(&wb, &xb, &yb, rows as u32, cols as u32, batch as u32, 0, 0)
+                .unwrap();
+            ctx.fence().unwrap();
+            let mut out = vec![0u8; batch * rows * 4];
+            yb.download(0, &mut out).unwrap();
+            let gpu: Vec<f32> = out
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let check_rows: Vec<usize> = if all_rows {
+                (0..rows).collect()
+            } else {
+                vec![0, 1, rows / 2, rows - 2, rows - 1]
+            };
+            for (b, x) in xs.iter().enumerate() {
+                let cpu = cpu_q4_1_gemv(&w, x, rows, cols);
+                let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+                for &r in &check_rows {
+                    let diff = (gpu[b * rows + r] - cpu[r]).abs();
+                    assert!(
+                        diff <= 1e-4 * scale,
+                        "({rows},{cols}) batch {batch} b {b} row {r}: {} vs {}",
+                        gpu[b * rows + r],
+                        cpu[r]
+                    );
+                }
+            }
+        }
+    }
+}

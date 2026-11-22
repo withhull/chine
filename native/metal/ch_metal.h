@@ -137,6 +137,10 @@ int ch_metal_abort_group(ch_metal_ctx *ctx, char *err, size_t err_cap);
 /* Dequantize row `row` of a packed Q8_0 matrix to `cols` f32 values. */
 int ch_metal_q8_0_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
                           uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
+int ch_metal_q4_0_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
+int ch_metal_q4_1_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
+                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap);
 
 /* F16 matvec: y[r] = dot(f32(w_row_r), x); `w` holds rows*cols f16 values. */
 int ch_metal_f16_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
@@ -180,6 +184,12 @@ int ch_metal_f16_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer 
 int ch_metal_q8_0_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
                        ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                        uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_0_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_1_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
 /* Largest batch ch_metal_q8_0_gemm_mma accepts (one launch, a 2-D grid of
  * 32-row x 32-token tiles). */
 #define CH_METAL_GEMM_MMA_MAX_BATCH 512u
@@ -191,6 +201,12 @@ int ch_metal_q8_0_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
 int ch_metal_q8_0_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
                            ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                            uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_0_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_1_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
 /* Same contract and tiling as ch_metal_q8_0_gemm_mma, with f16 operand
  * tiles (the declared `metal-f16-act` profile, ADR-010): dequantized
  * weights and activations are rounded to half when staged, the multiply
@@ -198,6 +214,12 @@ int ch_metal_q8_0_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffe
  * numerics; qualified separately against the f32 kernel and the
  * reference. */
 int ch_metal_q8_0_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_0_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                 uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_q4_1_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
                                  ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                                  uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
 int ch_metal_f16_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
@@ -224,6 +246,10 @@ int ch_metal_gelu_tanh_mul_f32(ch_metal_ctx *ctx, ch_metal_buffer *gate, ch_meta
 int ch_metal_q8_0_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
                        ch_metal_buffer *y, uint32_t rows, uint32_t cols,
                        char *err, size_t err_cap);
+int ch_metal_q4_0_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                        ch_metal_buffer *y, uint32_t rows, uint32_t cols, char *err, size_t err_cap);
+int ch_metal_q4_1_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                        ch_metal_buffer *y, uint32_t rows, uint32_t cols, char *err, size_t err_cap);
 
 /* ---------------- Q35-2A: Gated DeltaNet operators ---------------- */
 

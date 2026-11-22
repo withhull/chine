@@ -1044,5 +1044,31 @@ three passes each; full prefill ~330 ms):
   actively regress; kernel changes do not ship on isolated evidence
   alone - they need an in-model interleaved A/B (as the batch-512
   change had) or the quiet acceptance run before the commit counts
-  as accepted.** The at-512 deficit (~4%) stays open with the llama
-  `bci/bco` deeper-pipeline variants as the recorded follow-up.
+   as accepted.** The at-512 deficit (~4%) stays open with the llama
+   `bci/bco` deeper-pipeline variants as the recorded follow-up.
+
+- **Q4_0/Q4_1 Metal kernels (2026-11-22).** The matrix-unit GEMM set
+  extended to the 4-bit pair — Q4_0 (18-byte block: `[f16 d][16 B
+  nibbles]`, value `(nibble-8)*d`, low nibble -> j, high -> j+16) and
+  Q4_1 (24-byte block: `[f16 d][f16 m][16 B]`, value `nibble*d + m`) —
+  gemv, row, row-indirect, mid-batch gemm and both MMA profiles on the
+  Q8_0 dispatch and admission surface; Q4_1 joins the MMA fast path
+  (f16op under metal-f16-act). Eleven kernel gates against the CPU
+  reference at real shapes (6912x1152, 1152x6912, 151936 rows;
+  including the mid-batch gemm the routing audit found ungated —
+  every Q4 kernel family is now gated); worst f16op relative 3.06e-6
+  (Q4_0) / 1.221e-4 (Q4_1), bound 1e-3. Real-model proof: the
+  ADR-013 real-text Metal gate parameterized over a second pinned
+  artifact — unsloth gemma-3-1b-it Q4_0 (sha256 `27ee88e0…94b0276e`;
+  361.5 MiB Q4_0 + 14.2 MiB Q4_1 + Q8_0 embeddings, the unsloth
+  convention): ours vs llama.cpp Metal max |Δ| **0.0114** mean 0.0019
+  at 2-688 tokens, top-1 equal, windowed decode max 0.0097 — tighter
+  than the Q8_0 pin's own 0.0256/0.0044 in the same run (identical
+  artifact bytes on both sides, so the 4-bit weight error is common
+  to both engines and cancels; the residual isolates activation
+  staging, unchanged). Re-derived and consistent with the standing
+  matrix note: `verify --reference` against llama's CPU path cannot
+  qualify gemma at any quant — HEAD's Q8_0 control fails it
+  identically (max ~9.9, llama's own CPU-vs-Metal divergence) — so
+  no registered CPU-reference tolerance is claimed for Q4-dominant
+  artifacts; the typed refusal stands, exploratory runs only.

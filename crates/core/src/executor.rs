@@ -1321,15 +1321,37 @@ fn engine_step(
     model.forward_token(token, logits)
 }
 
-/// Identity of the hybrid device path: the Q35-2C GPU model over raw
-/// Q8_0/F16 weights, resolved implementation "metal".
-const HYBRID_KERNEL_ID: &str = "Q35-2C:qwen35-q8_0+f16:metal";
+/// Identity of the hybrid device path: the Q35-2C GPU model, resolved
+/// implementation "metal". The quant segment is derived from the
+/// artifact's dominant weight bytes (records must not claim a quant the
+/// artifact does not carry).
+fn hybrid_kernel_id(insp: &chine_manifest::gguf::GgufInspection) -> String {
+    format!("Q35-2C:qwen35-{}+f16:metal", dominant_weight_quant(insp))
+}
 
-/// Identity of dense Qwen3 on the unified engine (ADR-011 step 2), over raw
-/// Q8_0/F16 weights, resolved implementation "metal".
-const QWEN3_ENGINE_KERNEL_ID: &str = "ADR011:qwen3-q8_0+f16:metal";
+/// Identity of dense Qwen3 on the unified engine (ADR-011 step 2),
+/// resolved implementation "metal".
+fn qwen3_engine_kernel_id(insp: &chine_manifest::gguf::GgufInspection) -> String {
+    format!("ADR011:qwen3-{}+f16:metal", dominant_weight_quant(insp))
+}
+
 /// Kernel identity of Gemma 3 on the unified engine (ADR-013).
-const GEMMA3_ENGINE_KERNEL_ID: &str = "ADR013:gemma3-q8_0+f16:metal";
+fn gemma3_engine_kernel_id(insp: &chine_manifest::gguf::GgufInspection) -> String {
+    format!("ADR013:gemma3-{}+f16:metal", dominant_weight_quant(insp))
+}
+
+/// The quant label for the kernel identity: the weight format carrying
+/// the most bytes in the artifact (Q8_0 vs Q4_0 today).
+fn dominant_weight_quant(insp: &chine_manifest::gguf::GgufInspection) -> &'static str {
+    let stats = insp.tensor_stats();
+    let q8 = stats.by_type.get("Q8_0").copied().unwrap_or(0);
+    let q4 = stats.by_type.get("Q4_0").copied().unwrap_or(0);
+    if q4 > q8 {
+        "q4_0"
+    } else {
+        "q8_0"
+    }
+}
 
 /// Resolved GEMM operand profile for engine (Metal) loads: true is the
 /// declared metal-f16-act default; "oracle-f32" restores f32 operands.
@@ -1482,7 +1504,7 @@ impl ChineCore {
             opts.prefix_cache.unwrap_or(true),
             opts.speculative.unwrap_or(false),
             engine_gemm_f16_operands(opts)?,
-            HYBRID_KERNEL_ID,
+            &hybrid_kernel_id(insp),
             ctx,
         )
     }
@@ -1522,7 +1544,7 @@ impl ChineCore {
             opts.prefix_cache.unwrap_or(true),
             opts.speculative.unwrap_or(false),
             engine_gemm_f16_operands(opts)?,
-            QWEN3_ENGINE_KERNEL_ID,
+            &qwen3_engine_kernel_id(insp),
             ctx,
         )
     }
@@ -1570,7 +1592,7 @@ impl ChineCore {
             opts.prefix_cache.unwrap_or(true),
             opts.speculative.unwrap_or(false),
             engine_gemm_f16_operands(opts)?,
-            GEMMA3_ENGINE_KERNEL_ID,
+            &gemma3_engine_kernel_id(insp),
             ctx,
         )
     }
@@ -1778,9 +1800,14 @@ impl ChineCore {
     }
 }
 
-/// Kernel-package identifiers for identity records: K01 covers Q8_0/F16
-/// CPU fused dot only (Q4 acceleration and Metal are not implemented); the
-/// implementation suffix is the resolved selection, "auto" before a load.
+/// Kernel-package identifiers for identity records: K01 is the CPU
+/// fused-dot package (Q8_0/F16; Q4 tensors dequantize through the scalar
+/// path) — a *package* declaration, valid before any load exists, when no
+/// artifact quant can be derived; the implementation suffix is the
+/// resolved selection, "auto" before a load. After a Metal load the
+/// identity is the engine id instead (artifact-derived quant, ADR-011
+/// note 2026-11-22), so records never claim a quant the artifact does
+/// not carry.
 fn kernel_ids(impl_: Option<ResolvedKernels>) -> Vec<String> {
     match impl_ {
         Some(k) => vec![format!("K01:q8_0+f16:{}", k.as_str())],
@@ -2143,7 +2170,12 @@ mod tests {
         if !metal_or_skip() {
             return;
         }
-        let (_dir, artifact, plan) = hybrid_fixture();
+        let (dir, artifact, plan) = hybrid_fixture();
+        let insp = chine_manifest::gguf::inspect(
+            &dir.path().join("q35.gguf"),
+            &chine_manifest::gguf::Limits::default(),
+        )
+        .unwrap();
         let mut engine = ChineCore::new();
         let note = engine
             .load(
@@ -2160,7 +2192,7 @@ mod tests {
             engine.identity().kernels,
             // The default engine load resolves the metal-f16-act GEMM
             // profile, recorded in the identity (ADR-010).
-            vec![format!("{HYBRID_KERNEL_ID}:f16op")]
+            vec![format!("{}:f16op", hybrid_kernel_id(&insp))]
         );
 
         // The device ledger equals the preflight, and every class is

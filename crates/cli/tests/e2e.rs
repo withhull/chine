@@ -1384,30 +1384,21 @@ fn bench_warm_repetitions_and_long_output_drain() {
     assert_eq!(v["schema_version"], 5);
 }
 
-/// ADR-013 reference gate (machine-local): Gemma 3 on the unified engine
-/// (Metal, f16 KV) agrees with the pinned llama.cpp reference (CPU, f16 KV)
-/// on teacher-forced logits over real text with BOS, at lengths below and
-/// past the 512-token sliding window. Requires CHINE_GEMMA3_GGUF and
-/// CHINE_LLAMA_LIB.
-#[test]
-fn gemma3_engine_logits_match_reference_when_available() {
-    let Some(gguf) = std::env::var("CHINE_GEMMA3_GGUF")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.exists())
-    else {
-        eprintln!("skipping: CHINE_GEMMA3_GGUF not set (pinned Gemma 3 1B Q8_0)");
-        return;
-    };
-    if std::env::var("CHINE_LLAMA_LIB").is_err() {
-        eprintln!("skipping: CHINE_LLAMA_LIB not set (reference comparison needs the pinned shim)");
-        return;
-    }
+/// ADR-013 reference probe body (machine-local): Gemma 3 on the unified
+/// engine (Metal, f16 KV) against the pinned llama.cpp reference on
+/// teacher-forced logits over real text with BOS, at lengths below and
+/// past the 512-token sliding window. The gate is llama.cpp's *Metal*
+/// path — the same activation numerics as ours (ADR-010); its CPU
+/// reference quantizes activations to Q8_0, which Gemma's large
+/// activations amplify (llama.cpp CPU vs its own Metal path differs as
+/// much), so the CPU side is recorded, never gated. Identical artifact
+/// bytes on both sides.
+fn gemma3_engine_vs_metal_reference(gguf: &std::path::Path) {
     let mut reference = chine_llamaref::LlamaRef::new();
-    reference.open_reference_model(&gguf, true).unwrap();
+    reference.open_reference_model(gguf, true).unwrap();
     let mut metal_reference = chine_llamaref::LlamaRef::new();
     metal_reference
-        .open_reference_model_with(&gguf, true, 99)
+        .open_reference_model_with(gguf, true, 99)
         .unwrap();
     let paragraph = "Rivers carry water, sediment and nutrients from mountains to the sea. \
         Along the way they shape valleys, feed wetlands and support farms and cities. \
@@ -1421,9 +1412,9 @@ fn gemma3_engine_logits_match_reference_when_available() {
         all.len()
     );
 
-    let file = std::fs::File::open(&gguf).unwrap();
+    let file = std::fs::File::open(gguf).unwrap();
     let insp =
-        chine_manifest::gguf::inspect(&gguf, &chine_manifest::gguf::Limits::default()).unwrap();
+        chine_manifest::gguf::inspect(gguf, &chine_manifest::gguf::Limits::default()).unwrap();
     let source = chine_core::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
     let graph = chine_core::engine::adapters::gemma3(&insp).unwrap();
     let capacity = all.len() + 8;
@@ -1536,4 +1527,44 @@ fn gemma3_engine_logits_match_reference_when_available() {
         m <= 0.05 && mean <= 0.01,
         "decode path within the Metal-reference bound"
     );
+}
+
+/// ADR-013 reference gate (machine-local): the pinned Gemma 3 1B Q8_0
+/// against llama.cpp Metal. Requires CHINE_GEMMA3_GGUF and CHINE_LLAMA_LIB.
+#[test]
+fn gemma3_engine_logits_match_reference_when_available() {
+    let Some(gguf) = std::env::var("CHINE_GEMMA3_GGUF")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+    else {
+        eprintln!("skipping: CHINE_GEMMA3_GGUF not set (pinned Gemma 3 1B Q8_0)");
+        return;
+    };
+    if std::env::var("CHINE_LLAMA_LIB").is_err() {
+        eprintln!("skipping: CHINE_LLAMA_LIB not set (reference comparison needs the pinned shim)");
+        return;
+    }
+    gemma3_engine_vs_metal_reference(&gguf);
+}
+
+/// Q4_0 reference gate (machine-local): the pinned Gemma 3 1B Q4_0 (with
+/// Q4_1 tensors, the unsloth convention) against llama.cpp Metal — the
+/// same artifact bytes through our new Q4 kernels. Requires
+/// CHINE_GEMMA3_Q40_GGUF and CHINE_LLAMA_LIB.
+#[test]
+fn gemma3_engine_q40_logits_match_metal_reference_when_available() {
+    let Some(gguf) = std::env::var("CHINE_GEMMA3_Q40_GGUF")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+    else {
+        eprintln!("skipping: CHINE_GEMMA3_Q40_GGUF not set (pinned Gemma 3 1B Q4_0)");
+        return;
+    };
+    if std::env::var("CHINE_LLAMA_LIB").is_err() {
+        eprintln!("skipping: CHINE_LLAMA_LIB not set (reference comparison needs the pinned shim)");
+        return;
+    }
+    gemma3_engine_vs_metal_reference(&gguf);
 }
