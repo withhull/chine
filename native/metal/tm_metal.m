@@ -64,6 +64,17 @@ struct tm_metal_ctx {
     id<MTLComputePipelineState> pso_q35_rope_chunk;
     id<MTLComputePipelineState> pso_q35_kv_store_chunk;
     id<MTLComputePipelineState> pso_q35_attention_chunk;
+    id<MTLComputePipelineState> pso_q35_attn_sk_256x4;
+    id<MTLComputePipelineState> pso_q35_attn_sk_16x2;
+    id<MTLComputePipelineState> pso_q35_attn_sk_128x2;
+    id<MTLComputePipelineState> pso_q35_attn_sk_128x4;
+    id<MTLComputePipelineState> pso_q35_attn_sk_f32_16x2;
+    id<MTLComputePipelineState> pso_q35_attn_sk_f32_128x2;
+    id<MTLComputePipelineState> pso_q35_attn_sk_f32_128x4;
+    id<MTLComputePipelineState> pso_q35_attn_sk_merge_256x4;
+    id<MTLComputePipelineState> pso_q35_attn_sk_merge_16x2;
+    id<MTLComputePipelineState> pso_q35_attn_sk_merge_128x2;
+    id<MTLComputePipelineState> pso_q35_attn_sk_merge_128x4;
     id<MTLComputePipelineState> pso_q35_attention_gqa_256x4;
     id<MTLComputePipelineState> pso_q35_attention_gqa_16x2;
     id<MTLComputePipelineState> pso_q35_attention_gqa_128x2;
@@ -445,6 +456,24 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_q35_rope_chunk = tm_pipeline(ctx, @"tm_qwen35_rope_partial_chunk", &error);
         ctx->pso_q35_kv_store_chunk = tm_pipeline(ctx, @"tm_qwen35_kv_store_f16_chunk", &error);
         ctx->pso_q35_attention_chunk = tm_pipeline(ctx, @"tm_qwen35_attention_f16_chunk", &error);
+        ctx->pso_q35_attn_sk_256x4 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_256x4", &error);
+        ctx->pso_q35_attn_sk_16x2 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_16x2", &error);
+        ctx->pso_q35_attn_sk_128x2 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_128x2", &error);
+        ctx->pso_q35_attn_sk_128x4 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_128x4", &error);
+        ctx->pso_q35_attn_sk_f32_16x2 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_f32_16x2", &error);
+        ctx->pso_q35_attn_sk_f32_128x2 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_f32_128x2", &error);
+        ctx->pso_q35_attn_sk_f32_128x4 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_f32_128x4", &error);
+        ctx->pso_q35_attn_sk_merge_256x4 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_256x4", &error);
+        ctx->pso_q35_attn_sk_merge_16x2 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_16x2", &error);
+        ctx->pso_q35_attn_sk_merge_128x2 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_128x2", &error);
+        ctx->pso_q35_attn_sk_merge_128x4 =
+            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_128x4", &error);
         ctx->pso_q35_attention_gqa_256x4 =
             tm_pipeline(ctx, @"tm_qwen35_attention_gqa_256x4", &error);
         ctx->pso_q35_attention_gqa_16x2 =
@@ -500,8 +529,16 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_q35_gdn_chunk == nil || ctx->pso_q35_gdn_chunk_k128 == nil ||
             ctx->pso_q35_rope_chunk == nil ||
             ctx->pso_q35_kv_store_chunk == nil || ctx->pso_q35_attention_chunk == nil ||
+            ctx->pso_q35_attn_sk_256x4 == nil || ctx->pso_q35_attn_sk_16x2 == nil ||
+            ctx->pso_q35_attn_sk_128x2 == nil || ctx->pso_q35_attn_sk_128x4 == nil ||
+            ctx->pso_q35_attn_sk_f32_16x2 == nil || ctx->pso_q35_attn_sk_f32_128x2 == nil ||
+            ctx->pso_q35_attn_sk_f32_128x4 == nil || ctx->pso_q35_attn_sk_merge_256x4 == nil ||
+            ctx->pso_q35_attn_sk_merge_16x2 == nil ||
+            ctx->pso_q35_attn_sk_merge_128x2 == nil ||
+            ctx->pso_q35_attn_sk_merge_128x4 == nil ||
             ctx->pso_q35_attention_gqa_256x4 == nil || ctx->pso_q35_attention_gqa_16x2 == nil ||
-            ctx->pso_q35_attention_gqa_128x2 == nil || ctx->pso_q35_attention_gqa_128x4 == nil ||
+            ctx->pso_q35_attention_gqa_128x2 == nil ||
+            ctx->pso_q35_attention_gqa_128x4 == nil ||
             ctx->pso_q35_attention_gqa_f32_16x2 == nil ||
             ctx->pso_q35_attention_gqa_f32_128x2 == nil ||
             ctx->pso_q35_attention_gqa_f32_128x4 == nil ||
@@ -593,6 +630,17 @@ void tm_metal_destroy(tm_metal_ctx *ctx) {
         [ctx->pso_q35_rope_chunk release];
         [ctx->pso_q35_kv_store_chunk release];
         [ctx->pso_q35_attention_chunk release];
+        [ctx->pso_q35_attn_sk_256x4 release];
+        [ctx->pso_q35_attn_sk_16x2 release];
+        [ctx->pso_q35_attn_sk_128x2 release];
+        [ctx->pso_q35_attn_sk_128x4 release];
+        [ctx->pso_q35_attn_sk_f32_16x2 release];
+        [ctx->pso_q35_attn_sk_f32_128x2 release];
+        [ctx->pso_q35_attn_sk_f32_128x4 release];
+        [ctx->pso_q35_attn_sk_merge_256x4 release];
+        [ctx->pso_q35_attn_sk_merge_16x2 release];
+        [ctx->pso_q35_attn_sk_merge_128x2 release];
+        [ctx->pso_q35_attn_sk_merge_128x4 release];
         [ctx->pso_q35_attention_gqa_256x4 release];
         [ctx->pso_q35_attention_gqa_16x2 release];
         [ctx->pso_q35_attention_gqa_128x2 release];
@@ -2047,8 +2095,8 @@ int tm_metal_qwen35_kv_store_f16(tm_metal_ctx *ctx, tm_metal_buffer *k_src, tm_m
     }
 }
 
-static id<MTLComputePipelineState> tm_attention_gqa_pso(tm_metal_ctx *ctx, uint32_t head_dim,
-                                                        uint32_t group, int f32_cache);
+static id<MTLComputePipelineState> tm_attn_sk_partial_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+                                                          uint32_t group, int f32_cache);
 
 int tm_metal_qwen35_attention_f16(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k_cache,
                                   tm_metal_buffer *v_cache, tm_metal_buffer *out,
@@ -2061,9 +2109,10 @@ int tm_metal_qwen35_attention_f16(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_meta
     if (heads == 0 || head_dim == 0 || group == 0 || pos >= cap || heads % group != 0u) {
         return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"attn_f16: geometry out of range");
     }
-    /* One query row through the grouped chunk kernel, so decode and
-     * chunked prefill share one compiled kernel (bit-identical). */
-    if (tm_attention_gqa_pso(ctx, head_dim, group, 0) != nil) {
+    /* One query row through the split-K chunk kernels (the decode path;
+     * chunked prefill keeps the one-group-per-row kernel - see
+     * tm_attention_chunk). */
+    if (tm_attn_sk_partial_pso(ctx, head_dim, group, 0) != nil) {
         return tm_metal_qwen35_attention_f16_chunk(ctx, q, k_cache, v_cache, out, scratch, heads,
                                                    pos, cap, head_dim, group, scale, 1u, 0u,
                                                    err, err_cap);
@@ -2506,8 +2555,39 @@ int tm_metal_qwen35_kv_store_f32_chunk(tm_metal_ctx *ctx, tm_metal_buffer *k_src
 
 /* The grouped attention instance for this geometry and cache type, or
  * nil (the generic chunk kernel then runs). */
+#define TM_ATTN_SK_SLICES 16u
+
+static id<MTLComputePipelineState> tm_attn_sk_partial_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+                                                          uint32_t group, int f32_cache) {
+    if (f32_cache) {
+        if (head_dim == 16u && group == 2u) {
+            return ctx->pso_q35_attn_sk_f32_16x2;
+        }
+        if (head_dim == 128u && group == 2u) {
+            return ctx->pso_q35_attn_sk_f32_128x2;
+        }
+        if (head_dim == 128u && group == 4u) {
+            return ctx->pso_q35_attn_sk_f32_128x4;
+        }
+        return nil;
+    }
+    if (head_dim == 256u && group == 4u) {
+        return ctx->pso_q35_attn_sk_256x4;
+    }
+    if (head_dim == 16u && group == 2u) {
+        return ctx->pso_q35_attn_sk_16x2;
+    }
+    if (head_dim == 128u && group == 2u) {
+        return ctx->pso_q35_attn_sk_128x2;
+    }
+    if (head_dim == 128u && group == 4u) {
+        return ctx->pso_q35_attn_sk_128x4;
+    }
+    return nil;
+}
+
 static id<MTLComputePipelineState> tm_attention_gqa_pso(tm_metal_ctx *ctx, uint32_t head_dim,
-                                                        uint32_t group, int f32_cache) {
+                                                       uint32_t group, int f32_cache) {
     if (f32_cache) {
         if (head_dim == 16u && group == 2u) {
             return ctx->pso_q35_attention_gqa_f32_16x2;
@@ -2531,6 +2611,23 @@ static id<MTLComputePipelineState> tm_attention_gqa_pso(tm_metal_ctx *ctx, uint3
     }
     if (head_dim == 128u && group == 4u) {
         return ctx->pso_q35_attention_gqa_128x4;
+    }
+    return nil;
+}
+
+static id<MTLComputePipelineState> tm_attn_sk_merge_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+                                                       uint32_t group) {
+    if (head_dim == 256u && group == 4u) {
+        return ctx->pso_q35_attn_sk_merge_256x4;
+    }
+    if (head_dim == 16u && group == 2u) {
+        return ctx->pso_q35_attn_sk_merge_16x2;
+    }
+    if (head_dim == 128u && group == 2u) {
+        return ctx->pso_q35_attn_sk_merge_128x2;
+    }
+    if (head_dim == 128u && group == 4u) {
+        return ctx->pso_q35_attn_sk_merge_128x4;
     }
     return nil;
 }
@@ -2560,8 +2657,69 @@ static int tm_attention_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_bu
     /* window: attend the last `window` positions (sliding window); 0 is
      * full causal attention. */
     uint32_t consts[7] = {pos0, cap, head_dim, group, scale_bits, heads, window};
-    /* Grouped kernel (one threadgroup per KV head and row) when the
-     * geometry has an instantiation; decode routes here too (n = 1). */
+    /* Split-K kernels when the geometry has an instantiation; decode
+     * routes here too (n = 1). One frame, two raw dispatchThreadgroups
+     * calls (this direct encoder API is groups - NOT the total-threads
+     * encoding of tm_dispatch_args): up to SLICES groups per (KV head,
+     * row) write [m, l, acc] partials to scratch (head_dim + 2 floats
+     * per (row head, slice); layout [(n, heads, SLICES, head_dim+2)]),
+     * then the merge folds them. The kernels derive each row's slice
+     * count from its absolute position, so a position's reduction order
+     * is identical in chunked prefill and per-token decode. */
+    id<MTLComputePipelineState> part = tm_attn_sk_partial_pso(ctx, head_dim, group, f32_cache);
+    id<MTLComputePipelineState> merge = tm_attn_sk_merge_pso(ctx, head_dim, group);
+    if (part != nil && merge != nil && n == 1u) {
+        size_t partial_need = (size_t)n * heads * TM_ATTN_SK_SLICES * ((size_t)head_dim + 2u) * 4u;
+        if (tm_check_buffer(ctx, scratch, partial_need, err, err_cap, "attn_sk.partials") !=
+            TM_METAL_OK) {
+            return TM_METAL_ERR_BOUNDS;
+        }
+        @autoreleasepool {
+            tm_frame f;
+            id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+            if (enc == nil) {
+                return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+                               [NSString stringWithFormat:@"%s: no encoder", what]);
+            }
+            [f.keep addObject:q->buffer];
+            [f.keep addObject:k_cache->buffer];
+            [f.keep addObject:v_cache->buffer];
+            [f.keep addObject:out->buffer];
+            [f.keep addObject:scratch->buffer];
+            [enc setComputePipelineState:part];
+            [enc setBuffer:q->buffer offset:0 atIndex:0];
+            [enc setBuffer:k_cache->buffer offset:0 atIndex:1];
+            [enc setBuffer:v_cache->buffer offset:0 atIndex:2];
+            [enc setBuffer:scratch->buffer offset:0 atIndex:3];
+            [enc setBytes:&pos0 length:sizeof pos0 atIndex:4];
+            [enc setBytes:&cap length:sizeof cap atIndex:5];
+            [enc setBytes:&head_dim length:sizeof head_dim atIndex:6];
+            [enc setBytes:&group length:sizeof group atIndex:7];
+            [enc setBytes:&consts[4] length:sizeof consts[4] atIndex:8];
+            [enc setBytes:&heads length:sizeof heads atIndex:9];
+            [enc setBytes:&window length:sizeof window atIndex:10];
+            [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)kv_heads * TM_ATTN_SK_SLICES, n, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [enc setComputePipelineState:merge];
+            [enc setBuffer:scratch->buffer offset:0 atIndex:0];
+            [enc setBuffer:out->buffer offset:0 atIndex:1];
+            [enc setBytes:&pos0 length:sizeof pos0 atIndex:2];
+            [enc setBytes:&head_dim length:sizeof head_dim atIndex:3];
+            [enc setBytes:&group length:sizeof group atIndex:4];
+            [enc setBytes:&heads length:sizeof heads atIndex:5];
+            [enc setBytes:&window length:sizeof window atIndex:6];
+            [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)kv_heads, n, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            return tm_frame_commit(ctx, &f, err, err_cap, what);
+        }
+    }
+    /* Prefill (n > 1): one threadgroup per (KV head, row) - the split-K
+     * partials round trip costs ~4x a chunk call at full slices, so the
+     * chunked path keeps this kernel (llama.cpp makes the same split:
+     * flash-decode partials for single rows, one-group-per-row for
+     * chunks). The two reduction orders differ, so cross-mode logits are
+     * drift-registered (the metal-f16-act precedent); the decode path
+     * itself is CPU-reference-qualified at 1e-6. */
     id<MTLComputePipelineState> gqa = tm_attention_gqa_pso(ctx, head_dim, group, f32_cache);
     if (gqa != nil) {
         return tm_dispatch_args(ctx, gqa, bufs, 5, consts, 7,

@@ -1340,22 +1340,16 @@ tm_qwen35_attention_chunk<half>(TM_ATTN_CHUNK_ARGS(half));
 template [[host_name("tm_qwen35_attention_f32_chunk")]] kernel void
 tm_qwen35_attention_chunk<float>(TM_ATTN_CHUNK_ARGS(float));
 
-/* Grouped-query causal attention for one KV head and one query row: the G
- * query heads that share KV head `tg.x` attend query row `tg.y` of a chunk
- * starting at `pos0` (decode is the n = 1 case, so prefill and decode run
- * one compiled kernel). Each K and V row is read once for all G heads
- * instead of once per head.
- * - Scores: the G queries are staged in threadgroup memory and each
- *   thread owns whole keys, one sequential dot product per (key, head)
- *   with no cross-lane reduction.
- * - Softmax: SIMD group h normalizes head h with SIMD-only reductions,
- *   with the per-element expression of tm_q35_attend.
- * - Values: SIMD groups split the keys (j = sg mod 4), lane l accumulates
- *   its dims for all G heads, and the four partials are summed in a fixed
- *   order.
- * Scratch rows are [n, heads, cap], as for tm_qwen35_attention_f16_chunk.
+/*
+ * Chunk attention over a packed f16 (f32_cache 0) or f32 (1) cache:
+ * one threadgroup per (KV head, row) - the prefill path. The G query
+ * vectors are staged in threadgroup memory; each thread owns whole keys
+ * (one sequential dot product per (key, head), no cross-lane
+ * reduction); SIMD group h normalizes head h; SIMD groups split the
+ * keys for the value phase and the four partials sum in a fixed order.
+ * Scratch rows are [n, heads, cap].
  * Summation order differs from tm_q35_attend (tolerance-qualified).
- * Instantiated for the (head_dim, group) pairs in use. */
+ */
 template <uint HD, uint G, typename C>
 kernel void tm_qwen35_attention_gqa(device const float *q [[buffer(0)]],
                                     device const C *k_cache [[buffer(1)]],
@@ -1391,9 +1385,6 @@ kernel void tm_qwen35_attention_gqa(device const float *q [[buffer(0)]],
     const device C *kc = k_cache + (size_t)kv_head * (size_t)cap * HD;
     const device C *vc = v_cache + (size_t)kv_head * (size_t)cap * HD;
 
-    /* Scores: the G query vectors sit in threadgroup memory and every
-     * thread owns whole keys (key j = tid, tid + 128, ...), so each score
-     * is one sequential dot product with no cross-lane reduction. */
     for (uint idx = tid; idx < G * HD; idx += 128u) {
         qt[idx] = q[row0 * HD + idx];
     }
@@ -1507,6 +1498,301 @@ template [[host_name("tm_qwen35_attention_gqa_f32_128x2")]] kernel void
 tm_qwen35_attention_gqa<128u, 2u, float>(TM_ATTN_GQA_ARGS(float));
 template [[host_name("tm_qwen35_attention_gqa_f32_128x4")]] kernel void
 tm_qwen35_attention_gqa<128u, 4u, float>(TM_ATTN_GQA_ARGS(float));
+
+/*
+ * Split-K chunk attention (ADR-011 engine note, 2026-11-22). One
+ * threadgroup per (KV head, row) could not hide the KV range's latency
+ * (~5.4 GB/s at decode - the measured Gemma decode gap); the partial
+ * kernel below gives every (KV head, row) up to TM_ATTN_SK_SLICES
+ * threadgroups, each covering a slice of the row's key range, writing
+ * per-slice online-softmax partials [m, l, acc dims] to scratch; the
+ * merge kernel folds them (max-rescaled) into the output rows.
+ *
+ * The slice count is a pure function of the row's absolute position -
+ * slices = clamp(ceil(total/32), 1, 16) from (seq, window) - so a given
+ * position's reduction order is IDENTICAL in chunked prefill and
+ * per-token decode, and the cross-mode bit-identity gates keep their
+ * exact-bit assertions. Idle slice groups (slice >= slices) return
+ * before any load and write nothing; the merge reads only s < slices.
+ * Scratch partials are [(n, heads, SLICES, head_dim + 2)].
+ */
+#define TM_ATTN_SK_SLICES 16u
+#define TM_ATTN_SK_KT 128u
+
+static inline uint tm_attn_sk_slices(uint total) {
+    const uint sk = (total + 31u) / 32u; /* ~32 keys per slice group */
+    return sk < 1u ? 1u : (sk > TM_ATTN_SK_SLICES ? TM_ATTN_SK_SLICES : sk);
+}
+
+template <typename C, uint HD, uint G>
+kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
+                                      device const C *k_cache [[buffer(1)]],
+                                      device const C *v_cache [[buffer(2)]],
+                                      device float *scratch [[buffer(3)]],
+                                      constant uint &pos0 [[buffer(4)]],
+                                      constant uint &cap [[buffer(5)]],
+                                      constant uint &head_dim [[buffer(6)]],
+                                      constant uint &group [[buffer(7)]],
+                                      constant float &scale [[buffer(8)]],
+                                      constant uint &heads [[buffer(9)]],
+                                      constant uint &window [[buffer(10)]],
+                                      uint2 tg [[threadgroup_position_in_grid]],
+                                      uint tid [[thread_index_in_threadgroup]],
+                                      uint lane [[thread_index_in_simdgroup]],
+                                      uint sg [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint EPL = (HD + 31u) / 32u;
+    threadgroup float sc[G * TM_ATTN_SK_KT];
+    threadgroup float tgs[G * 2u];
+    threadgroup float qt[G * HD];
+    /* The value loop splits keys across the four SIMD groups, so each
+     * group's lanes hold a partial accumulator for the same dims; the
+     * partials fold across groups before any write. Layout per thread:
+     * (sg, head, lane, dim-within-lane). */
+    threadgroup float part_acc[4u * G * 32u * EPL];
+    if (head_dim != HD || group != G) {
+        return;
+    }
+    const uint kv_head = tg.x / TM_ATTN_SK_SLICES;
+    const uint slice = tg.x % TM_ATTN_SK_SLICES;
+    const uint t = tg.y;
+    const uint seq = pos0 + t + 1u;
+    const uint start = tm_attn_start(seq, window);
+    const uint total = seq - start;
+    const uint slices = tm_attn_sk_slices(total);
+    if (slice >= slices) {
+        return; /* idle: the merge reads only s < slices */
+    }
+    const uint per = (total + slices - 1u) / slices;
+    const uint jb = start + slice * per;
+    const uint je = jb + per < seq ? jb + per : seq;
+    const uint d0 = lane * EPL;
+    const bool active = d0 < HD;
+    const size_t row0 = (size_t)t * heads + (size_t)kv_head * G;
+    const device C *kc = k_cache + (size_t)kv_head * (size_t)cap * HD;
+    const device C *vc = v_cache + (size_t)kv_head * (size_t)cap * HD;
+
+    for (uint idx = tid; idx < G * HD; idx += 128u) {
+        qt[idx] = q[row0 * HD + idx];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mrun[G];
+    float lrun[G];
+    float acc[G][EPL];
+    for (uint h = 0; h < G; ++h) {
+        mrun[h] = -INFINITY;
+        lrun[h] = 0.0f;
+        for (uint e = 0; e < EPL; ++e) {
+            acc[h][e] = 0.0f;
+        }
+    }
+    for (uint base = jb; base < je; base += TM_ATTN_SK_KT) {
+        const uint tile = je - base < TM_ATTN_SK_KT ? je - base : TM_ATTN_SK_KT;
+        /* Scores: per-thread key ownership (deep in-flight loads), staged
+         * per head into threadgroup memory. */
+        if (tid < tile) {
+            const device C *kr = kc + (size_t)(base + tid) * HD;
+            float part[G];
+            for (uint h = 0; h < G; ++h) {
+                part[h] = 0.0f;
+            }
+            for (uint d = 0; d < HD; d += 4u) {
+                const float4 k4 = float4(*(const device vec<C, 4> *)(kr + d));
+                for (uint h = 0; h < G; ++h) {
+                    part[h] += dot(*(const threadgroup float4 *)(qt + h * HD + d), k4);
+                }
+            }
+            for (uint h = 0; h < G; ++h) {
+                sc[h * TM_ATTN_SK_KT + tid] = part[h] * scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* Tile statistics per head, one SIMD group per head. */
+        for (uint h = sg; h < G; h += 4u) {
+            float mt = -INFINITY;
+            for (uint jj = lane; jj < tile; jj += 32u) {
+                mt = max(mt, sc[h * TM_ATTN_SK_KT + jj]);
+            }
+            mt = simd_max(mt);
+            float lt = 0.0f;
+            for (uint jj = lane; jj < tile; jj += 32u) {
+                lt += exp(sc[h * TM_ATTN_SK_KT + jj] - mt);
+            }
+            lt = simd_sum(lt);
+            if (lane == 0u) {
+                tgs[h * 2u] = mt;
+                tgs[h * 2u + 1u] = lt;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* Fold the tile into the running partial: rescale by the max
+         * delta (uniform per head), then accumulate this tile's values
+         * with lane-dim ownership over sg-interleaved ascending keys. */
+        for (uint h = 0; h < G; ++h) {
+            const float mt = tgs[h * 2u];
+            const float lt = tgs[h * 2u + 1u];
+            const float r = mrun[h] == -INFINITY ? 0.0f : exp(mrun[h] - mt);
+            lrun[h] = lrun[h] * r + lt;
+            mrun[h] = mt;
+            for (uint e = 0; e < EPL; ++e) {
+                acc[h][e] *= r;
+            }
+        }
+        for (uint jj = sg; jj < tile; jj += 4u) {
+            const uint j = base + jj;
+            const device C *vr = vc + (size_t)j * HD;
+            float vv[EPL];
+            for (uint e = 0; e < EPL; ++e) {
+                /* Lanes whose dims end past HD (small head_dim: EPL is 1)
+                 * must contribute zero, not the next row's bytes. */
+                vv[e] = active ? (float)vr[d0 + e] : 0.0f;
+            }
+            for (uint h = 0; h < G; ++h) {
+                const float p = exp(sc[h * TM_ATTN_SK_KT + jj] - tgs[h * 2u]);
+                for (uint e = 0; e < EPL; ++e) {
+                    acc[h][e] += p * vv[e];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint h = 0; h < G; ++h) {
+        for (uint e = 0; e < EPL; ++e) {
+            part_acc[((sg * G + h) * 32u + lane) * EPL + e] = acc[h][e];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint h = 0; h < G; ++h) {
+        device float *pmh = scratch + ((row0 + h) * TM_ATTN_SK_SLICES + slice) * (HD + 2u);
+        if (tid == 0u) {
+            pmh[0] = mrun[h];
+            pmh[1] = lrun[h];
+        }
+        for (uint e = 0; e < EPL; ++e) {
+            if (sg == 0u && active) {
+                const float total_acc = part_acc[((h) * 32u + lane) * EPL + e] +
+                                       part_acc[((G + h) * 32u + lane) * EPL + e] +
+                                       part_acc[((2u * G + h) * 32u + lane) * EPL + e] +
+                                       part_acc[((3u * G + h) * 32u + lane) * EPL + e];
+                pmh[2u + d0 + e] = total_acc;
+            }
+        }
+    }
+}
+
+/* Fold the per-slice partials into the output rows: m* = max over this
+ * row's active slices, l* = sum l_s e^(m_s - m*), out = sum acc_s
+ * e^(m_s - m*) / l*. One head per SIMD group; per-slice merge weights
+ * are computed once (simd-scoped sync only) and the dim fold runs four
+ * independent accumulators (a single runtime-bounded loop left a
+ * 128-deep dependent load chain per lane in an earlier version). */
+template <uint HD, uint G>
+kernel void tm_qwen35_attn_sk_merge(device const float *scratch [[buffer(0)]],
+                                    device float *out [[buffer(1)]],
+                                    constant uint &pos0 [[buffer(2)]],
+                                    constant uint &head_dim [[buffer(3)]],
+                                    constant uint &group [[buffer(4)]],
+                                    constant uint &heads [[buffer(5)]],
+                                    constant uint &window [[buffer(6)]],
+                                    uint2 tg [[threadgroup_position_in_grid]],
+                                    uint tid [[thread_index_in_threadgroup]],
+                                    uint lane [[thread_index_in_simdgroup]],
+                                    uint sg [[simdgroup_index_in_threadgroup]]) {
+    (void)tid;
+    if (head_dim != HD || group != G) {
+        return;
+    }
+    threadgroup float wg[G][TM_ATTN_SK_SLICES];
+    const uint kv_head = tg.x;
+    const uint t = tg.y;
+    const uint seq = pos0 + t + 1u;
+    const uint start = tm_attn_start(seq, window);
+    const uint total = seq - start;
+    const uint slices = tm_attn_sk_slices(total);
+    const size_t row0 = (size_t)t * heads + (size_t)kv_head * G;
+    for (uint h = sg; h < G; h += 4u) {
+        const device float *base = scratch + ((row0 + h) * TM_ATTN_SK_SLICES) * (HD + 2u);
+        float m = -INFINITY;
+        for (uint s2 = lane; s2 < slices; s2 += 32u) {
+            m = max(m, base[s2 * (HD + 2u)]);
+        }
+        m = simd_max(m);
+        float l = 0.0f;
+        for (uint s2 = lane; s2 < slices; s2 += 32u) {
+            const float ls = base[s2 * (HD + 2u) + 1u];
+            if (ls > 0.0f) {
+                l += ls * exp(base[s2 * (HD + 2u)] - m);
+            }
+        }
+        l = simd_sum(l);
+        for (uint s2 = lane; s2 < slices; s2 += 32u) {
+            const float ms = base[s2 * (HD + 2u)];
+            const float ls = base[s2 * (HD + 2u) + 1u];
+            wg[h][s2] = ls > 0.0f ? exp(ms - m) : 0.0f;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint d = lane; d < HD; d += 32u) {
+            float a0 = 0.0f;
+            float a1 = 0.0f;
+            float a2 = 0.0f;
+            float a3 = 0.0f;
+            uint s2 = 0u;
+            for (; s2 + 3u < slices; s2 += 4u) {
+                a0 += base[(s2 + 0u) * (HD + 2u) + 2u + d] * wg[h][s2 + 0u];
+                a1 += base[(s2 + 1u) * (HD + 2u) + 2u + d] * wg[h][s2 + 1u];
+                a2 += base[(s2 + 2u) * (HD + 2u) + 2u + d] * wg[h][s2 + 2u];
+                a3 += base[(s2 + 3u) * (HD + 2u) + 2u + d] * wg[h][s2 + 3u];
+            }
+            for (; s2 < slices; ++s2) {
+                a0 += base[s2 * (HD + 2u) + 2u + d] * wg[h][s2];
+            }
+            const float a = (a0 + a1) + (a2 + a3);
+            out[(row0 + h) * HD + d] = a / l;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+#define TM_ATTN_SK_ARGS(C)                                                                  \
+    device const float *q [[buffer(0)]], device const C *k_cache [[buffer(1)]],             \
+        device const C *v_cache [[buffer(2)]], device float *scratch [[buffer(3)]],          \
+        constant uint &pos0 [[buffer(4)]], constant uint &cap [[buffer(5)]],                \
+        constant uint &head_dim [[buffer(6)]], constant uint &group [[buffer(7)]],           \
+        constant float &scale [[buffer(8)]], constant uint &heads [[buffer(9)]],             \
+        constant uint &window [[buffer(10)]],                                                \
+        uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
+        uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
+
+template [[host_name("tm_qwen35_attn_sk_256x4")]] kernel void
+tm_qwen35_attn_sk_partial<half, 256u, 4u>(TM_ATTN_SK_ARGS(half));
+template [[host_name("tm_qwen35_attn_sk_16x2")]] kernel void
+tm_qwen35_attn_sk_partial<half, 16u, 2u>(TM_ATTN_SK_ARGS(half));
+template [[host_name("tm_qwen35_attn_sk_128x2")]] kernel void
+tm_qwen35_attn_sk_partial<half, 128u, 2u>(TM_ATTN_SK_ARGS(half));
+template [[host_name("tm_qwen35_attn_sk_128x4")]] kernel void
+tm_qwen35_attn_sk_partial<half, 128u, 4u>(TM_ATTN_SK_ARGS(half));
+template [[host_name("tm_qwen35_attn_sk_f32_16x2")]] kernel void
+tm_qwen35_attn_sk_partial<float, 16u, 2u>(TM_ATTN_SK_ARGS(float));
+template [[host_name("tm_qwen35_attn_sk_f32_128x2")]] kernel void
+tm_qwen35_attn_sk_partial<float, 128u, 2u>(TM_ATTN_SK_ARGS(float));
+template [[host_name("tm_qwen35_attn_sk_f32_128x4")]] kernel void
+tm_qwen35_attn_sk_partial<float, 128u, 4u>(TM_ATTN_SK_ARGS(float));
+
+#define TM_ATTN_SK_MERGE_ARGS                                                              \
+    device const float *scratch [[buffer(0)]], device float *out [[buffer(1)]],             \
+        constant uint &pos0 [[buffer(2)]], constant uint &head_dim [[buffer(3)]],            \
+        constant uint &group [[buffer(4)]], constant uint &heads [[buffer(5)]],             \
+        constant uint &window [[buffer(6)]],                                                 \
+        uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
+        uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
+
+template [[host_name("tm_qwen35_attn_sk_merge_256x4")]] kernel void
+tm_qwen35_attn_sk_merge<256u, 4u>(TM_ATTN_SK_MERGE_ARGS);
+template [[host_name("tm_qwen35_attn_sk_merge_16x2")]] kernel void
+tm_qwen35_attn_sk_merge<16u, 2u>(TM_ATTN_SK_MERGE_ARGS);
+template [[host_name("tm_qwen35_attn_sk_merge_128x2")]] kernel void
+tm_qwen35_attn_sk_merge<128u, 2u>(TM_ATTN_SK_MERGE_ARGS);
+template [[host_name("tm_qwen35_attn_sk_merge_128x4")]] kernel void
+tm_qwen35_attn_sk_merge<128u, 4u>(TM_ATTN_SK_MERGE_ARGS);
 
 /* attn[i] *= sigmoid(gate[i]) — the joint Q-projection output gate. */
 kernel void tm_qwen35_attn_gate(device float *attn [[buffer(0)]],

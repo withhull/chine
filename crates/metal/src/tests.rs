@@ -1582,6 +1582,226 @@ fn q8_0_gemv_timing_when_requested() {
 }
 
 #[test]
+fn split_k_attention_matches_the_cpu_reference() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // The split-K pair against a scalar CPU reference, across the
+    // engine's geometries: the tiny fixture (head_dim 16, where EPL is 1
+    // and lanes past HD must contribute zero), the gemma3 fixture shape
+    // with its window, dense-Qwen3 and Qwen3.5 shapes, and the real
+    // Gemma 3 decode geometry with the sliding window. Covers decode
+    // rows (n = 1), multi-row chunks, full chunks at pos 0, and
+    // mid-context positions.
+    let mut rng = Rng(97);
+    let mut worst_all = 0f32;
+    for (heads, kv_heads, hd, cap, pos, n, window) in [
+        (2u32, 1u32, 16u32, 8u32, 5u32, 1u32, 0u32),
+        (2, 1, 16, 8, 5, 1, 8),
+        (4, 2, 16, 32, 0, 5, 8),
+        (4, 2, 16, 144, 0, 8, 8),
+        (4, 2, 16, 144, 0, 16, 8),
+        (4, 2, 16, 144, 60, 1, 8),
+        (4, 2, 128, 64, 33, 1, 0),
+        (4, 2, 128, 48, 40, 5, 0),
+        (8, 4, 128, 160, 80, 32, 0),
+        (4, 1, 256, 64, 33, 1, 0),
+        (4, 1, 256, 1024, 530, 1, 512),
+        (4, 1, 256, 1024, 530, 128, 512),
+        (4, 1, 256, 1024, 896, 128, 512),
+    ] {
+        let group = heads / kv_heads;
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let q: Vec<f32> = (0..(n as usize) * (heads as usize) * (hd as usize))
+            .map(|_| ((rng.next() % 2001) as f32 - 1000.0) / 1000.0)
+            .collect();
+        let k: Vec<f32> = (0..(cap as usize) * (kv_heads as usize) * (hd as usize))
+            .map(|_| ((rng.next() % 2001) as f32 - 1000.0) / 1000.0)
+            .collect();
+        let v: Vec<f32> = (0..(cap as usize) * (kv_heads as usize) * (hd as usize))
+            .map(|_| ((rng.next() % 2001) as f32 - 1000.0) / 1000.0)
+            .collect();
+        let f16 = |x: &[f32]| -> Vec<u8> {
+            x.iter()
+                .flat_map(|f| f32_to_f16_bits(*f).to_le_bytes())
+                .collect()
+        };
+        let qb = ctx.buffer(q.len() * 4, true).unwrap();
+        qb.upload(0, &f32_bytes(&q)).unwrap();
+        let kc = ctx.buffer(k.len() * 2, true).unwrap();
+        kc.upload(0, &f16(&k)).unwrap();
+        let vc = ctx.buffer(v.len() * 2, true).unwrap();
+        vc.upload(0, &f16(&v)).unwrap();
+        let out = ctx.buffer(q.len() * 4, true).unwrap();
+        let scratch = ctx
+            .buffer(
+                (n as usize)
+                    * (heads as usize)
+                    * ATTENTION_SK_SLICES as usize
+                    * (hd as usize + 2)
+                    * 4,
+                true,
+            )
+            .unwrap();
+        ctx.qwen35_attention_chunk(
+            &qb, &kc, &vc, &out, &scratch, heads, pos, cap, hd, group, scale, n, window, false,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut got = vec![0u8; q.len() * 4];
+        out.download(0, &mut got).unwrap();
+        let got: Vec<f32> = got
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let kf: Vec<f32> = k
+            .iter()
+            .map(|x| f16_bits_to_f32(f32_to_f16_bits(*x)))
+            .collect();
+        let vf: Vec<f32> = v
+            .iter()
+            .map(|x| f16_bits_to_f32(f32_to_f16_bits(*x)))
+            .collect();
+        let mut worst = 0f32;
+        for t in 0..n as usize {
+            let seq = pos as usize + t + 1;
+            let start = if window == 0 {
+                0
+            } else {
+                seq.saturating_sub(window as usize)
+            };
+            for h in 0..heads as usize {
+                let kv_head = h / group as usize;
+                let mut sc = Vec::new();
+                for j in start..seq {
+                    let mut dota = 0f32;
+                    for d in 0..hd as usize {
+                        dota += q[(t * heads as usize + h) * hd as usize + d]
+                            * kf[(kv_head * cap as usize + j) * hd as usize + d];
+                    }
+                    sc.push(dota * scale);
+                }
+                let m = sc.iter().copied().fold(-f32::INFINITY, f32::max);
+                let l: f32 = sc.iter().map(|x| (x - m).exp()).sum();
+                for d in 0..hd as usize {
+                    let mut acc = 0f32;
+                    for (i, j) in (start..seq).enumerate() {
+                        acc += ((sc[i] - m).exp() / l)
+                            * vf[(kv_head * cap as usize + j) * hd as usize + d];
+                    }
+                    let g = got[(t * heads as usize + h) * hd as usize + d];
+                    worst = worst.max((g - acc).abs());
+                }
+            }
+        }
+        worst_all = worst_all.max(worst);
+        eprintln!(
+            "split-K ({heads},{kv_heads},{hd},{cap},{pos},{n},w{window}): worst |diff| {worst:.3e}"
+        );
+        // Registered: 1e-6 x max|out| (measured worst across this set is
+        // printed at the end; pinned from the run).
+        assert!(
+            worst <= 1e-6,
+            "({heads},{kv_heads},{hd},{cap},{pos},{n},w{window}): worst {worst:.3e}"
+        );
+    }
+    eprintln!("split-K set worst: {worst_all:.3e}");
+
+    // Cross-kernel drift: the same absolute position served by the
+    // decode path (n = 1, split-K) vs the chunk path (n = 5, the
+    // one-group-per-row kernel). The two reduction orders differ by
+    // design (decode parallelism vs chunk cost); this measures the
+    // logits-level drift that the engine's cross-mode gates register.
+    let (heads, kv_heads, hd, cap, window) = (4u32, 2u32, 16u32, 144u32, 8u32);
+    let group = heads / kv_heads;
+    let scale = 1.0f32 / (hd as f32).sqrt();
+    let q: Vec<f32> = (0..(8 * heads as usize * hd as usize))
+        .map(|_| ((rng.next() % 2001) as f32 - 1000.0) / 1000.0)
+        .collect();
+    let k: Vec<f32> = (0..(cap as usize) * (kv_heads as usize) * (hd as usize))
+        .map(|_| ((rng.next() % 2001) as f32 - 1000.0) / 1000.0)
+        .collect();
+    let v: Vec<f32> = (0..(cap as usize) * (kv_heads as usize) * (hd as usize))
+        .map(|_| ((rng.next() % 2001) as f32 - 1000.0) / 1000.0)
+        .collect();
+    let f16 = |x: &[f32]| -> Vec<u8> {
+        x.iter()
+            .flat_map(|f| f32_to_f16_bits(*f).to_le_bytes())
+            .collect()
+    };
+    let qb = ctx.buffer(q.len() * 4, true).unwrap();
+    qb.upload(0, &f32_bytes(&q)).unwrap();
+    let kc = ctx.buffer(k.len() * 2, true).unwrap();
+    kc.upload(0, &f16(&k)).unwrap();
+    let vc = ctx.buffer(v.len() * 2, true).unwrap();
+    vc.upload(0, &f16(&v)).unwrap();
+    let out_chunk = ctx.buffer(q.len() * 4, true).unwrap();
+    let out_rows = ctx.buffer(heads as usize * hd as usize * 4, true).unwrap();
+    let scratch = ctx
+        .buffer(
+            8 * heads as usize * ATTENTION_SK_SLICES as usize * (hd as usize + 2) * 4,
+            true,
+        )
+        .unwrap();
+    ctx.qwen35_attention_chunk(
+        &qb, &kc, &vc, &out_chunk, &scratch, heads, 20, cap, hd, group, scale, 5, window, false,
+    )
+    .unwrap();
+    ctx.fence().unwrap();
+    let mut chunk_bytes = vec![0u8; q.len() * 4];
+    out_chunk.download(0, &mut chunk_bytes).unwrap();
+    let qrows = ctx.buffer(heads as usize * hd as usize * 4, true).unwrap();
+    let mut worst_drift = 0f32;
+    let mut top1_mismatch = 0u32;
+    for (i, tpos) in (20u32..25u32).enumerate() {
+        qrows
+            .upload(0, &f32_bytes(&q[i * 4 * 16..(i + 1) * 4 * 16]))
+            .unwrap();
+        ctx.qwen35_attention_chunk(
+            &qrows, &kc, &vc, &out_rows, &scratch, heads, tpos, cap, hd, group, scale, 1, window,
+            false,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut row_bytes = vec![0u8; heads as usize * hd as usize * 4];
+        out_rows.download(0, &mut row_bytes).unwrap();
+        let chunk_row = &chunk_bytes
+            [i * heads as usize * hd as usize * 4..(i + 1) * heads as usize * hd as usize * 4];
+        let row_f: Vec<f32> = row_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let chunk_f: Vec<f32> = chunk_row
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let d = row_f
+            .iter()
+            .zip(&chunk_f)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        worst_drift = worst_drift.max(d);
+        let top1 = |x: &[f32]| {
+            x.iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        if top1(&row_f) != top1(&chunk_f) {
+            top1_mismatch += 1;
+        }
+    }
+    eprintln!(
+        "cross-kernel drift (chunk vs decode, 5 positions): max|diff| {worst_drift:.3e}, top-1 mismatches {top1_mismatch}"
+    );
+    assert!(
+        worst_drift <= 1e-5 && top1_mismatch == 0,
+        "cross-kernel drift {worst_drift:.3e}, top-1 mismatches {top1_mismatch}"
+    );
+}
+
+#[test]
 fn attention_decode_timing_when_requested() {
     if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
         eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
@@ -1606,7 +1826,14 @@ fn attention_decode_timing_when_requested() {
     let kc = ctx.buffer(plane, true).unwrap();
     let vc = ctx.buffer(plane, true).unwrap();
     let out = ctx.buffer(qb, true).unwrap();
-    let scratch = ctx.buffer((heads * cap * 4) as usize, true).unwrap();
+    // Split-K partials: rows x heads x slices x (head_dim + 2) f32, sized
+    // for the n = 128 prefill-chunk case.
+    let scratch = ctx
+        .buffer(
+            (128usize * heads as usize * ATTENTION_SK_SLICES as usize * (hd as usize + 2)) * 4,
+            true,
+        )
+        .unwrap();
     let data = f32_bytes(&vec![0.25f32; (heads * hd) as usize]);
     q.upload(0, &data).unwrap();
     let kv16 = vec![0u8; plane];

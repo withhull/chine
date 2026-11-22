@@ -870,3 +870,35 @@ three passes each; full prefill ~330 ms):
   the split-K work here is the measured starting point (37.5 us partial,
   three found-and-fixed bugs, and the unresolved model-level divergence
   to chase).
+
+- **The "x128 grid anomaly" is resolved (2026-11-22): it was never an
+  anomaly.** `tm_dispatch_args` encodes with `dispatchThreads` - its
+  MTLSize is TOTAL THREADS, not threadgroups - so the historical
+  `kv_heads x 128` / `heads x 128` grids are the correct "N groups of
+  128 threads" encoding of one-group-per-(head, row). There was no
+  overdispatch and no out-of-bounds work from these grids; the previous
+  note's "corrected" one-group-per-head grid passed
+  `MTLSizeMake(kv_heads, n, 1)` as *total threads*, which Metal pads to
+  a single partial threadgroup where only threads with
+  thread_position_in_grid < gridSize execute - starving the kernel to
+  kv_heads of its 128 threads (staging loops `for idx = tid; idx < ...;
+  idx += 128` undone, one lane of the softmax) and producing the
+  measured wrong output. Every observation fits and none other was
+  needed: the historical grid matches the CPU reference at 6e-8; the
+  starved grid is 0.56 off (unit) and Layer(3) 7.6e-3 off (oracle);
+  the bounds-sentinel's first "OOB proof" was its own guard-length bug
+  (it passed once fixed); and the gemma3 cross-mode divergence that
+  stopped the split-K build was the rope grid "fix" - the same
+  starvation applied to the prefill rope while the decode rope (a
+  dispatchThreadgroups path) stayed correct. The previous note's claims
+  that the overdispatch was load-bearing, that the grid is a "de-facto
+  contract", and its sentinel-gate premise are retracted.
+- **What this unlocks:** the split-K attention kernels from the
+  investigation were correct (11-geometry CPU reference at <=1.5e-7
+  after three found-and-fixed bugs) and were blocked only by
+  grid-starvation side effects. They ship now, redesigned for
+  cross-mode bit-identity: the slice count is a pure function of the
+  row's absolute position (`slices_t = clamp(ceil(total_t/32), 1, 16)`
+  from `seq_t` and `window`), so a given position's reduction order is
+  identical in chunked prefill and per-token decode - the bit-identity
+  gates keep their exact-bit assertions unchanged.

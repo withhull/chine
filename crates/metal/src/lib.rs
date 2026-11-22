@@ -29,6 +29,14 @@ pub const GEMM_MMA_MAX_BATCH: u32 = 512;
 /// Largest batch of the per-row GEMMs (`q8_0_gemm`, `f16_gemm`).
 pub const GEMM_MAX_BATCH: u32 = 32;
 
+/// The split-K attention ABI's maximum slice groups per (KV head, row).
+/// Partials scratch sizing is `rows * heads * ATTENTION_SK_SLICES *
+/// (head_dim + 2)` f32 elements; the dispatch validates against this
+/// same constant. The kernels derive each row's ACTIVE slice count from
+/// its absolute position (mode-independent, bit-stable across prefill
+/// and decode).
+pub const ATTENTION_SK_SLICES: u32 = 16;
+
 const ERR_CAP: usize = 512;
 
 #[cfg(target_os = "macos")]

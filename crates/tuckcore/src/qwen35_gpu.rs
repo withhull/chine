@@ -1077,7 +1077,10 @@ mod attention_tests {
             let mut cpu_cache = Qwen35KvCache::new(1, hkv, hd, cap, KvPrecision::F16).unwrap();
             let k_cache = gpu.buffer(hkv * cap * hd * 2).unwrap();
             let v_cache = gpu.buffer(hkv * cap * hd * 2).unwrap();
-            let scratch = gpu.buffer(hq * cap * 4).unwrap();
+            // One decode row (n = 1) routes to the split-K kernels: the
+            // scratch holds [m, l, acc] partials for every (head, slice).
+            let sk_partials = hq * tuckmill_metal::ATTENTION_SK_SLICES as usize * (hd + 2) * 4;
+            let scratch = gpu.buffer((hq * cap * 4).max(sk_partials)).unwrap();
             let out_buf = gpu.buffer(hq * hd * 4).unwrap();
 
             for t in 0..tokens {

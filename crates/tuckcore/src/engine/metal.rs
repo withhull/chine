@@ -11,8 +11,8 @@
 
 use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
 use tuckmill_metal::{
-    MetalBuffer, MetalContext, ARGMAX_NONE, ARGMAX_PARTIAL_BYTES, GEMM_MAX_BATCH,
-    GEMM_MMA_MAX_BATCH,
+    MetalBuffer, MetalContext, ARGMAX_NONE, ARGMAX_PARTIAL_BYTES, ATTENTION_SK_SLICES,
+    GEMM_MAX_BATCH, GEMM_MMA_MAX_BATCH,
 };
 
 use super::graph::{
@@ -48,6 +48,9 @@ pub enum GreedyInput {
     /// The token a previous step chose, read on the device.
     Previous(PendingToken),
 }
+
+/// The split-K attention partial-scratch sizing constant (Metal ABI).
+const ATTENTION_SK_SLICES_US: usize = ATTENTION_SK_SLICES as usize;
 
 /// Token-buffer slot a step at `pos` writes; consecutive steps alternate,
 /// so a step never overwrites the slot of the step before it.
@@ -331,6 +334,9 @@ impl PrefillWidths {
                     w.c = w.c.max(kv);
                     w.e = w.e.max(a.heads * a.head_dim);
                     w.aq = w.aq.max(a.heads * a.head_dim);
+                    // Score rows only: chunked prefill keeps the
+                    // one-group-per-row attention kernel (the split-K
+                    // partials path runs only at n = 1).
                     w.ascr = w.ascr.max(a.heads * capacity);
                 }
             }
@@ -1051,7 +1057,11 @@ impl AttentionBlock {
         let hd = s.heads * s.head_dim;
         let kv = s.kv_heads * s.head_dim;
         let gated = if s.output_gate { hd } else { 0 };
-        [gated * 2, hd, gated, kv, kv, hd, s.heads * capacity]
+        // Split-K attention partials for one decode row (the dispatch
+        // validates this exact sizing), with the score-row floor kept.
+        let kv_scratch =
+            (s.heads * capacity).max(s.heads * ATTENTION_SK_SLICES_US * (s.head_dim + 2));
+        [gated * 2, hd, gated, kv, kv, hd, kv_scratch]
     }
 
     fn plan(
@@ -3617,6 +3627,15 @@ mod chunk_core_tests {
         v.iter().map(|x| x.to_bits()).collect()
     }
 
+    fn top1(logits: &[f32]) -> usize {
+        logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+            .unwrap()
+    }
+
     /// Prefill `prompt` then one decode step; returns (last-token logits,
     /// next-step logits, prefill ms).
     fn run(model: &EngineModel, prompt: &[u32]) -> (Vec<f32>, Vec<f32>, f64) {
@@ -3674,12 +3693,39 @@ mod chunk_core_tests {
             let (a_logits, a_next, a_ms) = run(&model, &prompt);
             model.set_chunk_core(true);
             let (b_logits, b_next, b_ms) = run(&model, &prompt);
-            assert_eq!(
-                bits(&b_logits),
-                bits(&a_logits),
-                "len {len}: prefill logits"
-            );
-            assert_eq!(bits(&b_next), bits(&a_next), "len {len}: next decode step");
+            // Cross-mode (len > 1): the per-token-core rows run the
+            // split-K decode kernels and the chunk cores the
+            // one-group-per-row kernel — drift-registered (the
+            // metal-f16-act precedent; the cross-kernel unit gate
+            // measures ~1e-7 relative). Bits stay asserted at len 1,
+            // where the modes coincide.
+            if len == 1 {
+                assert_eq!(
+                    bits(&b_logits),
+                    bits(&a_logits),
+                    "len {len}: prefill logits"
+                );
+                assert_eq!(bits(&b_next), bits(&a_next), "len {len}: next decode step");
+            } else {
+                let scale = a_logits.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+                let dl = b_logits
+                    .iter()
+                    .zip(&a_logits)
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0f32, f32::max);
+                let dn = b_next
+                    .iter()
+                    .zip(&a_next)
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0f32, f32::max);
+                assert!(
+                    dl <= 1e-2 * scale && dn <= 1e-2 * scale,
+                    "len {len}: cross-kernel drift {dl:e}/{dn:e} vs bound {:e}",
+                    1e-2 * scale
+                );
+                assert_eq!(top1(&b_logits), top1(&a_logits), "len {len}: prefill top-1");
+                assert_eq!(top1(&b_next), top1(&a_next), "len {len}: next top-1");
+            }
             // The register-resident recurrence vs the generic device-memory
             // kernel: same source arithmetic, but separately compiled under
             // fast math, so equal within the profile-registered logits
@@ -4162,6 +4208,16 @@ mod prefix_cache_tests {
 
 #[cfg(test)]
 mod mtp_tests {
+    fn top1(logits: &[f32]) -> usize {
+        let mut best = 0usize;
+        for (i, v) in logits.iter().enumerate() {
+            if *v > logits[best] {
+                best = i;
+            }
+        }
+        best
+    }
+
     use super::*;
     use crate::qwen35_forward::{ArtifactTensorSource, TensorSource};
     use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
@@ -4176,10 +4232,6 @@ mod mtp_tests {
         );
         eprintln!("skipping: no Metal device");
         false
-    }
-
-    fn bits(v: &[f32]) -> Vec<u32> {
-        v.iter().map(|x| x.to_bits()).collect()
     }
 
     fn load(source: &ArtifactTensorSource, capacity: usize) -> EngineModel {
@@ -4320,10 +4372,31 @@ mod mtp_tests {
                 for t in &out {
                     model.forward_token(*t, &mut plain_logits).unwrap();
                 }
+                // The speculative cycle's two-row batches run the chunk
+                // attention kernel; the plain replay's single rows run
+                // the split-K decode kernels (ADR-011 note 2026-11-22).
+                // Token identity above is the contract and stays exact;
+                // the state comparison registers the cross-kernel drift:
+                // 1e-2 x max|logits| with top-1 equal.
+                let scale = plain_logits
+                    .iter()
+                    .fold(0f32, |m, v| m.max(v.abs()))
+                    .max(1.0);
+                let d = spec_logits
+                    .iter()
+                    .zip(&plain_logits)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                assert!(
+                    d <= 1e-2 * scale,
+                    "prompt {}, {drafts:?}: state drift {d:e} beyond {:e}",
+                    prompt.len(),
+                    1e-2 * scale
+                );
                 assert_eq!(
-                    bits(&spec_logits),
-                    bits(&plain_logits),
-                    "prompt {}, {drafts:?}: state after speculation, bit for bit",
+                    top1(&spec_logits),
+                    top1(&plain_logits),
+                    "prompt {}, {drafts:?}: state top-1",
                     prompt.len()
                 );
             }
@@ -4541,8 +4614,19 @@ mod gemma3_tests {
                 .map(|(i, _)| i)
                 .unwrap_or(0)
         };
+        // The decode path (n = 1) runs the split-K attention kernels and
+        // the chunk path (n > 1) the one-group-per-row kernel - the
+        // llama.cpp split, chosen so the decode win costs no prefill
+        // regression. Their reduction orders differ, so cross-mode
+        // logits are drift-registered (the metal-f16-act precedent), on
+        // every GPU: bits stay asserted where the modes coincide (the
+        // len 1 prompt is one decode row on both sides); the bound is
+        // 1e-2 x max|logits| with top-1 equality (the same form the
+        // paravirtualized runner already enforces for its fast-math
+        // codegen difference). The measured drift prints here.
         let same_logits = |a: &[f32], b: &[f32], what: String| {
-            if !virtualized {
+            let cross_mode = what.contains("prompt") && !what.contains("prompt 1:");
+            if !virtualized && !cross_mode {
                 assert_eq!(bits(a), bits(b), "{what}");
                 return;
             }
