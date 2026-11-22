@@ -576,6 +576,7 @@ mod imp {
             out: *mut TmMetalBuffer,
             snap: *mut TmMetalBuffer,
             snap_t: u32,
+            snap_stride: u32,
             heads: u32,
             k_dim: u32,
             v_dim: u32,
@@ -1306,8 +1307,12 @@ impl MetalContext {
         })
     }
 
-    /// `qwen35_gdn_chunk` that also writes the state after token `snap_t`
-    /// to `snap` (the rollback point of a speculative verify).
+    /// `qwen35_gdn_chunk` that also writes the state after every row
+    /// `t <= snap_t` to `snap` slot `t` (strided rollback points of a
+    /// multi-token speculative verify). `snap_stride` 0 is the legacy
+    /// single-slot ABI: only row `snap_t` lands at offset 0 — callers
+    /// that pass one state-sized buffer must keep `snap_t` at its
+    /// historical row.
     #[allow(clippy::too_many_arguments)]
     pub fn qwen35_gdn_chunk_snap(
         &self,
@@ -1319,6 +1324,7 @@ impl MetalContext {
         state: &MetalBuffer,
         out: &MetalBuffer,
         snap: (&MetalBuffer, u32),
+        snap_stride: u32,
         heads: u32,
         k_dim: u32,
         v_dim: u32,
@@ -1357,6 +1363,7 @@ impl MetalContext {
                     r.6,
                     r.7,
                     snap_t,
+                    snap_stride,
                     heads,
                     k_dim,
                     v_dim,
@@ -1373,6 +1380,8 @@ impl MetalContext {
         })
     }
 
+    /// The history refresh of `qwen35_conv_chunk` on its own: shift the
+    /// `[kern-1, channels]` history by the `n` rows of `x`.
     /// The history refresh of `qwen35_conv_chunk` on its own: shift the
     /// `[kern-1, channels]` history by the `n` rows of `x`.
     pub fn qwen35_conv_chunk_shift(

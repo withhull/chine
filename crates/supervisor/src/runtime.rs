@@ -3053,6 +3053,7 @@ mod tests {
                 kv: chine_core::engine::metal::KvCache::F32,
                 prefix_cache: true,
                 mtp: false,
+                mtp_drafts: 1,
                 gemm_f16_operands: true,
             },
         )

@@ -381,8 +381,9 @@ int ch_metal_qwen35_gdn_chunk_snap(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_met
                                    ch_metal_buffer *v, ch_metal_buffer *gate,
                                    ch_metal_buffer *beta, ch_metal_buffer *state,
                                    ch_metal_buffer *out, ch_metal_buffer *snap, uint32_t snap_t,
-                                   uint32_t heads, uint32_t k_dim, uint32_t v_dim, float q_scale,
-                                   uint32_t n, uint32_t qk_stride, uint32_t v_stride,
+                                   uint32_t snap_stride, uint32_t heads, uint32_t k_dim,
+                                   uint32_t v_dim, float q_scale, uint32_t n, uint32_t qk_stride,
+                                   uint32_t v_stride,
                                    uint32_t g_stride, char *err, size_t err_cap);
 /* Shift a convolution history [kern-1, channels] by the n rows of `x` (the
  * history refresh of ch_metal_qwen35_conv_chunk on its own). */

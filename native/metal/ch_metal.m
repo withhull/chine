@@ -2442,7 +2442,7 @@ int ch_metal_qwen35_gdn_chunk(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_bu
                               char *err, size_t err_cap) {
     /* No rollback point: the state buffer stands in for the snapshot and
      * snap_t never matches. */
-    return ch_metal_qwen35_gdn_chunk_snap(ctx, q, k, v, gate, beta, state, out, state, UINT32_MAX,
+    return ch_metal_qwen35_gdn_chunk_snap(ctx, q, k, v, gate, beta, state, out, state, UINT32_MAX, 0,
                                           heads, k_dim, v_dim, q_scale, n, qk_stride, v_stride,
                                           g_stride, err, err_cap);
 }
@@ -2451,9 +2451,19 @@ int ch_metal_qwen35_gdn_chunk_snap(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_met
                                    ch_metal_buffer *v, ch_metal_buffer *gate,
                                    ch_metal_buffer *beta, ch_metal_buffer *state,
                                    ch_metal_buffer *out, ch_metal_buffer *snap, uint32_t snap_t,
-                                   uint32_t heads, uint32_t k_dim, uint32_t v_dim, float q_scale,
-                                   uint32_t n, uint32_t qk_stride, uint32_t v_stride,
-                                   uint32_t g_stride, char *err, size_t err_cap) {
+                                   uint32_t snap_stride, uint32_t heads, uint32_t k_dim,
+                                   uint32_t v_dim, float q_scale, uint32_t n, uint32_t qk_stride,
+                                   uint32_t v_stride, uint32_t g_stride, char *err,
+                                   size_t err_cap) {
+    size_t snap_bytes = (size_t)heads * k_dim * v_dim * 4u;
+    if (snap_t != UINT32_MAX) {
+        /* Per-row rollback points: rows 0..snap_t land in strided slots. */
+        if (snap_stride < heads * k_dim * v_dim) {
+            return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                           @"qwen35_gdn_chunk: snapshot stride smaller than one state");
+        }
+        snap_bytes = (size_t)(snap_t + 1u) * (size_t)snap_stride * 4u;
+    }
     if (heads == 0 || k_dim == 0 || v_dim == 0 || n == 0 || qk_stride < heads * k_dim ||
         v_stride < heads * v_dim || g_stride < heads ||
         (snap_t != UINT32_MAX && snap_t >= n)) {
@@ -2468,14 +2478,16 @@ int ch_metal_qwen35_gdn_chunk_snap(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_met
         {beta, (size_t)n * g_stride * 4u, "gdn_chunk.beta"},
         {state, (size_t)heads * k_dim * v_dim * 4u, "gdn_chunk.state"},
         {out, (size_t)n * v_stride * 4u, "gdn_chunk.out"},
-        {snap, (size_t)heads * k_dim * v_dim * 4u, "gdn_chunk.snap"},
+        {snap, snap_bytes, "gdn_chunk.snap"},
     };
     /* Constants by buffer index: 8 k_dim, 9 v_dim, 10 q_scale (f32 bits),
-     * 11 heads, 12 n, 13-15 strides, 16 snap_t (the token after which the
-     * state is also written to `snap`; UINT32_MAX: never). */
+     * 11 heads, 12 n, 13-15 strides, 16 snap_t (the last row whose state
+     * is also written to strided slots in `snap`; UINT32_MAX: never),
+     * 17 snap_stride (0 = the single-slot ABI at offset 0). */
     uint32_t scale_bits;
     memcpy(&scale_bits, &q_scale, sizeof scale_bits);
-    uint32_t consts[9] = {k_dim, v_dim, scale_bits, heads, n, qk_stride, v_stride, g_stride, snap_t};
+    uint32_t consts[10] = {k_dim,   v_dim,     scale_bits, heads,      n,
+                           qk_stride, v_stride, g_stride,  snap_t,     snap_stride};
     /* Register-resident state column, split across CH_GDN_LANES lanes,
      * when the key dimension has an instantiation (see kernels.metal). */
     const bool reg = k_dim == 128u && (v_dim % (32u / CH_GDN_LANES)) == 0u &&
@@ -2484,7 +2496,7 @@ int ch_metal_qwen35_gdn_chunk_snap(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_met
     NSUInteger lanes = reg ? (NSUInteger)v_dim * CH_GDN_LANES : (NSUInteger)v_dim;
     /* The lane-split kernel maps lanes in whole SIMD groups of 32. */
     NSUInteger tg = lanes < 32u ? lanes : 32u;
-    return ch_dispatch_args(ctx, pso, bufs, 8, consts, 9, MTLSizeMake(lanes, heads, 1),
+    return ch_dispatch_args(ctx, pso, bufs, 8, consts, 10, MTLSizeMake(lanes, heads, 1),
                             MTLSizeMake(tg, 1, 1), err, err_cap, "qwen35_gdn_chunk");
 }
 

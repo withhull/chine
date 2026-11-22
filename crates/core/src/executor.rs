@@ -935,8 +935,9 @@ fn run_session(
     // The pipelined step already queued (it computes the token after the
     // one being collected).
     let mut in_flight: Option<PendingToken> = None;
-    // A token a speculative cycle already verified (its accepted draft).
-    let mut verified: Option<u32> = None;
+    // A token a speculative cycle already verified; the queue drains
+    // the rest of the cycle's commits one per step.
+    let mut verified: std::collections::VecDeque<u32> = Default::default();
     let prompt_tokens = &req.prompt_tokens;
     let mut pos = spec.start;
     while pos < prompt_tokens.len() {
@@ -1090,18 +1091,20 @@ fn run_session(
                                 "generation cancelled at a token boundary",
                             ));
                         }
-                        // Speculative greedy (ADR-012 step 3): one cycle
-                        // yields the next token and, when the draft was
-                        // right, the one after it, both exactly the tokens
-                        // plain greedy decoding chooses.
-                        if let Some(t) = verified.take() {
+                        // Speculative greedy (ADR-012 step 3): a cycle
+                        // commits 1..=drafts+1 tokens — the accepted
+                        // draft prefix plus the main model's own next —
+                        // each exactly the token plain greedy decoding
+                        // chooses; the queue drains them one per step.
+                        if let Some(t) = verified.pop_front() {
                             next = Some(Some(t));
                             return Ok(());
                         }
                         if in_flight.is_none() && model.can_speculate() {
                             let step = model.speculate_greedy(token)?;
-                            next = Some(step.first);
-                            verified = step.second;
+                            let mut it = step.tokens.into_iter();
+                            next = Some(Some(it.next().expect("a cycle commits a token")));
+                            verified = it.collect::<std::collections::VecDeque<_>>();
                             return Ok(());
                         }
                         let current = match in_flight.take() {
@@ -1328,8 +1331,6 @@ const QWEN3_ENGINE_KERNEL_ID: &str = "ADR011:qwen3-q8_0+f16:metal";
 /// Kernel identity of Gemma 3 on the unified engine (ADR-013).
 const GEMMA3_ENGINE_KERNEL_ID: &str = "ADR013:gemma3-q8_0+f16:metal";
 
-/// Option checks shared by every unified-engine load: resident plans only,
-/// and no CPU-streaming options.
 /// Resolved GEMM operand profile for engine (Metal) loads: true is the
 /// declared metal-f16-act default; "oracle-f32" restores f32 operands.
 /// Unknown or CPU-only values were already refused at load entry.
@@ -1344,6 +1345,23 @@ fn engine_gemm_f16_operands(opts: &ChineCoreOptions) -> Result<bool> {
             ),
         )),
     }
+}
+
+/// Resolved drafts per speculative cycle: the measured engine default,
+/// overridable for acceptance experiments (CHINE_MTP_DRAFTS). Served
+/// tokens never depend on it — only cycle length and accept rate do.
+fn engine_mtp_drafts() -> Result<usize> {
+    let drafts = std::env::var("CHINE_MTP_DRAFTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(engine_metal::MTP_DRAFTS);
+    if !(1..=4).contains(&drafts) {
+        return Err(ChineError::new(
+            ErrorCode::InvalidRequest,
+            "speculative drafts per cycle must be 1..=4",
+        ));
+    }
+    Ok(drafts)
 }
 
 fn check_resident_engine_options(plan: &ExecutionPlan, opts: &ChineCoreOptions) -> Result<()> {
@@ -1586,6 +1604,7 @@ impl ChineCore {
             kv,
             prefix_cache,
             mtp: speculative,
+            mtp_drafts: if speculative { engine_mtp_drafts()? } else { 1 },
             gemm_f16_operands,
         };
         // The identity records the resolved GEMM operand profile, so every

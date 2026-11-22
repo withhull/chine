@@ -1868,22 +1868,22 @@ kernel void ch_qwen35_conv_chunk(device const float *hist [[buffer(0)]],
 
 /* History after a chunk: the last k-1 inputs (oldest first), in place.
  * Reads index n+j > j, so ascending j never reads an overwritten slot. */
-kernel void ch_qwen35_conv_chunk_shift(device float *hist [[buffer(0)]],
-                                       device const float *x [[buffer(1)]],
-                                       constant uint &channels [[buffer(2)]],
-                                       constant uint &kern [[buffer(3)]],
-                                       constant uint &n [[buffer(4)]],
-                                       uint c [[thread_position_in_grid]]) {
-    if (c >= channels || kern < 2u) {
-        return;
-    }
-    const uint h = kern - 1u;
-    for (uint j = 0; j < h; ++j) {
-        const uint src = n + j;
-        hist[(size_t)j * channels + c] =
-            src < h ? hist[(size_t)src * channels + c] : x[(size_t)(src - h) * channels + c];
-    }
-}
+ kernel void ch_qwen35_conv_chunk_shift(device float *hist [[buffer(0)]],
+                                        device const float *x [[buffer(1)]],
+                                        constant uint &channels [[buffer(2)]],
+                                        constant uint &kern [[buffer(3)]],
+                                        constant uint &n [[buffer(4)]],
+                                        uint c [[thread_position_in_grid]]) {
+     if (c >= channels || kern < 2u) {
+         return;
+     }
+     const uint h = kern - 1u;
+     for (uint j = 0; j < h; ++j) {
+         const uint src = n + j;
+         hist[(size_t)j * channels + c] =
+             src < h ? hist[(size_t)src * channels + c] : x[(size_t)(src - h) * channels + c];
+     }
+ }
 
 /* Per-token q/k/v split of conv rows [n, 3*width] into [n, width] each. */
 kernel void ch_qwen35_split_qkv_chunk(device const float *y [[buffer(0)]],
@@ -1947,8 +1947,9 @@ kernel void ch_qwen35_gdn_chunk(device const float *q [[buffer(0)]],
                                 constant uint &qk_stride [[buffer(13)]],
                                 constant uint &v_stride [[buffer(14)]],
                                 constant uint &g_stride [[buffer(15)]],
-                                    constant uint &snap_t [[buffer(16)]],
-                                uint2 gid [[thread_position_in_grid]]) {
+                                     constant uint &snap_t [[buffer(16)]],
+                                     constant uint &snap_stride [[buffer(17)]],
+                                     uint2 gid [[thread_position_in_grid]]) {
     const uint j = gid.x;
     const uint head = gid.y;
     const uint sk = k_dim;
@@ -1976,9 +1977,13 @@ kernel void ch_qwen35_gdn_chunk(device const float *q [[buffer(0)]],
             acc += updated * (qq[i] * q_scale);
         }
         out[v_row + j] = acc;
-        if (t == snap_t) {
-            /* Rollback point (speculative verify): the state after token t. */
-            device float *snap_s = snap + (size_t)head * (size_t)sk * (size_t)sv;
+        if (t <= snap_t) {
+            /* Rollback points (speculative verify): the state after every
+             * row t' <= snap_t lands in snapshot slot t'. snap_stride = 0
+             * is the single-slot ABI (row 0 only, offset 0); UINT32_MAX
+             * never matches. */
+            device float *snap_s =
+                snap + (size_t)t * (size_t)snap_stride + (size_t)head * (size_t)sk * (size_t)sv;
             for (uint i = 0; i < sk; ++i) {
                 snap_s[i * sv + j] = s[i * sv + j];
             }
@@ -2091,9 +2096,10 @@ kernel void ch_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
                                     constant uint &qk_stride [[buffer(13)]],
                                     constant uint &v_stride [[buffer(14)]],
                                     constant uint &g_stride [[buffer(15)]],
-                                    constant uint &snap_t [[buffer(16)]],
-                                    uint2 gid [[thread_position_in_grid]]) {
-    constexpr uint RPL = SK / P;
+                                     constant uint &snap_t [[buffer(16)]],
+                                     constant uint &snap_stride [[buffer(17)]],
+                                     uint2 gid [[thread_position_in_grid]]) {
+     constexpr uint RPL = SK / P;
     constexpr uint C = 32u / P;
     const uint lane = gid.x % 32u;
     const uint j = (gid.x / 32u) * C + lane % C;
@@ -2138,9 +2144,13 @@ kernel void ch_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
         if (part == 0u) {
             out[v_row + j] = acc;
         }
-        if (t == snap_t) {
-            /* Rollback point (speculative verify): the state after token t. */
-            device float *snap_s = snap + (size_t)head * (size_t)SK * (size_t)sv;
+        if (t <= snap_t) {
+            /* Rollback points (speculative verify): the state after every
+             * row t' <= snap_t lands in snapshot slot t'. snap_stride = 0
+             * is the single-slot ABI (row 0 only, offset 0); UINT32_MAX
+             * never matches. */
+            device float *snap_s =
+                snap + (size_t)t * (size_t)snap_stride + (size_t)head * (size_t)SK * (size_t)sv;
             for (uint i = 0; i < RPL; ++i) {
                 snap_s[(r0 + i) * sv + j] = col[i];
             }
@@ -2163,7 +2173,9 @@ kernel void ch_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
         constant float &q_scale [[buffer(10)]], constant uint &heads [[buffer(11)]], \
         constant uint &n [[buffer(12)]], constant uint &qk_stride [[buffer(13)]],   \
         constant uint &v_stride [[buffer(14)]], constant uint &g_stride [[buffer(15)]], \
-        constant uint &snap_t [[buffer(16)]], uint2 gid [[thread_position_in_grid]]
+        constant uint &snap_t [[buffer(16)]],                                      \
+        constant uint &snap_stride [[buffer(17)]],                                \
+        uint2 gid [[thread_position_in_grid]]
 
 template [[host_name("ch_qwen35_gdn_chunk_k128")]] kernel void
 ch_qwen35_gdn_chunk_reg<128u, CH_GDN_LANES>(CH_GDN_REG_ARGS);

@@ -276,3 +276,54 @@ critical (unloads all) and load under pressure; API parsing tests for
 both field forms and their refusals. Real 0.8B through `serve`: preload at
 2 m with a live expiry, `forever`, `ttl: 1` unloaded within 4 s, both
 fields refused, targeted unload. `scripts/test.sh`: 506 tests passed.
+
+## Note 2026-11-22 — step 3, the multi-token form
+
+- **Shipped: drafts per cycle > 1, token identity kept.** The MTP head
+  now chains `mtp_drafts` drafts per cycle — each chained row pairs the
+  previous draft's embedding with the head's own output hidden (the
+  surrogate for the main model's hidden at that position; draft quality
+  only, served tokens never depend on it) — and one verify chunk of
+  `drafts + 1` rows checks them all with the decode arithmetic. The
+  cycle commits the longest accepted draft prefix plus the main model's
+  own next token (the correction on a mismatch, the bonus on a full
+  accept), 1..=drafts+1 tokens, each bit-for-bit what a decode step
+  would choose. A rejected tail rolls the recurrent state back to the
+  last accepted row: the GDN chunk kernel now snapshots every row's
+  post-state into strided slots (the single-slot ABI stays: stride 0,
+  `snap_t` 0), and the convolution-history slots are a pure copy
+  composition of the pre-chunk ring and this block's own input rows —
+  no kernel change (a first attempt added a `hist_off` constant to the
+  shift kernel and measurably corrupted the live ring on the pinned
+  model through a mechanism we did not fully explain; it was reverted
+  in favor of the copies, which are exact by construction).
+- **Bugs the gates caught before any commit:** the snapshot dispatch
+  passed 9 constants where the ABI now has 10 (snap_stride unbound, the
+  kernel overwrote slot 0 with the rejected draft's state — the probe
+  that found it now backs the per-depth rollback assertions); and the
+  history capture loop ran one row too far, whose `h - n` underflow
+  wrapped the destination offset and clobbered the deepest slot's last
+  row with the wrong draft's projected input.
+- **Accept rates, pinned Qwen3.5-0.8B (the gate's own print):** k=1
+  30/33 and 31/32 (0.91-0.97 per cycle, unchanged from the one-draft
+  engine); **k=2 38/26 and 42/22 — 1.46-1.91 accepted per cycle, 2.5-2.95
+  tokens per cycle; k=3 39/26 — 1.5 per cycle, 2.54 tokens** (the second
+  chained draft accepts at ~0.55-0.9, the third much less: the frozen
+  surrogate hidden degrades depth). The shipped default is k=2 — the
+  best measured per-chain-row efficiency, and its plan fits the
+  planner's 192 MiB workspaces reservation; k=3 needs 210.9 MiB and is
+  refused with the typed understated-workspaces error before any GPU
+  allocation unless the reservation grows (CHINE_MTP_DRAFTS overrides
+  for experiments either way).
+- **Correctness:** every accept depth forced deterministically —
+  Oracle (all), Wrong (none), Partial(1)/Partial(2) (per-depth
+  rollback) — plus the head's own drafts, on the fixture and the
+  pinned 0.8B at k=1, 2 and 3: tokens identical to plain greedy, and
+  the session afterwards within the registered state drift. The k=1
+  leg reproduces the one-draft engine's accept counts exactly.
+- **Speed:** loaded-machine single-engine sweep (`bench
+  --speculative`, 0.8B, f16 KV, ignore-EOS): k=1 85.33 vs k=2 85.51
+  tok/s decode-only — compressed to a tie by the session's load; the
+  accept-rate arithmetic projects k=2 clearly ahead on a quiet
+  machine (2.5-2.95 tokens per one-pass verify plus one chain row vs
+  1.94 at k=1). The quiet acceptance run is the recorded follow-up.
