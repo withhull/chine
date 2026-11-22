@@ -792,3 +792,31 @@ three passes each; full prefill ~330 ms):
   concurrently for a further ~5%+, while the unified engine's encoder
   is strictly serial). With GEMM at ~85% of the prefill, node-concurrent
   encoding — not further kernel work — is the recorded next lever.
+
+- **Research correction to the "next lever" (2026-11-22).** The note above
+  records node-concurrent encoding as the remaining prefill lever, from
+  ADR-011's early observation that "concurrent encoding gives ggml a
+  further ~5% on independent nodes". llama.cpp's own merged
+  concurrency work (PR #19555, Feb 2026: graph-optimize reorder with
+  memory-range tracking and encoder barriers, continuing #15929/#2309)
+  measures what that lever is actually worth on dense models:
+  gemma3 1B pp512 **0.98x** (slightly worse), tg32 1.04x; qwen3 0.6B
+  pp512 1.02x; deepseek2 30B.A3B pp512 1.03x — 0-3% on dense prefill,
+  meaningful only on MoE (qwen3next tg32 1.11x) and decode. That matches
+  our own ablation arithmetic: the Gemma prefill is ~85% GEMM and the
+  isolated GEMMs already run near the f16 matrix ceiling (~2.28
+  TFLOP/s measured), so overlapping independent GEMMs has little idle
+  capacity to fill. The recorded lever list reorders accordingly: the
+  headroom other engines measurably exploit on Apple Silicon in 2026 is
+  **decode-side** (Rec's fused whole-decode-pass Metal kernel claims
+  1.4-2.6x vs llama.cpp; MetalRT claims 1.35-2.14x decode; MLX leads
+  llama.cpp decode by ~9% and 27B prefill by ~21% via grouped GEMM
+  tiling) and **workload-level** (prefix caching for shared-preamble
+  agents — built here, bit-identical; KV pruning up to 1.75x at long
+  contexts per arXiv 2610.31479, which also warns that speculative
+  decoding can *reduce* Apple Silicon throughput under chat workloads —
+  consistent with keeping ours opt-in). One concrete measured target on
+  our side: Gemma decode is steady at 65.0 tok/s while llama.cpp's fast
+  mode reaches ~76 tok/s (76 -> ~81 GB/s effective on a 100 GB/s part);
+  profiling and closing that per-row GEMV gap at the kernel level is the
+  next concrete step, ahead of any prefill concurrency work.
