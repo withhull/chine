@@ -4524,10 +4524,13 @@ mod gemma3_tests {
         // Cross-mode bit-identity is qualified on physical Apple GPUs: on
         // the paravirtualized GPU of a CI runner, fast-math codegen differs
         // between the chunk and per-token kernels (first seen at the window
-        // length, 2026-10-28), so the recorded contract there is the
-        // drift-bounded form. The bound below is provisional; the measured
-        // drift is printed so the registered bound can be pinned from the
-        // CI log.
+        // length, 2026-10-28; CI red from the gate's introduction until
+        // fb5b789), so the recorded contract there is the drift-bounded
+        // form. Registered: max|diff| <= 1e-2 x max|logits| with top-1
+        // equality — enforced and green on the runner; the measured drift
+        // prints here on any future failure, from which the bound can be
+        // tightened (passing tests' output is captured, so the exact VM
+        // value is not otherwise visible).
         let probe = tuckmill_metal::probe();
         let virtualized = probe.info.to_lowercase().contains("paravirtual");
         eprintln!("gemma3 fixture gate on: {}", probe.info);
