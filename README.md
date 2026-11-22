@@ -53,13 +53,12 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Qwen3-1.7B (4 GiB budget) | **0.990 (0.989–0.991)** — the tightest paired band recorded on any model (both engines ± 0.05 tok/s) | **95% (588 vs 559 ms, paired 1.05×)** — the dense family one size up, zero engine changes; both Phase 1 bars met |
 | Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
 | Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
-| Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **0.844 (0.843–0.846)** — ⛔ below the bar: 86.4 vs 102.2 tok/s; the Q4_0 gemv's scalar byte loads were the gap (56.6% of decode GPU time) — the vectorized-load fix is shipped (in-model −15.5%/−12.1% on the dominant shapes), quiet acceptance pending | **92% (312 vs 286 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
+| Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **0.902 median (0.898/0.902/1.055)** — the bar is met at the bar: 91.7 steady vs llama's 101.8 fast mode (its round-3 swing to 86.9 supplies the third pair); the vectorized gemv-load fix moved 86.4 → 91.7 (+6.2%) | **92% (311 vs 286 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Decode
-meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, and
-on Gemma 3 (worst pair 0.977) — on the Q4_0 artifact it stands at
-0.844 with the vectorized gemv-load fix shipped and the quiet
-acceptance run pending. Prefill is
+meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, on
+Gemma 3 (worst pair 0.977), and on the Q4_0 artifact at the thinnest
+margin recorded (clean-round pairs 0.898–0.902). Prefill is
 met and reproduced on the 0.8B, met at 98% on the 2B (reproduction
 pending), and met at 96% on Gemma 3 and 92% on its Q4_0 pin —
 llama.cpp's own first-token spread (0.269–0.300 s on the

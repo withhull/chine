@@ -1133,3 +1133,29 @@ three passes each; full prefill ~330 ms):
   the 52- and 23-call gemv entries and the rmsnorm control are
   stable enough to gate a decision. The timing harness's Q4_1 byte
   count is corrected to 20 (its GB/s print is now honest).
+
+- **The gemv fix's quiet acceptance: the decode bar is met — at the
+  bar, the thinnest margin recorded (2026-11-22).** Clean tree
+  `12e52d4`, battery, zero swap, all 3 ABBA rounds valid
+  (`20261122T085725Z-…-gemma3-1b-q4_0-gemvfix`): warm decode
+  **91.48/91.79/91.73 (steady ± 0.15)** vs llama.cpp
+  101.90/101.77/**86.93** — paired **0.898 / 0.902 / 1.055, median
+  0.902 ≥ 0.90**. Honest reading: the two clean rounds (llama in its
+  reproduced fast band, 101.77-101.90, identical to the pre-fix
+  run's 102.11-102.53 control) pair at **0.898-0.902 — at the bar,
+  not over it**; the median's third pair comes from llama's
+  recorded round-to-round bimodality (its round 3 swung to 86.93
+  while ChineCore held 91.73). The fix's request-level effect: warm
+  decode 86.39 → **91.73 (+6.2%)**, within the in-model projection's
+  reach (+8% projected, the quiet machine pays most of it). Warm
+  TTFT 311/311/312 vs 286/286/288 — paired 1.09×, prefill ~92%,
+  unchanged as designed (the gemv serves decode only). Footprint
+  938 MiB resident vs llama's 199 MiB mmap peak. Standing: both
+  Phase 1 bars are met on the Q4_0 artifact — prefill 92%, decode
+  0.902 median with the caveat named; the margin is the thinnest in
+  the matrix (Qwen3-1.7B's decode band was 0.989-0.991, Gemma Q8_0's
+  worst pair 0.977), so it is recorded as "at the bar", never as a
+  lead. The recorded next lever, if the bar is to be held with
+  margin: the tied Q8_0 head (4.37 ms/token, 25.8% of decode GPU
+  time, 73.5 GB/s) and the rmsnorm stack (~1 ms/token) — both
+  shared with the Q8_0 artifact, so any gain pays on both pins.

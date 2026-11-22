@@ -1,0 +1,19 @@
+{
+  "schema": "chine-baseline-env-v1",
+  "started_utc": "20261122T085725Z",
+  "tier": "8gb",
+  "chip": "Apple M3",
+  "memory_bytes": 8589934592,
+  "macos": "27.0.1 (26A434)",
+  "power_source": "Battery Power",
+  "chine_commit": "12e52d494837d6a4728e4956278d3b2b301c71b0",
+  "chine_tree_dirty": false,
+  "llama_cpp": "b11695 (pinned, scripts/fetch-llama.sh)",
+  "artifact": "gemma-3-1b-it-Q4_0.gguf",
+  "artifact_bytes": 721918496,
+  "artifact_sha256": "27ee88e03be02e9ba73def9a819d570d8ad73716e50769e87f374ae394b0276e",
+  "memory_budget": "planner default",
+  "kv_precision": "f16",
+  "ignore_eos": true,
+  "shape": {"input": 512, "output": 256, "repetitions": 3, "context": 2048, "rounds": 3}
+}
