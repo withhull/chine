@@ -50,15 +50,15 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Qwen3.5-0.8B | 0.99–1.26× (two idle runs + a rerun; 84.2–84.3 vs 66.8–84.7 tok/s) | 94–106% — parity |
 | Qwen3.5-2B (3 GiB budget) | 0.956–1.030 across four runs — parity | 94% with f32-operand GEMMs, **98%** on the f16-operand profile (0.601 vs 0.587 s, quiet AC run) |
 | Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
-| Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | 85–90%; ~89% in the latest (324 vs 290 ms) |
+| Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Decode
-meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, and is
-now met in every Gemma 3 pair (worst 0.977). Prefill is met and
-reproduced on the 0.8B, met at 98% on the 2B (reproduction pending),
-and just below on Gemma 3 — llama.cpp's own first-token spread
-(0.269–0.300 s on the 0.8B) is as wide as several of these margins, so
-parity is stated where a lead is not established.
+meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, and
+on Gemma 3 (worst pair 0.977). Prefill is met and reproduced on the
+0.8B, met at 98% on the 2B (reproduction pending), and met at 96% on
+Gemma 3 — llama.cpp's own first-token spread (0.269–0.300 s on the
+0.8B) is as wide as several of these margins, so parity is stated
+where a lead is not established.
 
 **GEMM operand profile (`metal-f16-act`, ADR-010/ADR-011).** Batched
 prefill GEMMs stage dequantized weights and activations as half and
@@ -91,7 +91,13 @@ parity with llama.cpp, the actual cost was the decode attention (one
 attention (up to 16 slice groups + merge at n = 1, llama.cpp's own
 split) moved the request-level number exactly as its −60% in-engine
 attention cost says: 65.0 → 74.2 tok/s steady, paired 0.977–1.197.
-Prefill remains the open Gemma item at ~89%.
+The Gemma prefill gap closed the same way, by matching the request
+shape: llama.cpp prefills as one 512-row GEMM batch and its kernels
+scale better with M (FFN down +25% per token from 128 to 512 rows);
+shipping 512-token chunks (one line, every dependent derives from the
+constant) moved TTFT 324 → 301 ms, paired 1.04× — both Phase 1 bars
+met. The remaining ~4% is the at-512 GEMM kernel deficit (FFN down
+1.199× isolated; llama pipelines its K-loop), the recorded follow-up.
 
 **Beyond decode and prefill:**
 

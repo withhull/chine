@@ -987,3 +987,36 @@ three passes each; full prefill ~330 ms):
   tier's streaming strategy); mistral.rs's ISQ/UQFF/AnyMoE features
   are out of contract here (requantization and model mutation are
   refused by ADR-001, never traded for speed).
+
+- **Prefill M-scaling, shipped and accepted (2026-11-22).** The Gemma
+  prefill gap decomposed by measurement: isolated GEMM parity at
+  128-row batches was an artifact of the comparison shape - llama.cpp's
+  request runs its prefill GEMMs at the full 512-row batch, and the
+  matrix-unit kernel's M-scaling is where the gap lives (isolated,
+  same window, ours f16op vs pinned ggml mul_mat: 6912x1152 ahead at
+  128 rows, behind 1.028x at 512; 1152x6912 behind 1.199x at 512,
+  llama +25% per token from 128 to 512 rows, ours +11%; small
+  attention shapes llama +29-77%). An interleaved in-model A/B (one
+  build, caller-side chunking) measured the structural change alone:
+  512-token prefill 375.6 vs 384.4 ms on the loaded machine. Shipped
+  as the one-line `PREFILL_BATCH` 128 -> 512 (every dependent derives
+  from the constant; scratch 17.6 -> 56.1 MiB for Gemma, inside the
+  planner's 192 MiB workspaces reservation, typed refusal as the
+  safety net for a future model that outgrows it). Qualified at 512:
+  the full gate (514), the Gemma real-text Metal reference gate
+  (top-1 equal, drift unchanged), the pinned 0.8B gates (MTP token
+  identity, prefix-cache bit identity, oracle). Acceptance, quiet
+  machine, app closed, zero swap, clean tree
+  (`20261122T030606Z-…-gemma3-1b-pb512-quiet`): warm TTFT
+  **303/301/301 vs 306/289/289 ms, paired median 1.04x - prefill
+  ~96%, the >= 90% bar met on Gemma 3 for the first time**, decode
+  held (74.09 median, 0.977-0.979 against llama.cpp's fast rounds) -
+  both Phase 1 bars met in one run. The request-level move (-23 ms
+  from the 324 ms record) exceeds the loaded in-process A/B's -8.9 ms:
+  the quiet machine pays the M-scaling gain in full. The remaining ~4%
+  prefill gap is the at-512 kernel deficit (FFN down 1152x6912: ours
+  3717 us / 2193 GFLOP/s vs llama 3101 / 2629), recorded as the
+  follow-up lever: llama.cpp pipelines its K-loop (load-next-block
+  while the mma runs on current) where our 64x32 tile re-reads W per
+  token-tile behind barriers - kernel work with the register-pressure
+  trap recorded below, to be measured isolated first.
