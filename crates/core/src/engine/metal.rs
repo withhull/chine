@@ -561,9 +561,11 @@ impl SwiGluBlock {
         self.gate_mul(gpu, &self.g, &self.u, self.width as u32)?;
         self.down.gemv(gpu, &self.g, &self.out)?;
         if let Some(w) = &self.out_norm {
-            ctx.rmsnorm(&self.out, w, &self.out, 1, hidden as u32, self.eps)?;
+            // Same fused norm + residual as the mixer tail: one dispatch.
+            ctx.norm_add(&self.out, w, x, x, 1, hidden as u32, self.eps)
+        } else {
+            ctx.f32_axpy(&self.out, x, 1.0, hidden as u32)
         }
-        ctx.f32_axpy(&self.out, x, 1.0, hidden as u32)
     }
 
     /// `x += ffn(h)` for the `n` chunk rows of `s.h2` / `s.x`.
@@ -1602,9 +1604,15 @@ impl Layer {
             Mixer::Attention(b) => b.decode(gpu, &self.h, &self.proj, pos)?,
         }
         if let Some(w) = &self.mixer_out_norm {
-            ctx.rmsnorm(&self.proj, w, &self.proj, 1, hidden as u32, eps)?;
+            // The fused post-block norm + residual add (bit-identical to
+            // the rmsnorm + f32_axpy pair it replaces — the prefill path
+            // has always run this fused form, and the cross-mode gates
+            // assert prefill == decode bits, which is the pairing proof).
+            // One dispatch instead of two on the decode hot path.
+            ctx.norm_add(&self.proj, w, x, x, 1, hidden as u32, eps)?;
+        } else {
+            ctx.f32_axpy(&self.proj, x, 1.0, hidden as u32)?;
         }
-        ctx.f32_axpy(&self.proj, x, 1.0, hidden as u32)?;
         ctx.rmsnorm(x, &self.post_norm, &self.h2, 1, hidden as u32, eps)?;
         self.ffn.decode(gpu, &self.h2, x, hidden)
     }

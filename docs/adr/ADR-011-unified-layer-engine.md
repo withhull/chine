@@ -1159,3 +1159,38 @@ three passes each; full prefill ~330 ms):
   margin: the tied Q8_0 head (4.37 ms/token, 25.8% of decode GPU
   time, 73.5 GB/s) and the rmsnorm stack (~1 ms/token) — both
   shared with the Q8_0 artifact, so any gain pays on both pins.
+
+- **The two levers, taken and measured — one closed, one small
+  (2026-11-22).**
+- **The head lever is closed by measurement, not by rewrite.** The
+  73.5 GB/s of the acceptance-session profile was load tax: in a
+  quieter machine state the same in-model head call runs 3.43 ms for
+  320.9 MB = **93.6% of the M3's 100 GB/s DRAM spec**, and the
+  isolated harness reproduces the standing parity number exactly
+  (72.2 GB/s, the same window in which pinned llama.cpp measured
+  0.98x ours). At the streaming ceiling with the reference at
+  parity there is no demonstrated gap, so a rewrite is forbidden by
+  the profiling rule; the head's 4.3 ms/token is DRAM physics (306
+  MiB of tied Q8_0 head read every token by design). Recorded as
+  closed.
+- **The rmsnorm stack: the decode path now runs the fused
+  post-block norm + residual add.** Decode was the last unfused
+  consumer: prefill has run `norm_add` since the fusion work, and
+  the cross-mode gates (prefill == decode bits) are themselves the
+  pairing proof — wiring `Layer::decode` and `Ffn::decode` through
+  the same kernel changes no bits and drops 52 dispatches per token
+  (157 norm-class dispatches -> 105). The site is family-shared
+  (GDN and attention mixers both flow through it), so every pinned
+  model pays the saving. Interleaved A/B, same machine state:
+  wall 14.09/13.85 vs 14.11/13.87 ms — **equal-or-better in every
+  pair, ~0.1-0.15 ms/token** — honest size: the ops were already
+  launch-bound-cheap, so this is a dispatch-count and encoding win,
+  not the 0.3-0.5 ms the profile's raw norm-class total suggested;
+  the small-op rows move +/- 2x between profile runs (contention),
+  which is why the paired walls, not the per-op rows, gate the
+  verdict. Verified: full gate, the 9 pinned 0.8B/MTP core gates,
+  and the 25 e2e gates (both gemma Metal pins unchanged — the
+  logits equalities re-prove bit-identity on real weights; the MTP
+  accept rates unchanged). Projected quiet effect: 91.7 -> ~92.3
+  tok/s, clean-round pairs ~0.91 — a modest margin over the 0.90
+  bar, honestly sized; the quiet acceptance run decides.

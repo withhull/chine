@@ -53,7 +53,7 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Qwen3-1.7B (4 GiB budget) | **0.990 (0.989–0.991)** — the tightest paired band recorded on any model (both engines ± 0.05 tok/s) | **95% (588 vs 559 ms, paired 1.05×)** — the dense family one size up, zero engine changes; both Phase 1 bars met |
 | Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
 | Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
-| Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **0.902 median (0.898/0.902/1.055)** — the bar is met at the bar: 91.7 steady vs llama's 101.8 fast mode (its round-3 swing to 86.9 supplies the third pair); the vectorized gemv-load fix moved 86.4 → 91.7 (+6.2%) | **92% (311 vs 286 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
+| Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **0.902 median (0.898/0.902/1.055)** — the bar is met at the bar: 91.7 steady vs llama's 101.8 fast mode (its round-3 swing to 86.9 supplies the third pair); the vectorized gemv-load fix moved 86.4 → 91.7 (+6.2%), the fused decode norms add a modest dispatch-count margin (~92.3 projected, acceptance pending), and the head is measured at the DRAM ceiling (93.6% of spec) — closed | **92% (311 vs 286 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Decode
 meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, on
