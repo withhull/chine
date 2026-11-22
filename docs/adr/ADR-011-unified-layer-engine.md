@@ -1259,3 +1259,33 @@ three passes each; full prefill ~330 ms):
   assumed. Quiet projection: 91.7 -> ~94 tok/s, fast-mode pairs
   ~0.92 — the quiet acceptance run decides, per the rule the norm
   fusion taught: loaded in-model walls cannot resolve <2% effects.
+
+- **The shape-adaptive gemv's quiet acceptance: the decode bar met
+  with margin in every pair (2026-11-22).** The first attempt
+  (`20261122T144922Z-…-gemv2`) was **thermal-invalid and discarded**:
+  both engines uniformly ~6x below their standing bands (llama's
+  control 18.77 vs 101.8-102.5 warm tok/s — a 5.4x deviation no code
+  change could produce), zero swap, healthy reclaimable — the
+  machine-state signature; no verdict drawn, no record written.
+  The re-run on the standing machine (`20261122T150115Z-…-gemv2`,
+  AC, zero swap, clean tree `9aff576`, llama reproducing its fast
+  band exactly, all 3 ABBA rounds in that mode): warm decode
+  **94.22/95.26/95.65 (steady +/- 0.7)** vs 101.17/102.19/102.01 —
+  **paired 0.931 / 0.932 / 0.938, median 0.932** — every clean
+  fast-mode pair above the >= 0.90 bar with ~3-4 points of margin,
+  the first time on the Q4_0 artifact (the pre-redesign standing
+  straddled it: 0.891-0.902). The redesign's request-level effect:
+  91.73 -> 95.26 warm median (**+3.9%**, vs the in-model
+  projection's +2.9%). Warm TTFT 313/312/312 vs 287/286/287 —
+  paired 1.09x, prefill ~92%, unchanged as designed (the gemv
+  serves decode only). Footprint 938 MiB resident vs llama's
+  199-200 MiB mmap peak. Standing, honestly stated: the Q4_0
+  decode bar is now held with margin by measurement — the margin's
+  mechanism is the 144 -> 576-group parallelism on the low-row
+  shapes, not a llama-side swing (llama never left its fast mode
+  this run). The recorded residual, if more is ever wanted: the
+  Q4_0 gemv class still streams below the head's 93.6% DRAM
+  ceiling on the high-row shapes where the multi-row form stays
+  (gate/up 5.09-5.62 ms/token), and every further in-place
+  variant measured this arc (shuffle, pair-step, one-row at high
+  rows) lost on the instrument.
