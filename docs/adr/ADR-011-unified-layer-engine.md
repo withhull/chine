@@ -1050,7 +1050,7 @@ three passes each; full prefill ~330 ms):
 - **Q4_0/Q4_1 Metal kernels (2026-11-22).** The matrix-unit GEMM set
   extended to the 4-bit pair — Q4_0 (18-byte block: `[f16 d][16 B
   nibbles]`, value `(nibble-8)*d`, low nibble -> j, high -> j+16) and
-  Q4_1 (24-byte block: `[f16 d][f16 m][16 B]`, value `nibble*d + m`) —
+  Q4_1 (20-byte block: `[f16 d][f16 m][16 B]`, value `nibble*d + m`) —
   gemv, row, row-indirect, mid-batch gemm and both MMA profiles on the
   Q8_0 dispatch and admission surface; Q4_1 joins the MMA fast path
   (f16op under metal-f16-act). Eleven kernel gates against the CPU
@@ -1083,21 +1083,53 @@ three passes each; full prefill ~330 ms):
   Footprint peak 938 MiB resident vs llama's 199 MiB mmap. Both
   engines decode the halved weights faster than their Q8_0 standing
   (ours 74.2 -> 86.4; llama ~75 -> 102), but llama gains 1.36x where
-  we gain 1.16x. The gap's location, measured with the CHINE_PROFILE
-  gemv harness (same window as the Q8_0 parity record): our Q4_0
-  gemv sustains **39.8 GB/s** on the 6912x1152 FFN shape where our
-  Q8_0 gemv sustains 55.7 GB/s (152 us) — the nibble unpack makes
-  the kernel ALU-bound on half the bytes, so the byte-traffic gain
-  does not arrive; the model-level arithmetic closes: 388 MB of
-  per-token weight traffic at 39.8 GB/s is ~9.8 ms + 1.12 ms
-  split-K attention + ~0.7 ms norms/rope/dispatch = the observed
-  11.6 ms/token. llama's same-artifact decode (measured 102.15
-  tok/s = 9.8 ms/token over the same 388 MB) implies its Q4 dot
-  stack sustains ~50 GB/s effective (derived, not isolated-
-  measured). The recorded lever, and an intra-family hint from the
-  same table: our own Q4_1 gemv sustains **59.9 GB/s** at the same
-  shape — the 24-byte Q4_1 block aligns to 8-byte loads while the
-  18-byte Q4_0 block forces scalar byte access; a vectorized/
-  regrouped Q4_0 load strategy is the concrete follow-up (kernel
-  session, same rules: no ship on isolated evidence, quiet
-  acceptance decides).
+  we gain 1.16x. Correction of this note's first draft, which closed
+  the model arithmetic on "388 MB/token" and mis-read the Q4_1 hint:
+  the per-operator decode profile (the same CHINE_PROFILE instrument
+  as the Qwen record, `profile_gemma3_decode_when_requested`) shows
+  per token **Q4_0 gemv 9.56 ms = 56.6%** (gate/up 6912x1152 5.98 ms
+  across 52 calls = 115 us = **38.9 GB/s**, down 1152x6912 2.01 ms =
+  51.1 GB/s, k/v/q/o 1.57 ms), the tied Q8_0 head 262144x1152
+  4.37 ms = **73.5 GB/s**, split-K attention 0.66 ms, norms/other
+  ~2.9 ms — GPU busy 13.55 ms/token under session load (the quiet
+  11.6 ms wall is the same distribution in a faster machine state).
+  The Q4_0 gemv runs at half the head's streaming rate on the same
+  memory system: the nibble unpack makes the kernel issue-bound on
+  half the bytes. The earlier "Q4_1 gemv 59.9 GB/s, 24-byte blocks
+  align" line was wrong twice over: the Q4_1 block is **20 bytes**
+  (2+2+16, not 24 — the first timing harness over-allocated and
+  over-counted it, inflating the print by 24/20; corrected, the Q4_1
+  gemv sustains ~49.9 GB/s), and its kernel used the same scalar
+  byte loads — alignment never explained the difference. llama's
+  same-artifact decode (measured 102.15 tok/s = 9.8 ms/token) implies
+  its Q4 dot stack sustains ~70 GB/s effective on the same traffic
+  (derived, not isolated-measured). The concrete follow-up: the
+  Q4_0 gemv load strategy (kernel session, same rules: no ship on
+  isolated evidence, quiet acceptance decides).
+
+- **The Q4_0 gemv load fix, measured in-model (2026-11-22).** The
+  kernel's eight scalar byte loads per lane-row-block became two
+  `packed_uchar4` loads (alignment 1, so the 18-byte block stride
+  needs no special case) with the nibble math on uchar vectors —
+  `(float4)(c & 0x0f) - 8.0f` / `(float4)(c >> 4) - 8.0f`; values and
+  per-lane reduction order are identical to the scalar form (the
+  real-text Metal gate is unchanged: max |d| 0.0149, top-1 equal).
+  Two variants were tried and **rejected on the same instrument**:
+  a quad-local simd_shuffle reusing the low lanes' bytes (gate/up
+  5.05 -> 6.30 ms/token: the high lanes' independent loads overlap
+  and coalesce, the shuffle serializes behind them) and a two-
+  strided-blocks-per-iteration form (down 1.77 -> 1.95 ms/token, the
+  most stable instrument in the table). The shipped single-block
+  form, A/B'd in one session with the rmsnorm control stable
+  (0.985 vs 0.986 ms/token): **gate/up 5.98 -> 5.05 ms/token
+  (-15.5%), down 2.01 -> 1.77 (-12.1%)**, k/v 0.70 -> 0.66, GPU busy
+  13.55 -> 13.01, wall 14.40 -> 14.03 (session load; quiet wall
+  projects ~10.7 ms/token = ~94 tok/s = paired ~0.92 — a projection,
+  the quiet acceptance run decides). Recorded measurement caveats:
+  the isolated back-to-back gemv harness is unusable for cross-time
+  A/B under session load (it showed the *unchanged* Q4_1 kernel a
+  third slower forty minutes apart), and the small q/o shapes plus
+  attention move +/- 25-50% between runs (contention band) — only
+  the 52- and 23-call gemv entries and the rmsnorm control are
+  stable enough to gate a decision. The timing harness's Q4_1 byte
+  count is corrected to 20 (its GB/s print is now honest).

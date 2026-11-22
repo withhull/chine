@@ -2219,18 +2219,31 @@ kernel void ch_q4_0_gemv(device const uchar *w [[buffer(0)]],
             }
             const device uchar *blk = w + (size_t)row * row_bytes + (size_t)b * 18u;
             const float d = (float)(*(const device half *)blk);
-            const device uchar *qs = blk + 2u + byte0;
+            /* The 8 data bytes this lane covers, as two packed 4-byte
+             * loads (alignment 1, so the 18-byte block stride needs no
+             * special case) instead of eight scalar byte loads; the
+             * nibble math runs on uchar vectors (unsigned, so >> 4 is
+             * the logical shift the scalar form's int promotion gave).
+             * Two alternatives were measured and rejected on the same
+             * in-model A/B (gemma3 Q4_0 decode, per token): a
+             * quad-local simd_shuffle reuse of the low lanes' bytes
+             * (6.30 vs 5.05 ms on the gate/up shape - the high lanes'
+             * independent loads overlap and coalesce, the shuffle
+             * serializes behind them) and a two-strided-blocks-per-
+             * iteration form (down shape 1.95 vs 1.77 ms, the most
+             * stable instrument). Values are identical to the scalar
+             * form. */
+            const device packed_uchar4 *qv =
+                (const device packed_uchar4 *)(blk + 2u + byte0);
+            const uchar4 c0 = uchar4(qv[0]);
+            const uchar4 c1 = uchar4(qv[1]);
             float4 q0, q1;
             if (!hi) {
-                q0 = float4((float)(qs[0] & 0x0fu) - 8.0f, (float)(qs[1] & 0x0fu) - 8.0f,
-                            (float)(qs[2] & 0x0fu) - 8.0f, (float)(qs[3] & 0x0fu) - 8.0f);
-                q1 = float4((float)(qs[4] & 0x0fu) - 8.0f, (float)(qs[5] & 0x0fu) - 8.0f,
-                            (float)(qs[6] & 0x0fu) - 8.0f, (float)(qs[7] & 0x0fu) - 8.0f);
+                q0 = float4(c0 & (uchar4)0x0fu) - 8.0f;
+                q1 = float4(c1 & (uchar4)0x0fu) - 8.0f;
             } else {
-                q0 = float4((float)(qs[0] >> 4) - 8.0f, (float)(qs[1] >> 4) - 8.0f,
-                            (float)(qs[2] >> 4) - 8.0f, (float)(qs[3] >> 4) - 8.0f);
-                q1 = float4((float)(qs[4] >> 4) - 8.0f, (float)(qs[5] >> 4) - 8.0f,
-                            (float)(qs[6] >> 4) - 8.0f, (float)(qs[7] >> 4) - 8.0f);
+                q0 = float4(c0 >> 4) - 8.0f;
+                q1 = float4(c1 >> 4) - 8.0f;
             }
             acc[r] += d * (dot(q0, x0) + dot(q1, x1));
         }

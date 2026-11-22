@@ -1602,7 +1602,7 @@ fn q4_gemv_timing_when_requested() {
         (1024, 3584),
     ];
     for (rows, cols) in shapes {
-        for (label, block_bytes, upload) in [("q4_0", 18usize, 1u32), ("q4_1", 24, 3)] {
+        for (label, block_bytes, upload) in [("q4_0", 18usize, 1u32), ("q4_1", 20, 3)] {
             let n = rows * cols / 32 * block_bytes;
             let w = vec![0u8; n];
             let x = boundary_input(cols, 5);

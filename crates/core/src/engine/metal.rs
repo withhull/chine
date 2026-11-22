@@ -3385,6 +3385,108 @@ mod oracle_tests {
         }
     }
 
+    /// Same measurement for the pinned Gemma 3 pins (the Q4_0 artifact
+    /// first, the Q8_0 pin as the control). Run with
+    /// `CHINE_GEMMA3_Q40_GGUF=... CHINE_PROFILE=1 cargo test --release
+    /// -p chine-core profile_gemma3_decode -- --nocapture`.
+    #[test]
+    fn profile_gemma3_decode_when_requested() {
+        let path = ["CHINE_GEMMA3_Q40_GGUF", "CHINE_GEMMA3_GGUF"]
+            .iter()
+            .find_map(|k| {
+                std::env::var(k)
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.exists())
+            });
+        let Some(path) = path else {
+            eprintln!("skipping: CHINE_GEMMA3_Q40_GGUF / CHINE_GEMMA3_GGUF not set");
+            return;
+        };
+        if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
+            return;
+        }
+        if gpu_or_skip().is_none() {
+            return;
+        }
+        eprintln!("gemma3 pin: {}", path.display());
+        let insp = chine_manifest::gguf::inspect(&path, &Default::default()).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let src = crate::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
+        let graph = crate::engine::adapters::gemma3(&insp).unwrap();
+        let capacity = 128usize;
+        let plan = alloc_plan(&graph, &src, capacity).unwrap();
+        let model = EngineModel::load(
+            Qwen35Gpu::open().unwrap(),
+            graph,
+            &src,
+            capacity,
+            plan.total(),
+        )
+        .unwrap();
+        let ctx = model.context();
+        let tokens: Vec<u32> = (0..56u32).map(|i| 1000 + i * 37).collect();
+        let mut logits = Vec::new();
+        for t in &tokens[..8] {
+            model.forward_token(*t, &mut logits).unwrap();
+        }
+
+        let measured = &tokens[8..40];
+        let n = measured.len() as f64;
+        let (c0, g0) = (ctx.committed_dispatches(), ctx.gpu_nanos_total());
+        let t0 = std::time::Instant::now();
+        for t in measured {
+            model.forward_token(*t, &mut logits).unwrap();
+        }
+        ctx.fence().unwrap();
+        let wall_ms = t0.elapsed().as_secs_f64() * 1e3 / n;
+        let gpu_ms = (ctx.gpu_nanos_total() - g0) as f64 / 1e6 / n;
+        let cbs = (ctx.committed_dispatches() - c0) as f64 / n;
+        eprintln!(
+            "decode per token: wall {wall_ms:.2} ms ({:.2} tok/s), GPU busy {gpu_ms:.2} ms ({:.0}%), host/dispatch {:.2} ms, {cbs:.0} command buffers",
+            1e3 / wall_ms,
+            100.0 * gpu_ms / wall_ms,
+            wall_ms - gpu_ms
+        );
+        assert!(gpu_ms <= wall_ms * 1.05, "GPU time cannot exceed wall time");
+
+        model.set_grouped(false);
+        let (u0, t1) = (ctx.gpu_nanos_total(), std::time::Instant::now());
+        for t in &tokens[40..48] {
+            model.forward_token(*t, &mut logits).unwrap();
+        }
+        ctx.fence().unwrap();
+        eprintln!(
+            "ungrouped (one command buffer per operator): wall {:.2} ms, GPU busy {:.2} ms per token",
+            t1.elapsed().as_secs_f64() * 1e3 / 8.0,
+            (ctx.gpu_nanos_total() - u0) as f64 / 1e6 / 8.0
+        );
+        ctx.set_profiling(true);
+        let profiled = &tokens[48..56];
+        for t in profiled {
+            model.forward_token(*t, &mut logits).unwrap();
+        }
+        ctx.fence().unwrap();
+        let mut table = ctx.profile_snapshot();
+        ctx.set_profiling(false);
+        table.sort_by_key(|row| std::cmp::Reverse(row.1));
+        let total: u64 = table.iter().map(|r| r.1).sum();
+        let per = profiled.len() as f64;
+        eprintln!(
+            "GPU time per operator (per token, {} tokens):",
+            profiled.len()
+        );
+        for (label, nanos, count) in &table {
+            eprintln!(
+                "  {label:<28} {:>8.3} ms  {:>5.1}%  {:>6.1} buffers",
+                *nanos as f64 / 1e6 / per,
+                100.0 * *nanos as f64 / total.max(1) as f64,
+                *count as f64 / per
+            );
+        }
+    }
+
     /// Q35-2C/2C.1 machine-local gate: the complete pinned 0.8B executes
     /// on the GPU from a lightweight artifact tensor source (no CPU
     /// session), the exact preflight plan equals the device ledger, and
