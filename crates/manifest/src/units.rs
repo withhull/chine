@@ -9,7 +9,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 
 pub const KIB: u64 = 1024;
 pub const MIB: u64 = 1024 * KIB;
@@ -147,8 +147,8 @@ impl Bytes {
     }
 }
 
-fn bad(input: &str, why: &str) -> TuckmillError {
-    TuckmillError::new(
+fn bad(input: &str, why: &str) -> ChineError {
+    ChineError::new(
         ErrorCode::InvalidRequest,
         format!("could not parse quantity {input:?}: {why}"),
     )

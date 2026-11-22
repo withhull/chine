@@ -1,10 +1,10 @@
 [package]
-name = "tuckmill-manifest"
+name = "chine-manifest"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Tuckmill artifact manifests, model inspection, units, identities, and shared records"
+description = "Chine artifact manifests, model inspection, units, identities, and shared records"
 
 [dependencies]
 serde.workspace = true

@@ -1,14 +1,14 @@
 //! Store layout: directories, permissions, disk checks, volume identity.
 //!
-//! Canonical model data is under `~/Library/Application Support/Tuckmill`
-//! unless `TUCKMILL_DATA_DIR` selects another root (for tests, or an
+//! Canonical model data is under `~/Library/Application Support/Chine`
+//! unless `CHINE_DATA_DIR` selects another root (for tests, or an
 //! explicitly chosen external volume).
 
 use std::path::{Path, PathBuf};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::Id;
-use tuckmill_manifest::units::Bytes;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::Id;
+use chine_manifest::units::Bytes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskStatus {
@@ -23,9 +23,9 @@ pub struct StoreLayout {
 }
 
 impl StoreLayout {
-    /// Resolve the data root: `TUCKMILL_DATA_DIR`, else Application Support.
+    /// Resolve the data root: `CHINE_DATA_DIR`, else Application Support.
     pub fn resolve() -> Result<Self> {
-        if let Ok(dir) = std::env::var("TUCKMILL_DATA_DIR") {
+        if let Ok(dir) = std::env::var("CHINE_DATA_DIR") {
             if !dir.trim().is_empty() {
                 return Ok(Self {
                     root: PathBuf::from(dir),
@@ -33,7 +33,7 @@ impl StoreLayout {
             }
         }
         let home = std::env::var("HOME").map_err(|_| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidConfiguration,
                 "HOME is not set; cannot locate the Application Support directory",
             )
@@ -42,7 +42,7 @@ impl StoreLayout {
             root: PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("Tuckmill"),
+                .join("Chine"),
         })
     }
 
@@ -130,7 +130,7 @@ impl StoreLayout {
             self.control_dir(),
             self.logs_dir(),
         ] {
-            std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+            std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
         }
         #[cfg(unix)]
         {
@@ -155,7 +155,7 @@ impl StoreLayout {
             }
         }
         statfs(&probe).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::StorageLost,
                 format!("cannot read filesystem status for {}", probe.display()),
             )
@@ -167,7 +167,7 @@ impl StoreLayout {
     pub fn ensure_space_for(&self, need: Bytes, path: &Path) -> Result<DiskStatus> {
         let status = self.disk_status(path)?;
         if status.free_bytes < need.bytes() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InsufficientDisk,
                 format!(
                     "insufficient disk: need {} but only {} is free",
@@ -204,7 +204,7 @@ fn statfs(path: &Path) -> Option<DiskStatus> {
             &buf.f_fsid as *const libc::fsid_t as *const u8,
             std::mem::size_of::<libc::fsid_t>(),
         );
-        let identity = Id::new(tuckmill_manifest::ids::sha256_hex(fsid_bytes)).ok()?;
+        let identity = Id::new(chine_manifest::ids::sha256_hex(fsid_bytes)).ok()?;
         Some(DiskStatus {
             free_bytes: free,
             total_bytes: total,
@@ -233,9 +233,9 @@ mod tests {
     fn default_root_is_application_support() {
         let layout = StoreLayout::resolve().unwrap();
         let root = layout.root().to_string_lossy().to_string();
-        if std::env::var("TUCKMILL_DATA_DIR").is_err() {
+        if std::env::var("CHINE_DATA_DIR").is_err() {
             assert!(root.contains("Application Support"), "got {root}");
-            assert!(root.ends_with("Tuckmill"));
+            assert!(root.ends_with("Chine"));
         }
     }
 

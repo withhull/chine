@@ -1,18 +1,18 @@
 [package]
-name = "tuckmill-supervisor"
+name = "chine-supervisor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Tuckmill supervisor: admission, queues, worker lifecycle, governor, local API"
+description = "Chine supervisor: admission, queues, worker lifecycle, governor, local API"
 
 [dependencies]
-tuckmill-manifest.workspace = true
-tuckmill-backend.workspace = true
-tuckmill-tuckcore.workspace = true
-tuckmill-llamaref.workspace = true
-tuckmill-planner.workspace = true
-tuckmill-store.workspace = true
+chine-manifest.workspace = true
+chine-backend.workspace = true
+chine-chinecore.workspace = true
+chine-llamaref.workspace = true
+chine-planner.workspace = true
+chine-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true

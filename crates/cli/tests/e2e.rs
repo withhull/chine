@@ -1,6 +1,6 @@
 //! End-to-end CLI tests: the full path from doctor through serve.
 //!
-//! These tests run the real `tuckmill` binary (including the isolated worker
+//! These tests run the real `chine` binary (including the isolated worker
 //! process path) against a synthetic fixture and a temporary data directory.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use tuckmill_manifest::adapter::AdapterRegistry;
-use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+use chine_manifest::adapter::AdapterRegistry;
+use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_tuckmill")
+    env!("CARGO_BIN_EXE_chine")
 }
 
 struct TestEnv {
@@ -38,9 +38,9 @@ impl TestEnv {
     fn run(&self, args: &[&str]) -> (i32, String, String) {
         let output = Command::new(bin())
             .args(args)
-            .env("TUCKMILL_DATA_DIR", &self.data_dir)
+            .env("CHINE_DATA_DIR", &self.data_dir)
             .output()
-            .expect("spawn tuckmill");
+            .expect("spawn chine");
         (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).to_string(),
@@ -249,7 +249,7 @@ fn serve_end_to_end_with_auth_and_streaming() {
 
     let mut child = Command::new(bin())
         .args(["serve", "--port", "0", "--allow-test-engine"])
-        .env("TUCKMILL_DATA_DIR", &env.data_dir)
+        .env("CHINE_DATA_DIR", &env.data_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -268,7 +268,7 @@ fn serve_end_to_end_with_auth_and_streaming() {
         }
         if let Some(rest) = addr_line
             .trim()
-            .strip_prefix("tuckmill serve: listening on http://")
+            .strip_prefix("chine serve: listening on http://")
         {
             addr = Some(rest.to_string());
             break;
@@ -362,7 +362,7 @@ fn http_request(addr: &str, request: &str, _unused: Option<()>) -> String {
     out
 }
 
-/// Gate B end-to-end through the real API and the isolated TuckCore worker:
+/// Gate B end-to-end through the real API and the isolated ChineCore worker:
 /// identical requests reuse one loaded model, sampling settings reach the
 /// worker, stop sequences never leak, and usage accounts for the actual
 /// prompt tokens.
@@ -373,8 +373,8 @@ fn gate_b_chat_semantics_through_the_real_worker() {
     env.run_ok(&["import", &fixture, "--alias", "local-model"]);
 
     let mut child = Command::new(bin())
-        .args(["serve", "--port", "0", "--engine", "tuckcore"])
-        .env("TUCKMILL_DATA_DIR", &env.data_dir)
+        .args(["serve", "--port", "0", "--engine", "chinecore"])
+        .env("CHINE_DATA_DIR", &env.data_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -392,7 +392,7 @@ fn gate_b_chat_semantics_through_the_real_worker() {
         }
         if let Some(rest) = addr_line
             .trim()
-            .strip_prefix("tuckmill serve: listening on http://")
+            .strip_prefix("chine serve: listening on http://")
         {
             addr = Some(rest.to_string());
             break;
@@ -501,7 +501,7 @@ fn gate_b_chat_semantics_through_the_real_worker() {
         a["choices"][0]["message"]["content"],
         b["choices"][0]["message"]["content"]
     );
-    assert_eq!(a["tuckmill"]["sampling"]["greedy"], false);
+    assert_eq!(a["chine"]["sampling"]["greedy"], false);
     let c = sampled(12, None);
     assert_ne!(
         a["choices"][0]["message"]["content"], c["choices"][0]["message"]["content"],
@@ -546,7 +546,7 @@ fn gate_b_chat_semantics_through_the_real_worker() {
     let completion_tokens = stopped["usage"]["completion_tokens"].as_u64().unwrap();
     assert!(completion_tokens <= 8, "{stopped}");
     assert!(
-        stopped["tuckmill"]["generated_tokens"].as_u64().unwrap() >= completion_tokens,
+        stopped["chine"]["generated_tokens"].as_u64().unwrap() >= completion_tokens,
         "{stopped}"
     );
 
@@ -612,7 +612,7 @@ fn corrupted_store_payload_is_refused_before_execution() {
         "--prompt",
         "x",
         "--engine",
-        "tuckcore",
+        "chinecore",
         "--max-output",
         "2",
     ]);
@@ -650,7 +650,7 @@ fn truncated_payload_is_refused_by_the_isolated_worker() {
         "--prompt",
         "x",
         "--engine",
-        "tuckcore",
+        "chinecore",
         "--max-output",
         "2",
     ]);
@@ -692,7 +692,7 @@ fn replaced_payload_is_refused_by_the_isolated_worker() {
         "--prompt",
         "x",
         "--engine",
-        "tuckcore",
+        "chinecore",
         "--max-output",
         "2",
     ]);
@@ -741,7 +741,7 @@ fn worker_crash_surfaces_as_worker_failed_and_supervisor_survives() {
             "3000",
             "--allow-test-engine",
         ])
-        .env("TUCKMILL_DATA_DIR", &env.data_dir)
+        .env("CHINE_DATA_DIR", &env.data_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -809,7 +809,7 @@ fn sigint_cancels_a_run_at_a_committed_token_boundary() {
             "--json",
             "--quiet",
         ])
-        .env("TUCKMILL_DATA_DIR", &env.data_dir)
+        .env("CHINE_DATA_DIR", &env.data_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -842,7 +842,7 @@ fn sigint_cancels_a_run_at_a_committed_token_boundary() {
 }
 
 #[test]
-fn tuckcore_executes_real_weights_with_honest_labels() {
+fn chinecore_executes_real_weights_with_honest_labels() {
     let env = TestEnv::new();
     let fixture = env.fixture.display().to_string();
     env.run_ok(&["import", &fixture, "--alias", "local-model"]);
@@ -855,11 +855,11 @@ fn tuckcore_executes_real_weights_with_honest_labels() {
         "--max-output",
         "5",
         "--engine",
-        "tuckcore",
+        "chinecore",
         "--json",
     ]);
     let v: serde_json::Value = serde_json::from_str(&out).expect("run json");
-    assert_eq!(v["backend"], "tuckcore");
+    assert_eq!(v["backend"], "chinecore");
     assert_eq!(v["certified"], false);
     assert_eq!(v["synthetic_output"], false, "real weights were executed");
     assert_eq!(v["committed_tokens"], 5);
@@ -915,11 +915,11 @@ fn verify_proves_streaming_equivalence_bit_exact() {
 
 #[test]
 fn llama_reference_comparison_when_available() {
-    let Some(lib) = std::env::var("TUCKMILL_LLAMA_LIB")
+    let Some(lib) = std::env::var("CHINE_LLAMA_LIB")
         .ok()
         .filter(|p| std::path::Path::new(p).exists())
     else {
-        eprintln!("skipping: TUCKMILL_LLAMA_LIB not set (run scripts/fetch-llama.sh)");
+        eprintln!("skipping: CHINE_LLAMA_LIB not set (run scripts/fetch-llama.sh)");
         return;
     };
     let _ = lib;
@@ -956,25 +956,25 @@ fn llama_reference_comparison_when_available() {
     let v: serde_json::Value = serde_json::from_str(&out).expect("verify json");
     assert_eq!(v["mode"], "reference-comparison");
     assert_eq!(v["passed"], true, "comparison must pass: {v}");
-    assert_eq!(v["resident"]["label"], "tuckcore");
+    assert_eq!(v["resident"]["label"], "chinecore");
     assert_eq!(v["streamed"]["label"], "llama.cpp");
     let max_abs = v["logits"]["max_abs_diff"].as_f64().unwrap();
     assert!(max_abs <= 0.01, "within registered tolerance: {max_abs}");
     assert!(v["logits"]["vocab"].as_u64().unwrap() == 512);
 }
 
-/// Q35-0 real-artifact gate (machine-local): with TUCKMILL_QWEN35_GGUF
+/// Q35-0 real-artifact gate (machine-local): with CHINE_QWEN35_GGUF
 /// pointing at the pinned ggml-org Qwen3.5-0.8B Q8_0 file, inspect,
 /// import and plan must work on the real hybrid contract and execution
 /// must stay refused for the precise reason. Machine-local by design:
 /// the artifact is ~834 MB and pinned by SHA-256 (ADR-008).
 #[test]
 fn qwen35_pinned_artifact_contract_when_available() {
-    let Some(gguf) = std::env::var("TUCKMILL_QWEN35_GGUF")
+    let Some(gguf) = std::env::var("CHINE_QWEN35_GGUF")
         .ok()
         .filter(|p| std::path::Path::new(p).exists())
     else {
-        eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
+        eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
         return;
     };
     let env = TestEnv::new();
@@ -1018,7 +1018,7 @@ fn qwen35_pinned_artifact_contract_when_available() {
 
     // Q35-1E.2: text needs the pinned reference tokenizer (the 'qwen35'
     // pre-tokenizer is never approximated by the built-in BPE).
-    if std::env::var("TUCKMILL_LLAMA_LIB").is_err() {
+    if std::env::var("CHINE_LLAMA_LIB").is_err() {
         let (code, _, stderr) = env.run(&[
             "run",
             "q35",
@@ -1027,7 +1027,7 @@ fn qwen35_pinned_artifact_contract_when_available() {
             "--max-output",
             "1",
             "--engine",
-            "tuckcore",
+            "chinecore",
             "--kernels",
             "metal",
         ]);
@@ -1046,7 +1046,7 @@ fn qwen35_pinned_artifact_contract_when_available() {
         "--max-output",
         "1",
         "--engine",
-        "tuckcore",
+        "chinecore",
     ]);
     assert_eq!(code, 1, "stderr: {stderr}");
     assert!(stderr.contains("resident Metal path only"), "{stderr}");
@@ -1063,13 +1063,13 @@ fn qwen35_pinned_artifact_contract_when_available() {
         "--max-output",
         &max_output.to_string(),
         "--engine",
-        "tuckcore",
+        "chinecore",
         "--kernels",
         "metal",
         "--json",
     ]);
     let v: serde_json::Value = serde_json::from_str(&out).expect("run json");
-    assert_eq!(v["backend"], "tuckcore");
+    assert_eq!(v["backend"], "chinecore");
     assert_eq!(v["synthetic_output"], false);
     let served = v["text"].as_str().expect("text").to_string();
 
@@ -1085,7 +1085,7 @@ fn qwen35_pinned_artifact_contract_when_available() {
             "--max-output",
             "96",
             "--engine",
-            "tuckcore",
+            "chinecore",
             "--kernels",
             "metal",
             "--json",
@@ -1101,15 +1101,15 @@ fn qwen35_pinned_artifact_contract_when_available() {
     // Greedy reference: the CPU oracle over the same reference-tokenized
     // prompt. The GPU path is qualified within 4.9e-4 of this oracle on
     // logits; greedy continuations must be identical token for token.
-    let mut reference = tuckmill_llamaref::LlamaRef::new();
+    let mut reference = chine_llamaref::LlamaRef::new();
     reference
         .open_reference_model(std::path::Path::new(&gguf), true)
         .unwrap();
     let prompt_tokens = reference.tokenize(prompt, false).unwrap();
-    let mut oracle = tuckmill_tuckcore::qwen35_forward::Qwen35Model::open(
+    let mut oracle = chine_chinecore::qwen35_forward::Qwen35Model::open(
         std::path::Path::new(&gguf),
         prompt_tokens.len() + max_output,
-        tuckmill_tuckcore::qwen35_kv::KvPrecision::F16,
+        chine_chinecore::qwen35_kv::KvPrecision::F16,
     )
     .unwrap();
     let mut logits = Vec::new();
@@ -1140,39 +1140,37 @@ fn qwen35_pinned_artifact_contract_when_available() {
     assert_eq!(served, expected, "greedy output equals the CPU oracle");
 }
 
-/// Q35-1D reference gate (machine-local): the complete TuckCore Qwen3.5
+/// Q35-1D reference gate (machine-local): the complete ChineCore Qwen3.5
 /// CPU forward pass must agree with the pinned llama.cpp reference under
 /// identical token IDs and the declared f16 KV precision. Requires
-/// TUCKMILL_QWEN35_GGUF and TUCKMILL_LLAMA_LIB; run with --release (the
+/// CHINE_QWEN35_GGUF and CHINE_LLAMA_LIB; run with --release (the
 /// scalar rows are slow in debug).
 #[test]
 fn qwen35_teacher_forced_logits_match_reference_when_available() {
-    let Some(gguf) = std::env::var("TUCKMILL_QWEN35_GGUF")
+    let Some(gguf) = std::env::var("CHINE_QWEN35_GGUF")
         .ok()
         .map(std::path::PathBuf::from)
         .filter(|p| p.exists())
     else {
-        eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
+        eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
         return;
     };
-    if std::env::var("TUCKMILL_LLAMA_LIB").is_err() {
-        eprintln!(
-            "skipping: TUCKMILL_LLAMA_LIB not set (reference comparison needs the pinned shim)"
-        );
+    if std::env::var("CHINE_LLAMA_LIB").is_err() {
+        eprintln!("skipping: CHINE_LLAMA_LIB not set (reference comparison needs the pinned shim)");
         return;
     }
     let tokens = [9707u32, 11, 1879, 1000, 358, 1079, 13, 1000];
 
-    let mut model = tuckmill_tuckcore::qwen35_forward::Qwen35Model::open(
+    let mut model = chine_chinecore::qwen35_forward::Qwen35Model::open(
         &gguf,
         16,
-        tuckmill_tuckcore::qwen35_kv::KvPrecision::F16,
+        chine_chinecore::qwen35_kv::KvPrecision::F16,
     )
     .unwrap();
     let mut ours = Vec::new();
     model.forward_tokens(&tokens, &mut ours).unwrap();
 
-    let mut reference = tuckmill_llamaref::LlamaRef::new();
+    let mut reference = chine_llamaref::LlamaRef::new();
     reference.open_reference_model(&gguf, true).unwrap();
     let theirs = reference.teacher_forced_logits(&tokens).unwrap();
 
@@ -1217,15 +1215,14 @@ fn qwen35_teacher_forced_logits_match_reference_when_available() {
     // Q35-2C: the complete GPU model executes the same tokens and is
     // compared against the pinned reference as well. Skips (loudly) only
     // when no Metal device is available.
-    match tuckmill_tuckcore::qwen35_gpu::Qwen35Gpu::open() {
+    match chine_chinecore::qwen35_gpu::Qwen35Gpu::open() {
         Ok(gpu) => {
             let source =
-                tuckmill_tuckcore::qwen35_forward::ArtifactTensorSource::open(&gguf).unwrap();
-            use tuckmill_tuckcore::qwen35_forward::TensorSource;
-            let graph =
-                tuckmill_tuckcore::engine::adapters::qwen35(source.config(), source.layout());
-            let plan = tuckmill_tuckcore::engine::metal::alloc_plan(&graph, &source, 16).unwrap();
-            let model = tuckmill_tuckcore::engine::metal::EngineModel::load(
+                chine_chinecore::qwen35_forward::ArtifactTensorSource::open(&gguf).unwrap();
+            use chine_chinecore::qwen35_forward::TensorSource;
+            let graph = chine_chinecore::engine::adapters::qwen35(source.config(), source.layout());
+            let plan = chine_chinecore::engine::metal::alloc_plan(&graph, &source, 16).unwrap();
+            let model = chine_chinecore::engine::metal::EngineModel::load(
                 gpu,
                 graph,
                 &source,
@@ -1262,8 +1259,8 @@ fn qwen35_teacher_forced_logits_match_reference_when_available() {
         }
         Err(e) => {
             assert!(
-                std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-                "TUCKMILL_REQUIRE_METAL is set but the GPU model could not open: {e}"
+                std::env::var("CHINE_REQUIRE_METAL").is_err(),
+                "CHINE_REQUIRE_METAL is set but the GPU model could not open: {e}"
             );
             eprintln!("skipping GPU model comparison: no Metal device ({e})");
         }
@@ -1277,9 +1274,9 @@ fn worker_and_adapter_consistency() {
     let env = TestEnv::new();
     let registry = AdapterRegistry::builtin().unwrap();
     let adapter = registry.find("qwen3").unwrap();
-    let insp = tuckmill_manifest::gguf::inspect(
+    let insp = chine_manifest::gguf::inspect(
         Path::new(&env.fixture),
-        &tuckmill_manifest::gguf::Limits::default(),
+        &chine_manifest::gguf::Limits::default(),
     )
     .unwrap();
     adapter.validate_metadata(&insp).unwrap();
@@ -1305,9 +1302,9 @@ fn verify_records_requested_and_resolved_selection() {
     ]);
     let v: serde_json::Value = serde_json::from_str(&out).expect("verify json");
     assert_eq!(v["passed"], true, "verify must pass: {v}");
-    assert_eq!(v["config"]["tuckcore_kernels_requested"], "scalar");
-    assert_eq!(v["config"]["tuckcore_storage_requested"], "owned");
-    let resolved = &v["config"]["resolved_tuckcore"];
+    assert_eq!(v["config"]["chinecore_kernels_requested"], "scalar");
+    assert_eq!(v["config"]["chinecore_storage_requested"], "owned");
+    let resolved = &v["config"]["resolved_chinecore"];
     assert_eq!(resolved["kernel_impl"], "scalar");
     assert_eq!(resolved["storage_mode"], "owned");
     assert_eq!(v["resident"]["stats"]["kernel_impl"], "scalar");
@@ -1347,8 +1344,8 @@ fn verify_records_requested_and_resolved_selection() {
     let v3: serde_json::Value = serde_json::from_str(&out3).unwrap();
     assert_eq!(v3["passed"], true, "verify must pass: {v3}");
     assert_ne!(v3["config_id"], v["config_id"]);
-    assert_eq!(v3["config"]["resolved_tuckcore"]["kernel_impl"], "neon");
-    assert_eq!(v3["config"]["resolved_tuckcore"]["storage_mode"], "mapped");
+    assert_eq!(v3["config"]["resolved_chinecore"]["kernel_impl"], "neon");
+    assert_eq!(v3["config"]["resolved_chinecore"]["storage_mode"], "mapped");
     assert_eq!(v3["resident"]["stats"]["storage"]["mode"], "mapped");
 }
 
@@ -1396,27 +1393,25 @@ fn bench_warm_repetitions_and_long_output_drain() {
 /// ADR-013 reference gate (machine-local): Gemma 3 on the unified engine
 /// (Metal, f16 KV) agrees with the pinned llama.cpp reference (CPU, f16 KV)
 /// on teacher-forced logits over real text with BOS, at lengths below and
-/// past the 512-token sliding window. Requires TUCKMILL_GEMMA3_GGUF and
-/// TUCKMILL_LLAMA_LIB.
+/// past the 512-token sliding window. Requires CHINE_GEMMA3_GGUF and
+/// CHINE_LLAMA_LIB.
 #[test]
 fn gemma3_engine_logits_match_reference_when_available() {
-    let Some(gguf) = std::env::var("TUCKMILL_GEMMA3_GGUF")
+    let Some(gguf) = std::env::var("CHINE_GEMMA3_GGUF")
         .ok()
         .map(std::path::PathBuf::from)
         .filter(|p| p.exists())
     else {
-        eprintln!("skipping: TUCKMILL_GEMMA3_GGUF not set (pinned Gemma 3 1B Q8_0)");
+        eprintln!("skipping: CHINE_GEMMA3_GGUF not set (pinned Gemma 3 1B Q8_0)");
         return;
     };
-    if std::env::var("TUCKMILL_LLAMA_LIB").is_err() {
-        eprintln!(
-            "skipping: TUCKMILL_LLAMA_LIB not set (reference comparison needs the pinned shim)"
-        );
+    if std::env::var("CHINE_LLAMA_LIB").is_err() {
+        eprintln!("skipping: CHINE_LLAMA_LIB not set (reference comparison needs the pinned shim)");
         return;
     }
-    let mut reference = tuckmill_llamaref::LlamaRef::new();
+    let mut reference = chine_llamaref::LlamaRef::new();
     reference.open_reference_model(&gguf, true).unwrap();
-    let mut metal_reference = tuckmill_llamaref::LlamaRef::new();
+    let mut metal_reference = chine_llamaref::LlamaRef::new();
     metal_reference
         .open_reference_model_with(&gguf, true, 99)
         .unwrap();
@@ -1433,14 +1428,14 @@ fn gemma3_engine_logits_match_reference_when_available() {
     );
 
     let file = std::fs::File::open(&gguf).unwrap();
-    let insp = tuckmill_manifest::gguf::inspect(&gguf, &tuckmill_manifest::gguf::Limits::default())
-        .unwrap();
-    let source = tuckmill_tuckcore::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
-    let graph = tuckmill_tuckcore::engine::adapters::gemma3(&insp).unwrap();
+    let insp =
+        chine_manifest::gguf::inspect(&gguf, &chine_manifest::gguf::Limits::default()).unwrap();
+    let source = chine_chinecore::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
+    let graph = chine_chinecore::engine::adapters::gemma3(&insp).unwrap();
     let capacity = all.len() + 8;
-    let plan = tuckmill_tuckcore::engine::metal::alloc_plan(&graph, &source, capacity).unwrap();
-    let model = tuckmill_tuckcore::engine::metal::EngineModel::load(
-        tuckmill_tuckcore::qwen35_gpu::Qwen35Gpu::open().unwrap(),
+    let plan = chine_chinecore::engine::metal::alloc_plan(&graph, &source, capacity).unwrap();
+    let model = chine_chinecore::engine::metal::EngineModel::load(
+        chine_chinecore::qwen35_gpu::Qwen35Gpu::open().unwrap(),
         graph,
         &source,
         capacity,
@@ -1449,7 +1444,7 @@ fn gemma3_engine_logits_match_reference_when_available() {
     .unwrap();
     assert_eq!(model.allocated_bytes(), plan.total(), "ledger == plan");
 
-    let pb = tuckmill_tuckcore::engine::metal::PREFILL_BATCH;
+    let pb = chine_chinecore::engine::metal::PREFILL_BATCH;
     for len in [2usize, 9, 40, 200, 511, 513, all.len()] {
         let tokens = &all[..len];
         model.reset().unwrap();

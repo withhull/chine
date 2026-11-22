@@ -1,4 +1,4 @@
-# Tuckmill
+# Chine
 
 Local inference for Apple Silicon — 8 GB MacBook Airs through high-memory
 Macs — built around one engine this project owns end to end.
@@ -33,7 +33,7 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
   (`R + U + H ≤ B` admission), an isolated worker, an OpenAI-style
   `/v1/chat/completions` endpoint with SSE, `verify --reference` against
   pinned llama.cpp, labeled bench records.
-- **TuckCore executor**: Qwen3.5 0.8B and 2B, Gemma 3 1B (ADR-013) and
+- **ChineCore executor**: Qwen3.5 0.8B and 2B, Gemma 3 1B (ADR-013) and
   dense Qwen3 all run on the unified Metal engine with batched prefill
   and pipelined greedy decoding. The CPU path (scalar + NEON, bounded
   weight streaming) stays as the CPU executor and arithmetic oracle.
@@ -63,7 +63,7 @@ where a lead is not established.
 **GEMM operand profile (`metal-f16-act`, ADR-010/ADR-011).** Batched
 prefill GEMMs stage dequantized weights and activations as half and
 multiply in half with f32 accumulation — llama.cpp `kernel_mul_mm`
-numerics. This is the default; `--tuckcore-profile oracle-f32` (with
+numerics. This is the default; `--chinecore-profile oracle-f32` (with
 `--kernels metal`) restores f32 operands. Qualified: `verify
 --reference` PASS on the 0.8B / 2B / Qwen3-0.6B (max |Δ| 0.34–0.35
 under the registered 5e-1 Q8_0 policy, generated texts equal); the
@@ -127,16 +127,16 @@ scripts/fetch-llama.sh   # pinned llama.cpp reference + tm shim into .deps/
 ```
 
 ```bash
-tuckmill doctor                                    # device profile, honest labels
-tuckmill inspect model.gguf                        # validate without loading weights
-tuckmill import model.gguf --alias my-model        # atomic, resumable, verified
-tuckmill plan my-model                             # admission, mode, assumptions
-tuckmill run my-model --prompt "..." --engine tuckcore --kernels metal
-tuckmill run my-model --prompt "..." --speculative     # MTP greedy, opt-in
-tuckmill verify my-model --reference              # TuckCore vs llama.cpp logits
-tuckmill bench my-model --engine tuckcore          # labeled benchmark record
-tuckmill serve --engine tuckcore --kernels metal   # loopback API on 127.0.0.1:8378
-scripts/bench-baseline.sh model.gguf               # ABBA: TuckCore vs llama.cpp
+chine doctor                                    # device profile, honest labels
+chine inspect model.gguf                        # validate without loading weights
+chine import model.gguf --alias my-model        # atomic, resumable, verified
+chine plan my-model                             # admission, mode, assumptions
+chine run my-model --prompt "..." --engine chinecore --kernels metal
+chine run my-model --prompt "..." --speculative     # MTP greedy, opt-in
+chine verify my-model --reference              # ChineCore vs llama.cpp logits
+chine bench my-model --engine chinecore          # labeled benchmark record
+chine serve --engine chinecore --kernels metal   # loopback API on 127.0.0.1:8378
+scripts/bench-baseline.sh model.gguf               # ABBA: ChineCore vs llama.cpp
 ```
 
 `serve` accepts `--keep-alive 5m` (or `0`, or `forever`), per-request
@@ -172,7 +172,7 @@ ambition — the tier table above is the scope.
 | `import` / `pack`: resumable chunked-digest imports, atomic publish, lossless packer with per-tile checksums | ✅ |
 | `plan`: `R + U + H ≤ B` admission, KV math, mode selection, typed infeasibility, recorded assumptions | ✅ |
 | `run` / `serve`: isolated worker, framed protocol, streaming, cancellation, bounded queue, loopback HTTP with bearer auth and SSE | ✅ |
-| `verify`: resident vs streamed, and TuckCore vs llama.cpp on identical token IDs with registered tolerances | ✅ |
+| `verify`: resident vs streamed, and ChineCore vs llama.cpp on identical token IDs with registered tolerances | ✅ |
 | `bench`: standard-v1 records with cache-state labels and caveats | ✅ |
 | Governor: Normal / Constrained / Paused / Draining / Failed, driven by real memory-pressure and thermal signals | ✅ |
 | Qwen3.5 hybrid on Metal (unified engine): Gated DeltaNet and gated attention, packed f16 KV, batched prefill, device greedy sampling | ✅ experimental; chat and raw completion (pinned 0.8B and 2B templates, text-only subset, thinking off by default) |
@@ -192,7 +192,7 @@ Rust supervisor: admission, queue, governor, cancellation, non-content logs
 planner -> versioned ExecutionPlan (mode, budget, assumptions, confidence)
         |
 InferenceBackend interface (ADR-005)
-   ├── tuckcore         custom executor: unified Metal engine (ADR-011), CPU oracle
+   ├── chinecore         custom executor: unified Metal engine (ADR-011), CPU oracle
    ├── reference        pinned llama.cpp/ggml (compatibility and oracle)
    └── reference-test   synthetic pipeline engine (disclosed)
 ```
@@ -203,8 +203,8 @@ InferenceBackend interface (ADR-005)
   metadata and device measurements; projections stay `estimated` until
   they are measured.
 - **Store** (`crates/store`): keeps data under
-  `~/Library/Application Support/Tuckmill` (override with
-  `TUCKMILL_DATA_DIR`), installs atomically and never deletes sources.
+  `~/Library/Application Support/Chine` (override with
+  `CHINE_DATA_DIR`), installs atomically and never deletes sources.
 
 ## Repository layout
 
@@ -213,13 +213,13 @@ crates/manifest     schemas, GGUF/Safetensors inspection, adapters, fixtures
 crates/backend      versioned inference-backend interface
 crates/planner      device profiler, admission and KV math, cost model
 crates/store        imports, packing, cache/GC
-crates/tuckcore     custom executor: unified engine, CPU oracle, loader, tokenizer
+crates/chinecore     custom executor: unified engine, CPU oracle, loader, tokenizer
 crates/metal        typed Rust handles over the Metal C ABI
 crates/llamaref     pinned llama.cpp reference backend
 crates/supervisor   queue, governor, worker protocol, API, bench, verify
-crates/cli          the tuckmill binary
+crates/cli          the chine binary
 native/executor     executor C ABI header and worker protocol spec
-native/metal        Metal C ABI (tm_metal.h) and MSL kernels (ADR-007)
+native/metal        Metal C ABI (ch_metal.h) and MSL kernels (ADR-007)
 native/llamaref     narrow C shim over pinned llama.cpp
 kernels/            kernel work-package registry
 adapters/           model-family adapter specs

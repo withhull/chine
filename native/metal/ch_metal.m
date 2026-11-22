@@ -1,5 +1,5 @@
 /*
- * tm_metal.m — Objective-C implementation of the TuckCore <-> Metal ABI
+ * ch_metal.m — Objective-C implementation of the ChineCore <-> Metal ABI
  * (ADR-007). Compiled without ARC: this is a C-style FFI layer with
  * explicit retain/release ownership; completion counters and the live
  * allocation figure are C11 atomics so completion handlers can update them
@@ -15,37 +15,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tm_metal.h"
+#include "ch_metal.h"
 
-/* 64 partial (f32 value, u32 index) pairs for tm_metal_argmax_f32. */
-#define TM_ARGMAX_PARTIAL_BYTES 512u
+/* 64 partial (f32 value, u32 index) pairs for ch_metal_argmax_f32. */
+#define CH_ARGMAX_PARTIAL_BYTES 512u
 
-#define TM_PROFILE_SLOTS 64
-#define TM_PROFILE_NAME 40
+#define CH_PROFILE_SLOTS 64
+#define CH_PROFILE_NAME 40
 /* Grouped per-operator attribution: one label record per dispatch inside
  * the shared command buffer; deltas between consecutive counter samples
  * fold into the profile slots at the next fence. */
-#define TM_GROUP_LABELS 2048
+#define CH_GROUP_LABELS 2048
 
 typedef struct {
-    char name[TM_PROFILE_NAME];
+    char name[CH_PROFILE_NAME];
     uint32_t idx;
-} tm_group_label;
+} ch_group_label;
 
 /* One operator label's accumulated GPU time (profiling only). */
 typedef struct {
-    char name[TM_PROFILE_NAME];
+    char name[CH_PROFILE_NAME];
     uint64_t nanos;
     uint64_t count;
-} tm_profile_slot;
+} ch_profile_slot;
 
 /* A label copied by value into completion handlers, so no pointer has to
  * outlive the dispatch call that produced it. */
 typedef struct {
-    char s[TM_PROFILE_NAME];
-} tm_label;
+    char s[CH_PROFILE_NAME];
+} ch_label;
 
-struct tm_metal_ctx {
+struct ch_metal_ctx {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
@@ -134,7 +134,7 @@ struct tm_metal_ctx {
     int gdn_chunk_generic;
     os_unfair_lock profile_lock;
     uint32_t profile_used;
-    tm_profile_slot profile[TM_PROFILE_SLOTS];
+    ch_profile_slot profile[CH_PROFILE_SLOTS];
     /* Grouped per-operator attribution (profiling in grouped mode): GPU
      * timestamps sampled at dispatch boundaries inside the shared
      * command buffer, resolved host-side at the fence (Shared storage)
@@ -150,7 +150,7 @@ struct tm_metal_ctx {
     uint32_t counter_label_base; /* counter_label_used at begin_group */
     int counter_ready;
     int counter_overflow;
-    tm_group_label counter_labels[TM_GROUP_LABELS];
+    ch_group_label counter_labels[CH_GROUP_LABELS];
     _Atomic(uint64_t) allocated;
     /* Bytes leased by pending command buffers: physically alive until the
      * completion handler runs, even if their handles were already freed.
@@ -160,14 +160,14 @@ struct tm_metal_ctx {
     _Atomic(uint64_t) leased;
 };
 
-struct tm_metal_buffer {
+struct ch_metal_buffer {
     id<MTLBuffer> buffer; /* retained */
     size_t len;
     int shared;
-    tm_metal_ctx *owner; /* not retained; RAII handles order lifetime */
+    ch_metal_ctx *owner; /* not retained; RAII handles order lifetime */
 };
 
-static void tm_set_err(char *err, size_t cap, NSString *msg) {
+static void ch_set_err(char *err, size_t cap, NSString *msg) {
     if (err == NULL || cap == 0) {
         return;
     }
@@ -175,32 +175,32 @@ static void tm_set_err(char *err, size_t cap, NSString *msg) {
     snprintf(err, cap, "%s", utf8 != NULL ? utf8 : "unknown metal error");
 }
 
-static int tm_fail(char *err, size_t cap, int code, NSString *msg) {
-    tm_set_err(err, cap, msg);
+static int ch_fail(char *err, size_t cap, int code, NSString *msg) {
+    ch_set_err(err, cap, msg);
     return code;
 }
 
-static int tm_check_ctx(tm_metal_ctx *ctx, char *err, size_t cap, const char *what) {
+static int ch_check_ctx(ch_metal_ctx *ctx, char *err, size_t cap, const char *what) {
     if (ctx == NULL) {
-        return tm_fail(err, cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: null context", what]);
     }
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
 /* Validates a buffer handle: owned by this context, non-null, long enough. */
-static int tm_check_buffer(tm_metal_ctx *ctx, tm_metal_buffer *b, size_t need,
+static int ch_check_buffer(ch_metal_ctx *ctx, ch_metal_buffer *b, size_t need,
                            char *err, size_t cap, const char *name) {
     if (b == NULL || b->owner != ctx) {
-        return tm_fail(err, cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: buffer does not belong to this context", name]);
     }
     if (need == 0 || b->len < need) {
-        return tm_fail(err, cap, TM_METAL_ERR_BOUNDS,
+        return ch_fail(err, cap, CH_METAL_ERR_BOUNDS,
                        [NSString stringWithFormat:@"%s: buffer holds %zu bytes but %zu are required",
                                                   name, b->len, need]);
     }
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
 /* Commits a command buffer, retaining `in_flight` (the buffers its work
@@ -211,7 +211,7 @@ static int tm_check_buffer(tm_metal_ctx *ctx, tm_metal_buffer *b, size_t need,
  * still using. */
 /* Fold `nanos` into the named profile slot (single context, serialized
  * by the caller). */
-static void tm_profile_add(tm_metal_ctx *ctx, const char *name, uint64_t nanos) {
+static void ch_profile_add(ch_metal_ctx *ctx, const char *name, uint64_t nanos) {
     if (name == NULL || name[0] == '\0') {
         return;
     }
@@ -220,11 +220,11 @@ static void tm_profile_add(tm_metal_ctx *ctx, const char *name, uint64_t nanos) 
     while (slot < ctx->profile_used && strcmp(ctx->profile[slot].name, name) != 0) {
         slot++;
     }
-    if (slot == ctx->profile_used && slot < TM_PROFILE_SLOTS) {
-        strlcpy(ctx->profile[slot].name, name, TM_PROFILE_NAME);
+    if (slot == ctx->profile_used && slot < CH_PROFILE_SLOTS) {
+        strlcpy(ctx->profile[slot].name, name, CH_PROFILE_NAME);
         ctx->profile_used++;
     }
-    if (slot < TM_PROFILE_SLOTS) {
+    if (slot < CH_PROFILE_SLOTS) {
         ctx->profile[slot].nanos += nanos;
         ctx->profile[slot].count += 1;
     }
@@ -233,7 +233,7 @@ static void tm_profile_add(tm_metal_ctx *ctx, const char *name, uint64_t nanos) 
 
 /* Encode a counter sample at the next dispatch-boundary slot; returns the
  * slot index, or counter_cap when sampling is off or exhausted. */
-static uint32_t tm_counter_sample(tm_metal_ctx *ctx, id<MTLComputeCommandEncoder> enc) {
+static uint32_t ch_counter_sample(ch_metal_ctx *ctx, id<MTLComputeCommandEncoder> enc) {
     if (!atomic_load_explicit(&ctx->profiling, memory_order_relaxed) || !ctx->counter_ready ||
         ctx->counter_used >= ctx->counter_cap) {
         return ctx->counter_cap;
@@ -246,11 +246,11 @@ static uint32_t tm_counter_sample(tm_metal_ctx *ctx, id<MTLComputeCommandEncoder
     return idx;
 }
 
-static int tm_commit(tm_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_flight,
+static int ch_commit(ch_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_flight,
                      const char *what, char *err, size_t cap) {
     (void)err;
     (void)cap;
-    tm_label label = {{0}};
+    ch_label label = {{0}};
     if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed) && what != NULL) {
         strlcpy(label.s, what, sizeof label.s);
     }
@@ -261,7 +261,7 @@ static int tm_commit(tm_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_fli
     atomic_fetch_add_explicit(&ctx->leased, leased, memory_order_relaxed);
     atomic_fetch_add_explicit(&ctx->committed, 1, memory_order_relaxed);
     ctx->pending = [cb retain];
-    tm_metal_ctx *c = ctx;
+    ch_metal_ctx *c = ctx;
     [cb addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
         /* Touch the lease array so the block capture keeps it (and every
          * leased MTLBuffer) alive until completion; the array is released
@@ -275,23 +275,23 @@ static int tm_commit(tm_metal_ctx *ctx, id<MTLCommandBuffer> cb, NSArray *in_fli
         atomic_store_explicit(&c->last_gpu_nanos, (uint64_t)nanos, memory_order_relaxed);
         atomic_fetch_add_explicit(&c->gpu_nanos_total, (uint64_t)nanos, memory_order_relaxed);
         if (label.s[0] != '\0') {
-            tm_profile_add(c, label.s, (uint64_t)nanos);
+            ch_profile_add(c, label.s, (uint64_t)nanos);
         }
         atomic_fetch_add_explicit(&c->completed, 1, memory_order_release);
     }];
     [cb commit];
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
 /* Waits for every committed command buffer. Shared by fence and the copy
  * contract: host copies are ordered after all committed GPU work. */
-static int tm_wait_pending(tm_metal_ctx *ctx, char *err, size_t cap) {
+static int ch_wait_pending(ch_metal_ctx *ctx, char *err, size_t cap) {
     if (ctx->pending == nil) {
-        return TM_METAL_OK;
+        return CH_METAL_OK;
     }
     [ctx->pending waitUntilCompleted];
     if (ctx->pending.status == MTLCommandBufferStatusError) {
-        return tm_fail(err, cap, TM_METAL_ERR_INTERNAL,
+        return ch_fail(err, cap, CH_METAL_ERR_INTERNAL,
                        [NSString stringWithFormat:@"command buffer failed: %@",
                                                   ctx->pending.error != nil
                                                       ? [ctx->pending.error localizedDescription]
@@ -316,7 +316,7 @@ static int tm_wait_pending(tm_metal_ctx *ctx, char *err, size_t cap) {
                     if (end == MTLCounterErrorValue || begin == MTLCounterErrorValue || end <= begin) {
                         continue; /* unresolved or non-monotonic sample */
                     }
-                    tm_profile_add(ctx, ctx->counter_labels[i].name, end - begin);
+                    ch_profile_add(ctx, ctx->counter_labels[i].name, end - begin);
                 }
             }
         }
@@ -334,22 +334,22 @@ static int tm_wait_pending(tm_metal_ctx *ctx, char *err, size_t cap) {
     for (int spin = 0; spin < 40000; ++spin) {
         if (atomic_load_explicit(&ctx->completed, memory_order_relaxed) >=
             atomic_load_explicit(&ctx->committed, memory_order_relaxed)) {
-            return TM_METAL_OK;
+            return CH_METAL_OK;
         }
         usleep(50);
     }
-    return tm_fail(err, cap, TM_METAL_ERR_INTERNAL,
+    return ch_fail(err, cap, CH_METAL_ERR_INTERNAL,
                    @"fence: command buffers completed but completion-handler accounting did not settle");
 }
 
-int tm_metal_available(void) {
+int ch_metal_available(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         return device != nil ? 1 : 0;
     }
 }
 
-const char *tm_metal_runtime_info(void) {
+const char *ch_metal_runtime_info(void) {
     static char info[256];
     static int filled = 0;
     if (!filled) {
@@ -368,13 +368,13 @@ const char *tm_metal_runtime_info(void) {
     return info;
 }
 
-static id<MTLComputePipelineState> tm_pipeline(tm_metal_ctx *ctx, NSString *name,
+static id<MTLComputePipelineState> ch_pipeline(ch_metal_ctx *ctx, NSString *name,
                                                NSError **out_error) {
     id<MTLFunction> fn = [ctx->library newFunctionWithName:name];
     if (fn == nil) {
         if (out_error != NULL) {
-            *out_error = [NSError errorWithDomain:@"tm_metal"
-                                             code:TM_METAL_ERR_SOURCE
+            *out_error = [NSError errorWithDomain:@"ch_metal"
+                                             code:CH_METAL_ERR_SOURCE
                                          userInfo:@{NSLocalizedDescriptionKey:
                                                         [NSString stringWithFormat:@"kernel %@ not found in the MSL source", name]}];
         }
@@ -385,21 +385,21 @@ static id<MTLComputePipelineState> tm_pipeline(tm_metal_ctx *ctx, NSString *name
     return pso;
 }
 
-tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap) {
+ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap) {
     if (msl_source == NULL) {
-        tm_set_err(err, err_cap, @"null MSL source");
+        ch_set_err(err, err_cap, @"null MSL source");
         return NULL;
     }
     @autoreleasepool {
-        tm_metal_ctx *ctx = calloc(1, sizeof(tm_metal_ctx));
+        ch_metal_ctx *ctx = calloc(1, sizeof(ch_metal_ctx));
         if (ctx == NULL) {
-            tm_set_err(err, err_cap, @"context allocation failed");
+            ch_set_err(err, err_cap, @"context allocation failed");
             return NULL;
         }
         /* Create-rule: MTLCreateSystemDefaultDevice returns +1. */
         ctx->device = MTLCreateSystemDefaultDevice();
         if (ctx->device == nil) {
-            tm_set_err(err, err_cap, @"no Metal device available");
+            ch_set_err(err, err_cap, @"no Metal device available");
             free(ctx);
             return NULL;
         }
@@ -434,93 +434,93 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
         /* New-rule: +1. */
         ctx->library = [ctx->device newLibraryWithSource:source options:nil error:&error];
         if (ctx->library == nil) {
-            tm_set_err(err, err_cap,
+            ch_set_err(err, err_cap,
                        [NSString stringWithFormat:@"MSL compilation failed: %@",
                                                   error != nil ? [error localizedDescription] : @"unknown"]);
-            tm_metal_destroy(ctx);
+            ch_metal_destroy(ctx);
             return NULL;
         }
-        /* tm_pipeline returns +1 (New-rule inside). */
-        ctx->pso_scale = tm_pipeline(ctx, @"tm_scale_f32", &error);
-        ctx->pso_axpy = tm_pipeline(ctx, @"tm_axpy_f32", &error);
-        ctx->pso_copy = tm_pipeline(ctx, @"tm_copy_f32", &error);
-        ctx->pso_argmax_partial = tm_pipeline(ctx, @"tm_argmax_partial", &error);
-        ctx->pso_argmax_final = tm_pipeline(ctx, @"tm_argmax_final", &error);
-        ctx->pso_q8row_indirect = tm_pipeline(ctx, @"tm_q8_0_row_indirect_f32", &error);
-        ctx->pso_q35_conv_chunk = tm_pipeline(ctx, @"tm_qwen35_conv_chunk", &error);
-        ctx->pso_q35_conv_chunk_shift = tm_pipeline(ctx, @"tm_qwen35_conv_chunk_shift", &error);
-        ctx->pso_q35_split_qkv_chunk = tm_pipeline(ctx, @"tm_qwen35_split_qkv_chunk", &error);
-        ctx->pso_q35_beta_decay_chunk = tm_pipeline(ctx, @"tm_qwen35_beta_decay_chunk", &error);
-        ctx->pso_q35_gdn_chunk = tm_pipeline(ctx, @"tm_qwen35_gdn_chunk", &error);
-        ctx->pso_q35_gdn_chunk_k128 = tm_pipeline(ctx, @"tm_qwen35_gdn_chunk_k128", &error);
-        ctx->pso_q35_rope_chunk = tm_pipeline(ctx, @"tm_qwen35_rope_partial_chunk", &error);
-        ctx->pso_q35_kv_store_chunk = tm_pipeline(ctx, @"tm_qwen35_kv_store_f16_chunk", &error);
-        ctx->pso_q35_attention_chunk = tm_pipeline(ctx, @"tm_qwen35_attention_f16_chunk", &error);
-        ctx->pso_q35_attn_sk_256x4 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_256x4", &error);
-        ctx->pso_q35_attn_sk_16x2 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_16x2", &error);
-        ctx->pso_q35_attn_sk_128x2 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_128x2", &error);
-        ctx->pso_q35_attn_sk_128x4 = tm_pipeline(ctx, @"tm_qwen35_attn_sk_128x4", &error);
+        /* ch_pipeline returns +1 (New-rule inside). */
+        ctx->pso_scale = ch_pipeline(ctx, @"ch_scale_f32", &error);
+        ctx->pso_axpy = ch_pipeline(ctx, @"ch_axpy_f32", &error);
+        ctx->pso_copy = ch_pipeline(ctx, @"ch_copy_f32", &error);
+        ctx->pso_argmax_partial = ch_pipeline(ctx, @"ch_argmax_partial", &error);
+        ctx->pso_argmax_final = ch_pipeline(ctx, @"ch_argmax_final", &error);
+        ctx->pso_q8row_indirect = ch_pipeline(ctx, @"ch_q8_0_row_indirect_f32", &error);
+        ctx->pso_q35_conv_chunk = ch_pipeline(ctx, @"ch_qwen35_conv_chunk", &error);
+        ctx->pso_q35_conv_chunk_shift = ch_pipeline(ctx, @"ch_qwen35_conv_chunk_shift", &error);
+        ctx->pso_q35_split_qkv_chunk = ch_pipeline(ctx, @"ch_qwen35_split_qkv_chunk", &error);
+        ctx->pso_q35_beta_decay_chunk = ch_pipeline(ctx, @"ch_qwen35_beta_decay_chunk", &error);
+        ctx->pso_q35_gdn_chunk = ch_pipeline(ctx, @"ch_qwen35_gdn_chunk", &error);
+        ctx->pso_q35_gdn_chunk_k128 = ch_pipeline(ctx, @"ch_qwen35_gdn_chunk_k128", &error);
+        ctx->pso_q35_rope_chunk = ch_pipeline(ctx, @"ch_qwen35_rope_partial_chunk", &error);
+        ctx->pso_q35_kv_store_chunk = ch_pipeline(ctx, @"ch_qwen35_kv_store_f16_chunk", &error);
+        ctx->pso_q35_attention_chunk = ch_pipeline(ctx, @"ch_qwen35_attention_f16_chunk", &error);
+        ctx->pso_q35_attn_sk_256x4 = ch_pipeline(ctx, @"ch_qwen35_attn_sk_256x4", &error);
+        ctx->pso_q35_attn_sk_16x2 = ch_pipeline(ctx, @"ch_qwen35_attn_sk_16x2", &error);
+        ctx->pso_q35_attn_sk_128x2 = ch_pipeline(ctx, @"ch_qwen35_attn_sk_128x2", &error);
+        ctx->pso_q35_attn_sk_128x4 = ch_pipeline(ctx, @"ch_qwen35_attn_sk_128x4", &error);
         ctx->pso_q35_attn_sk_f32_16x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_f32_16x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_f32_16x2", &error);
         ctx->pso_q35_attn_sk_f32_128x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_f32_128x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_f32_128x2", &error);
         ctx->pso_q35_attn_sk_f32_128x4 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_f32_128x4", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_f32_128x4", &error);
         ctx->pso_q35_attn_sk_merge_256x4 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_256x4", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_merge_256x4", &error);
         ctx->pso_q35_attn_sk_merge_16x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_16x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_merge_16x2", &error);
         ctx->pso_q35_attn_sk_merge_128x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_128x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_merge_128x2", &error);
         ctx->pso_q35_attn_sk_merge_128x4 =
-            tm_pipeline(ctx, @"tm_qwen35_attn_sk_merge_128x4", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attn_sk_merge_128x4", &error);
         ctx->pso_q35_attention_gqa_256x4 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_256x4", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_256x4", &error);
         ctx->pso_q35_attention_gqa_16x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_16x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_16x2", &error);
         ctx->pso_q35_attention_gqa_128x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_128x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_128x2", &error);
         ctx->pso_q35_attention_gqa_128x4 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_128x4", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_128x4", &error);
         ctx->pso_q35_attention_gqa_f32_16x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_f32_16x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_f32_16x2", &error);
         ctx->pso_q35_attention_gqa_f32_128x2 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_f32_128x2", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_f32_128x2", &error);
         ctx->pso_q35_attention_gqa_f32_128x4 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_gqa_f32_128x4", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_gqa_f32_128x4", &error);
         ctx->pso_q35_attention_chunk_f32 =
-            tm_pipeline(ctx, @"tm_qwen35_attention_f32_chunk", &error);
+            ch_pipeline(ctx, @"ch_qwen35_attention_f32_chunk", &error);
         ctx->pso_q35_kv_store_chunk_f32 =
-            tm_pipeline(ctx, @"tm_qwen35_kv_store_f32_chunk", &error);
-        ctx->pso_f16row_indirect = tm_pipeline(ctx, @"tm_f16_row_indirect_f32", &error);
-        ctx->pso_f16f32 = tm_pipeline(ctx, @"tm_cast_f16_f32", &error);
-        ctx->pso_f32f16 = tm_pipeline(ctx, @"tm_cast_f32_f16", &error);
-        ctx->pso_q8gemv = tm_pipeline(ctx, @"tm_q8_0_gemv", &error);
-        ctx->pso_f16gemv = tm_pipeline(ctx, @"tm_f16_gemv", &error);
-        ctx->pso_q8row = tm_pipeline(ctx, @"tm_q8_0_row_f32", &error);
-        ctx->pso_rmsnorm = tm_pipeline(ctx, @"tm_rmsnorm_f32", &error);
-        ctx->pso_norm_add = tm_pipeline(ctx, @"tm_norm_add_f32", &error);
-        ctx->pso_qk_norm = tm_pipeline(ctx, @"tm_qk_norm_f32", &error);
-        ctx->pso_silu = tm_pipeline(ctx, @"tm_silu_mul_f32", &error);
-        ctx->pso_gelu_tanh_mul = tm_pipeline(ctx, @"tm_gelu_tanh_mul_f32", &error);
-        ctx->pso_f16row = tm_pipeline(ctx, @"tm_f16_row_f32", &error);
-        ctx->pso_q8gemm = tm_pipeline(ctx, @"tm_q8_0_gemm", &error);
-        ctx->pso_q8gemm_mma = tm_pipeline(ctx, @"tm_q8_0_gemm_mma", &error);
-        ctx->pso_q8gemm_mma_f16op = tm_pipeline(ctx, @"tm_q8_0_gemm_mma_f16op", &error);
-        ctx->pso_f16gemm = tm_pipeline(ctx, @"tm_f16_gemm", &error);
-        ctx->pso_q35_conv = tm_pipeline(ctx, @"tm_qwen35_conv_step", &error);
-        ctx->pso_q35_conv_shift = tm_pipeline(ctx, @"tm_qwen35_conv_shift", &error);
-        ctx->pso_q35_l2norm = tm_pipeline(ctx, @"tm_qwen35_l2norm_heads", &error);
-        ctx->pso_q35_beta_decay = tm_pipeline(ctx, @"tm_qwen35_beta_decay", &error);
-        ctx->pso_q35_gdn_step = tm_pipeline(ctx, @"tm_qwen35_gdn_step", &error);
-        ctx->pso_q35_gated_norm = tm_pipeline(ctx, @"tm_qwen35_gated_norm", &error);
-        ctx->pso_q35_qg_split = tm_pipeline(ctx, @"tm_qwen35_q_gate_split", &error);
-        ctx->pso_q35_rope_partial = tm_pipeline(ctx, @"tm_qwen35_rope_partial_f32", &error);
-        ctx->pso_q35_kv_store_f16 = tm_pipeline(ctx, @"tm_qwen35_kv_store_f16", &error);
-        ctx->pso_q35_attention_f16 = tm_pipeline(ctx, @"tm_qwen35_attention_f16", &error);
-        ctx->pso_q35_attn_gate = tm_pipeline(ctx, @"tm_qwen35_attn_gate", &error);
-        ctx->pso_q35_silu = tm_pipeline(ctx, @"tm_qwen35_silu", &error);
-        ctx->pso_q35_split_qkv = tm_pipeline(ctx, @"tm_qwen35_split_qkv", &error);
+            ch_pipeline(ctx, @"ch_qwen35_kv_store_f32_chunk", &error);
+        ctx->pso_f16row_indirect = ch_pipeline(ctx, @"ch_f16_row_indirect_f32", &error);
+        ctx->pso_f16f32 = ch_pipeline(ctx, @"ch_cast_f16_f32", &error);
+        ctx->pso_f32f16 = ch_pipeline(ctx, @"ch_cast_f32_f16", &error);
+        ctx->pso_q8gemv = ch_pipeline(ctx, @"ch_q8_0_gemv", &error);
+        ctx->pso_f16gemv = ch_pipeline(ctx, @"ch_f16_gemv", &error);
+        ctx->pso_q8row = ch_pipeline(ctx, @"ch_q8_0_row_f32", &error);
+        ctx->pso_rmsnorm = ch_pipeline(ctx, @"ch_rmsnorm_f32", &error);
+        ctx->pso_norm_add = ch_pipeline(ctx, @"ch_norm_add_f32", &error);
+        ctx->pso_qk_norm = ch_pipeline(ctx, @"ch_qk_norm_f32", &error);
+        ctx->pso_silu = ch_pipeline(ctx, @"ch_silu_mul_f32", &error);
+        ctx->pso_gelu_tanh_mul = ch_pipeline(ctx, @"ch_gelu_tanh_mul_f32", &error);
+        ctx->pso_f16row = ch_pipeline(ctx, @"ch_f16_row_f32", &error);
+        ctx->pso_q8gemm = ch_pipeline(ctx, @"ch_q8_0_gemm", &error);
+        ctx->pso_q8gemm_mma = ch_pipeline(ctx, @"ch_q8_0_gemm_mma", &error);
+        ctx->pso_q8gemm_mma_f16op = ch_pipeline(ctx, @"ch_q8_0_gemm_mma_f16op", &error);
+        ctx->pso_f16gemm = ch_pipeline(ctx, @"ch_f16_gemm", &error);
+        ctx->pso_q35_conv = ch_pipeline(ctx, @"ch_qwen35_conv_step", &error);
+        ctx->pso_q35_conv_shift = ch_pipeline(ctx, @"ch_qwen35_conv_shift", &error);
+        ctx->pso_q35_l2norm = ch_pipeline(ctx, @"ch_qwen35_l2norm_heads", &error);
+        ctx->pso_q35_beta_decay = ch_pipeline(ctx, @"ch_qwen35_beta_decay", &error);
+        ctx->pso_q35_gdn_step = ch_pipeline(ctx, @"ch_qwen35_gdn_step", &error);
+        ctx->pso_q35_gated_norm = ch_pipeline(ctx, @"ch_qwen35_gated_norm", &error);
+        ctx->pso_q35_qg_split = ch_pipeline(ctx, @"ch_qwen35_q_gate_split", &error);
+        ctx->pso_q35_rope_partial = ch_pipeline(ctx, @"ch_qwen35_rope_partial_f32", &error);
+        ctx->pso_q35_kv_store_f16 = ch_pipeline(ctx, @"ch_qwen35_kv_store_f16", &error);
+        ctx->pso_q35_attention_f16 = ch_pipeline(ctx, @"ch_qwen35_attention_f16", &error);
+        ctx->pso_q35_attn_gate = ch_pipeline(ctx, @"ch_qwen35_attn_gate", &error);
+        ctx->pso_q35_silu = ch_pipeline(ctx, @"ch_qwen35_silu", &error);
+        ctx->pso_q35_split_qkv = ch_pipeline(ctx, @"ch_qwen35_split_qkv", &error);
         if (ctx->pso_scale == nil || ctx->pso_axpy == nil || ctx->pso_copy == nil ||
             ctx->pso_argmax_partial == nil || ctx->pso_argmax_final == nil ||
             ctx->pso_q8row_indirect == nil || ctx->pso_f16row_indirect == nil ||
@@ -556,10 +556,10 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_q35_kv_store_f16 == nil || ctx->pso_q35_attention_f16 == nil ||
             ctx->pso_q35_attn_gate == nil || ctx->pso_q35_silu == nil ||
             ctx->pso_q35_split_qkv == nil) {
-            tm_set_err(err, err_cap,
+            ch_set_err(err, err_cap,
                        [NSString stringWithFormat:@"pipeline creation failed: %@",
                                                   error != nil ? [error localizedDescription] : @"unknown"]);
-            tm_metal_destroy(ctx);
+            ch_metal_destroy(ctx);
             return NULL;
         }
         atomic_init(&ctx->committed, 0);
@@ -575,7 +575,7 @@ tm_metal_ctx *tm_metal_create(const char *msl_source, char *err, size_t err_cap)
     }
 }
 
-void tm_metal_destroy(tm_metal_ctx *ctx) {
+void ch_metal_destroy(ch_metal_ctx *ctx) {
     if (ctx == NULL) {
         return;
     }
@@ -598,7 +598,7 @@ void tm_metal_destroy(tm_metal_ctx *ctx) {
         }
         uint64_t still_allocated = atomic_load_explicit(&ctx->allocated, memory_order_relaxed);
         if (still_allocated != 0) {
-            fprintf(stderr, "tm_metal: %llu bytes still allocated at destroy; buffer lifetime bug\n",
+            fprintf(stderr, "ch_metal: %llu bytes still allocated at destroy; buffer lifetime bug\n",
                     (unsigned long long)still_allocated);
         }
         [ctx->counter_buf release];
@@ -659,13 +659,13 @@ void tm_metal_destroy(tm_metal_ctx *ctx) {
     }
 }
 
-tm_metal_buffer *tm_metal_buffer_new(tm_metal_ctx *ctx, size_t bytes, int shared,
+ch_metal_buffer *ch_metal_buffer_new(ch_metal_ctx *ctx, size_t bytes, int shared,
                                      char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "buffer_new") != TM_METAL_OK) {
+    if (ch_check_ctx(ctx, err, err_cap, "buffer_new") != CH_METAL_OK) {
         return NULL;
     }
     if (bytes == 0) {
-        tm_set_err(err, err_cap, @"buffer_new: zero-length allocation");
+        ch_set_err(err, err_cap, @"buffer_new: zero-length allocation");
         return NULL;
     }
     @autoreleasepool {
@@ -673,14 +673,14 @@ tm_metal_buffer *tm_metal_buffer_new(tm_metal_ctx *ctx, size_t bytes, int shared
                                             : MTLResourceStorageModePrivate;
         id<MTLBuffer> buffer = [ctx->device newBufferWithLength:bytes options:options];
         if (buffer == nil) {
-            tm_set_err(err, err_cap,
+            ch_set_err(err, err_cap,
                        [NSString stringWithFormat:@"buffer_new: allocation of %zu bytes failed", bytes]);
             return NULL;
         }
-        tm_metal_buffer *handle = calloc(1, sizeof(tm_metal_buffer));
+        ch_metal_buffer *handle = calloc(1, sizeof(ch_metal_buffer));
         if (handle == NULL) {
             [buffer release];
-            tm_set_err(err, err_cap, @"buffer_new: handle allocation failed");
+            ch_set_err(err, err_cap, @"buffer_new: handle allocation failed");
             return NULL;
         }
         handle->buffer = buffer; /* +1 from newBufferWithLength */
@@ -692,12 +692,12 @@ tm_metal_buffer *tm_metal_buffer_new(tm_metal_ctx *ctx, size_t bytes, int shared
     }
 }
 
-void tm_metal_buffer_free(tm_metal_ctx *ctx, tm_metal_buffer *buffer) {
+void ch_metal_buffer_free(ch_metal_ctx *ctx, ch_metal_buffer *buffer) {
     if (ctx == NULL || buffer == NULL) {
         return;
     }
     if (buffer->owner != ctx) {
-        fprintf(stderr, "tm_metal: buffer_free from a different context refused\n");
+        fprintf(stderr, "ch_metal: buffer_free from a different context refused\n");
         return;
     }
     @autoreleasepool {
@@ -708,15 +708,15 @@ void tm_metal_buffer_free(tm_metal_ctx *ctx, tm_metal_buffer *buffer) {
     }
 }
 
-void *tm_metal_buffer_contents(tm_metal_ctx *ctx, tm_metal_buffer *buffer) {
+void *ch_metal_buffer_contents(ch_metal_ctx *ctx, ch_metal_buffer *buffer) {
     if (ctx == NULL || buffer == NULL || buffer->owner != ctx || !buffer->shared) {
         return NULL;
     }
     return [buffer->buffer contents];
 }
 
-size_t tm_metal_buffer_len(const tm_metal_ctx *ctx, const tm_metal_buffer *buffer) {
-    if (ctx == NULL || buffer == NULL || buffer->owner != (tm_metal_ctx *)ctx) {
+size_t ch_metal_buffer_len(const ch_metal_ctx *ctx, const ch_metal_buffer *buffer) {
+    if (ctx == NULL || buffer == NULL || buffer->owner != (ch_metal_ctx *)ctx) {
         return 0;
     }
     return buffer->len;
@@ -726,34 +726,34 @@ size_t tm_metal_buffer_len(const tm_metal_ctx *ctx, const tm_metal_buffer *buffe
  * Copy contract: host<->device copies on shared buffers are ordered after
  * every committed GPU command buffer (the call waits for completion first).
  * Reads therefore observe finished compute, and writes cannot race
- * in-flight work. Explicit tm_metal_fence() checkpoints remain available
+ * in-flight work. Explicit ch_metal_fence() checkpoints remain available
  * for callers that want to pay the wait once instead of per copy.
  */
-static int tm_copy(tm_metal_ctx *ctx, tm_metal_buffer *buffer, size_t off,
+static int ch_copy(ch_metal_ctx *ctx, ch_metal_buffer *buffer, size_t off,
                    void *host, size_t len, int to_device, char *err, size_t err_cap,
                    const char *what) {
-    if (tm_check_ctx(ctx, err, err_cap, what) != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, what) != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     /* Validate the handle (null, ownership) before touching its fields. */
     if (buffer == NULL || buffer->owner != ctx) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: buffer does not belong to this context", what]);
     }
     if (len == 0 || off > buffer->len || len > buffer->len - off) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS,
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS,
                        [NSString stringWithFormat:@"%s: range %zu..%zu outside buffer", what, off, off + len]);
     }
     if (!buffer->shared) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: private buffers have no host copy", what]);
     }
     if (ctx->group_active) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: close the open dispatch group first", what]);
     }
-    if (tm_wait_pending(ctx, err, err_cap) != TM_METAL_OK) {
-        return TM_METAL_ERR_INTERNAL;
+    if (ch_wait_pending(ctx, err, err_cap) != CH_METAL_OK) {
+        return CH_METAL_ERR_INTERNAL;
     }
     void *contents = [buffer->buffer contents];
     if (to_device) {
@@ -761,38 +761,38 @@ static int tm_copy(tm_metal_ctx *ctx, tm_metal_buffer *buffer, size_t off,
     } else {
         memcpy(host, (const uint8_t *)contents + off, len);
     }
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
-int tm_metal_upload(tm_metal_ctx *ctx, tm_metal_buffer *dst, size_t off,
+int ch_metal_upload(ch_metal_ctx *ctx, ch_metal_buffer *dst, size_t off,
                     const void *src, size_t len, char *err, size_t err_cap) {
-    return tm_copy(ctx, dst, off, (void *)src, len, 1, err, err_cap, "upload");
+    return ch_copy(ctx, dst, off, (void *)src, len, 1, err, err_cap, "upload");
 }
 
-int tm_metal_download(tm_metal_ctx *ctx, tm_metal_buffer *src, size_t off,
+int ch_metal_download(ch_metal_ctx *ctx, ch_metal_buffer *src, size_t off,
                       void *dst, size_t len, char *err, size_t err_cap) {
-    return tm_copy(ctx, src, off, dst, len, 0, err, err_cap, "download");
+    return ch_copy(ctx, src, off, dst, len, 0, err, err_cap, "download");
 }
 
-int tm_metal_download_after(tm_metal_ctx *ctx, tm_metal_buffer *src, size_t off, void *dst,
+int ch_metal_download_after(ch_metal_ctx *ctx, ch_metal_buffer *src, size_t off, void *dst,
                             size_t len, uint64_t completed_target, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "download_after") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "download_after") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (src == NULL || src->owner != ctx) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"download_after: buffer does not belong to this context");
     }
     if (len == 0 || off > src->len || len > src->len - off) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS,
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS,
                        [NSString stringWithFormat:@"download_after: range %zu..%zu outside buffer", off, off + len]);
     }
     if (!src->shared) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"download_after: private buffers have no host copy");
     }
     if (completed_target > atomic_load_explicit(&ctx->committed, memory_order_relaxed)) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"download_after: target is beyond the committed command buffers");
     }
     /* Command buffers complete in queue order; wait for the target only,
@@ -802,7 +802,7 @@ int tm_metal_download_after(tm_metal_ctx *ctx, tm_metal_buffer *src, size_t off,
         usleep(50);
     }
     memcpy(dst, (const uint8_t *)[src->buffer contents] + off, len);
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
 /* ---------------------------------------------------------------- ops -- */
@@ -810,7 +810,7 @@ int tm_metal_download_after(tm_metal_ctx *ctx, tm_metal_buffer *src, size_t off,
 /*
  * Dispatch frames. With no open group, an operation creates and commits its
  * own command buffer (correctness-first; C0 behavior). With an open group
- * (tm_metal_begin_group), operations append to that one command buffer, so
+ * (ch_metal_begin_group), operations append to that one command buffer, so
  * a whole transformer step becomes one committed unit with one completion —
  * no per-operator commit overhead.
  */
@@ -819,9 +819,9 @@ typedef struct {
     id<MTLComputeCommandEncoder> enc;
     NSMutableArray *keep;             /* in-flight resource leases */
     int implicit;
-} tm_frame;
+} ch_frame;
 
-static id<MTLComputeCommandEncoder> tm_frame_open(tm_metal_ctx *ctx, tm_frame *f) {
+static id<MTLComputeCommandEncoder> ch_frame_open(ch_metal_ctx *ctx, ch_frame *f) {
     if (ctx->group_active) {
         f->implicit = 0;
         f->cb = nil;
@@ -836,10 +836,10 @@ static id<MTLComputeCommandEncoder> tm_frame_open(tm_metal_ctx *ctx, tm_frame *f
     return f->enc;
 }
 
-static int tm_frame_commit(tm_metal_ctx *ctx, tm_frame *f, char *err, size_t cap,
+static int ch_frame_commit(ch_metal_ctx *ctx, ch_frame *f, char *err, size_t cap,
                            const char *what) {
     if (f->enc == nil) {
-        return tm_fail(err, cap, TM_METAL_ERR_INTERNAL,
+        return ch_fail(err, cap, CH_METAL_ERR_INTERNAL,
                        [NSString stringWithFormat:@"%s: command encoder unavailable", what]);
     }
     if (!f->implicit) {
@@ -847,29 +847,29 @@ static int tm_frame_commit(tm_metal_ctx *ctx, tm_frame *f, char *err, size_t cap
          * attribution samples the GPU clock at this dispatch boundary
          * and folds the delta at the fence. */
         if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed) && ctx->counter_ready &&
-            ctx->counter_label_used < TM_GROUP_LABELS) {
-            uint32_t idx = tm_counter_sample(ctx, ctx->group_enc);
+            ctx->counter_label_used < CH_GROUP_LABELS) {
+            uint32_t idx = ch_counter_sample(ctx, ctx->group_enc);
             if (idx < ctx->counter_cap) {
                 strlcpy(ctx->counter_labels[ctx->counter_label_used].name,
-                        what != NULL ? what : "op", TM_PROFILE_NAME);
+                        what != NULL ? what : "op", CH_PROFILE_NAME);
                 ctx->counter_labels[ctx->counter_label_used].idx = idx;
                 ctx->counter_label_used++;
             } else {
                 ctx->counter_overflow = 1;
             }
         }
-        return TM_METAL_OK; /* the open group commits once at end_group */
+        return CH_METAL_OK; /* the open group commits once at end_group */
     }
     [f->enc endEncoding];
-    return tm_commit(ctx, f->cb, f->keep, what, err, cap);
+    return ch_commit(ctx, f->cb, f->keep, what, err, cap);
 }
 
-int tm_metal_begin_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "begin_group") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_begin_group(ch_metal_ctx *ctx, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "begin_group") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (ctx->group_active) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"begin_group: a dispatch group is already open");
     }
     @autoreleasepool {
@@ -884,7 +884,7 @@ int tm_metal_begin_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
             ctx->group_enc = nil;
             ctx->group_cb = nil;
             ctx->group_keep = nil;
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            @"begin_group: command buffering unavailable");
         }
         ctx->group_active = 1;
@@ -892,17 +892,17 @@ int tm_metal_begin_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
          * host time between groups never lands in any label. */
         ctx->counter_group_base = ctx->counter_used;
         ctx->counter_label_base = ctx->counter_label_used;
-        tm_counter_sample(ctx, ctx->group_enc);
-        return TM_METAL_OK;
+        ch_counter_sample(ctx, ctx->group_enc);
+        return CH_METAL_OK;
     }
 }
 
-int tm_metal_end_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "end_group") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_end_group(ch_metal_ctx *ctx, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "end_group") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (!ctx->group_active) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"end_group: no dispatch group is open");
     }
     @autoreleasepool {
@@ -914,7 +914,7 @@ int tm_metal_end_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
         ctx->group_enc = nil;
         ctx->group_keep = nil;
         ctx->group_active = 0;
-        int rc = tm_commit(ctx, cb, keep, "group", err, err_cap);
+        int rc = ch_commit(ctx, cb, keep, "group", err, err_cap);
         [enc release];
         [cb release];
         [keep release];
@@ -924,12 +924,12 @@ int tm_metal_end_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
 
 /* Discards the open group's work without committing it (cancellation at a
  * step boundary: no partial GPU work is ever submitted). */
-int tm_metal_abort_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "abort_group") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_abort_group(ch_metal_ctx *ctx, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "abort_group") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (!ctx->group_active) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"abort_group: no dispatch group is open");
     }
     [ctx->group_enc endEncoding];
@@ -944,31 +944,31 @@ int tm_metal_abort_group(tm_metal_ctx *ctx, char *err, size_t err_cap) {
      * bookkeeping so the next resolve stays consistent. */
     ctx->counter_used = ctx->counter_group_base;
     ctx->counter_label_used = ctx->counter_label_base;
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
-static int tm_dispatch_1d(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
-                          tm_metal_buffer *a, tm_metal_buffer *b, float scalar,
+static int ch_dispatch_1d(ch_metal_ctx *ctx, id<MTLComputePipelineState> pso,
+                          ch_metal_buffer *a, ch_metal_buffer *b, float scalar,
                           int has_scalar, uint32_t n, int cast_f16_in, int cast_f16_out,
                           char *err, size_t err_cap, const char *what) {
-    if (tm_check_ctx(ctx, err, err_cap, what) != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, what) != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS,
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS,
                        [NSString stringWithFormat:@"%s: zero length", what]);
     }
     size_t a_need = (size_t)n * (cast_f16_in ? 2 : 4);
     size_t b_need = (size_t)n * (cast_f16_out ? 2 : 4);
-    if (tm_check_buffer(ctx, a, a_need, err, err_cap, what) != TM_METAL_OK ||
-        tm_check_buffer(ctx, b, b_need, err, err_cap, what) != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, a, a_need, err, err_cap, what) != CH_METAL_OK ||
+        ch_check_buffer(ctx, b, b_need, err, err_cap, what) != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"%s: command encoder unavailable", what]);
         }
         [enc setComputePipelineState:pso];
@@ -985,44 +985,44 @@ static int tm_dispatch_1d(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
         NSUInteger tg = width > 0 ? width : 32;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, what);
+        return ch_frame_commit(ctx, &f, err, err_cap, what);
     }
 }
 
-int tm_metal_f32_scale(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *y,
+int ch_metal_f32_scale(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *y,
                        float factor, uint32_t n, char *err, size_t err_cap) {
-    return tm_dispatch_1d(ctx, ctx->pso_scale, x, y, factor, 1, n, 0, 0, err, err_cap,
+    return ch_dispatch_1d(ctx, ctx->pso_scale, x, y, factor, 1, n, 0, 0, err, err_cap,
                           "f32_scale");
 }
 
-int tm_metal_f32_axpy(tm_metal_ctx *ctx, tm_metal_buffer *a, tm_metal_buffer *y,
+int ch_metal_f32_axpy(ch_metal_ctx *ctx, ch_metal_buffer *a, ch_metal_buffer *y,
                       float alpha, uint32_t n, char *err, size_t err_cap) {
-    return tm_dispatch_1d(ctx, ctx->pso_axpy, a, y, alpha, 1, n, 0, 0, err, err_cap,
+    return ch_dispatch_1d(ctx, ctx->pso_axpy, a, y, alpha, 1, n, 0, 0, err, err_cap,
                           "f32_axpy");
 }
 
-int tm_metal_argmax_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, uint32_t n,
-                        tm_metal_buffer *partial, tm_metal_buffer *out, uint32_t out_index,
+int ch_metal_argmax_f32(ch_metal_ctx *ctx, ch_metal_buffer *x, uint32_t n,
+                        ch_metal_buffer *partial, ch_metal_buffer *out, uint32_t out_index,
                         char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "argmax_f32") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "argmax_f32") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"argmax_f32: empty input");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"argmax_f32: empty input");
     }
     /* partial holds 64 (value, index) pairs: 64 f32 then 64 u32. */
-    if (tm_check_buffer(ctx, x, (size_t)n * 4u, err, err_cap, "argmax_f32.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, partial, TM_ARGMAX_PARTIAL_BYTES, err, err_cap,
-                        "argmax_f32.partial") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, ((size_t)out_index + 1u) * 4u, err, err_cap,
-                        "argmax_f32.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, x, (size_t)n * 4u, err, err_cap, "argmax_f32.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, partial, CH_ARGMAX_PARTIAL_BYTES, err, err_cap,
+                        "argmax_f32.partial") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, ((size_t)out_index + 1u) * 4u, err, err_cap,
+                        "argmax_f32.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"argmax_f32: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"argmax_f32: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_argmax_partial];
         [enc setBuffer:x->buffer offset:0 atIndex:0];
@@ -1039,15 +1039,15 @@ int tm_metal_argmax_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, uint32_t n,
         [f.keep addObject:x->buffer];
         [f.keep addObject:partial->buffer];
         [f.keep addObject:out->buffer];
-        return tm_frame_commit(ctx, &f, err, err_cap, "argmax_f32");
+        return ch_frame_commit(ctx, &f, err, err_cap, "argmax_f32");
     }
 }
 
-int tm_metal_row_indirect_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, uint32_t type_id,
-                              uint32_t rows, uint32_t cols, tm_metal_buffer *ids, uint32_t slot,
-                              tm_metal_buffer *out, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "row_indirect") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_row_indirect_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, uint32_t type_id,
+                              uint32_t rows, uint32_t cols, ch_metal_buffer *ids, uint32_t slot,
+                              ch_metal_buffer *out, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "row_indirect") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     id<MTLComputePipelineState> pso = nil;
     size_t w_need = 0;
@@ -1058,21 +1058,21 @@ int tm_metal_row_indirect_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, uint32_t ty
         pso = ctx->pso_f16row_indirect;
         w_need = (size_t)rows * (size_t)cols * 2u;
     } else {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"row_indirect: type %u with cols %u is unsupported",
                                                   type_id, cols]);
     }
     if (rows == 0 ||
-        tm_check_buffer(ctx, w, w_need, err, err_cap, "row_indirect.weights") != TM_METAL_OK ||
-        tm_check_buffer(ctx, ids, ((size_t)slot + 1u) * 4u, err, err_cap, "row_indirect.ids") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, (size_t)cols * 4u, err, err_cap, "row_indirect.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+        ch_check_buffer(ctx, w, w_need, err, err_cap, "row_indirect.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, ids, ((size_t)slot + 1u) * 4u, err, err_cap, "row_indirect.ids") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, (size_t)cols * 4u, err, err_cap, "row_indirect.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"row_indirect: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"row_indirect: no encoder");
         }
         [enc setComputePipelineState:pso];
         [enc setBuffer:w->buffer offset:0 atIndex:0];
@@ -1086,30 +1086,30 @@ int tm_metal_row_indirect_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, uint32_t ty
         [f.keep addObject:ids->buffer];
         [enc dispatchThreads:MTLSizeMake((NSUInteger)cols, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "row_indirect");
+        return ch_frame_commit(ctx, &f, err, err_cap, "row_indirect");
     }
 }
 
-int tm_metal_copy_f32(tm_metal_ctx *ctx, tm_metal_buffer *src, uint32_t src_off,
-                      tm_metal_buffer *dst, uint32_t dst_off, uint32_t n, char *err,
+int ch_metal_copy_f32(ch_metal_ctx *ctx, ch_metal_buffer *src, uint32_t src_off,
+                      ch_metal_buffer *dst, uint32_t dst_off, uint32_t n, char *err,
                       size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "copy_f32") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "copy_f32") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"copy_f32: zero-length copy");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"copy_f32: zero-length copy");
     }
     size_t src_need = ((size_t)src_off + (size_t)n) * 4u;
     size_t dst_need = ((size_t)dst_off + (size_t)n) * 4u;
-    if (tm_check_buffer(ctx, src, src_need, err, err_cap, "copy_f32.src") != TM_METAL_OK ||
-        tm_check_buffer(ctx, dst, dst_need, err, err_cap, "copy_f32.dst") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, src, src_need, err, err_cap, "copy_f32.src") != CH_METAL_OK ||
+        ch_check_buffer(ctx, dst, dst_need, err, err_cap, "copy_f32.dst") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"copy_f32: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"copy_f32: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_copy];
         [enc setBuffer:src->buffer offset:0 atIndex:0];
@@ -1123,46 +1123,46 @@ int tm_metal_copy_f32(tm_metal_ctx *ctx, tm_metal_buffer *src, uint32_t src_off,
         NSUInteger tg = width > 0 ? width * 4 : 128;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "copy_f32");
+        return ch_frame_commit(ctx, &f, err, err_cap, "copy_f32");
     }
 }
 
-int tm_metal_cast_f16_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *y,
+int ch_metal_cast_f16_f32(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *y,
                           uint32_t n, char *err, size_t err_cap) {
-    return tm_dispatch_1d(ctx, ctx->pso_f16f32, x, y, 0.0f, 0, n, 1, 0, err, err_cap,
+    return ch_dispatch_1d(ctx, ctx->pso_f16f32, x, y, 0.0f, 0, n, 1, 0, err, err_cap,
                           "cast_f16_f32");
 }
 
-int tm_metal_cast_f32_f16(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *y,
+int ch_metal_cast_f32_f16(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *y,
                           uint32_t n, char *err, size_t err_cap) {
-    return tm_dispatch_1d(ctx, ctx->pso_f32f16, x, y, 0.0f, 0, n, 0, 1, err, err_cap,
+    return ch_dispatch_1d(ctx, ctx->pso_f32f16, x, y, 0.0f, 0, n, 0, 1, err, err_cap,
                           "cast_f32_f16");
 }
 
-int tm_metal_q8_0_gemv(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
-                       tm_metal_buffer *y, uint32_t rows, uint32_t cols,
+int ch_metal_q8_0_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols,
                        char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "q8_0_gemv") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "q8_0_gemv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0 || (cols % 32u) != 0u) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"q8_0_gemv: rows %u, cols %u (cols must be a positive multiple of 32)",
                                                   rows, cols]);
     }
     size_t w_need = (size_t)rows * ((size_t)cols / 32u) * 34u;
     size_t x_need = (size_t)cols * 4u;
     size_t y_need = (size_t)rows * 4u;
-    if (tm_check_buffer(ctx, w, w_need, err, err_cap, "q8_0_gemv.weights") != TM_METAL_OK ||
-        tm_check_buffer(ctx, x, x_need, err, err_cap, "q8_0_gemv.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, y_need, err, err_cap, "q8_0_gemv.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q8_0_gemv.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, x_need, err, err_cap, "q8_0_gemv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, y_need, err, err_cap, "q8_0_gemv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            @"q8_0_gemv: command encoder unavailable");
         }
         [enc setComputePipelineState:ctx->pso_q8gemv];
@@ -1176,48 +1176,48 @@ int tm_metal_q8_0_gemv(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x
         [enc setBytes:&cols length:sizeof(cols) atIndex:4];
         NSUInteger lanes = ctx->pso_q8gemv.threadExecutionWidth;
         if (lanes != 32) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"q8_0_gemv: device simd width %lu != 32", (unsigned long)lanes]);
         }
         /* Multi-row kernel: 2 SIMD groups x 4 rows per threadgroup (the
-         * TM_Q8_SG / TM_Q8_ROWS constants in kernels.metal). */
+         * CH_Q8_SG / CH_Q8_ROWS constants in kernels.metal). */
         const NSUInteger rows_per_tg = 8;
         NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         /* Profiling attributes GEMV time per matrix shape. */
-        char label[TM_PROFILE_NAME];
+        char label[CH_PROFILE_NAME];
         if (atomic_load_explicit(&ctx->profiling, memory_order_relaxed)) {
             snprintf(label, sizeof label, "q8_0_gemv:%ux%u", rows, cols);
         } else {
             strlcpy(label, "q8_0_gemv", sizeof label);
         }
-        return tm_frame_commit(ctx, &f, err, err_cap, label);
+        return ch_frame_commit(ctx, &f, err, err_cap, label);
     }
 }
 
-int tm_metal_f16_gemv(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
-                      tm_metal_buffer *y, uint32_t rows, uint32_t cols,
+int ch_metal_f16_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                      ch_metal_buffer *y, uint32_t rows, uint32_t cols,
                       char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "f16_gemv") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "f16_gemv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED, @"f16_gemv: zero shape");
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED, @"f16_gemv: zero shape");
     }
     size_t w_need = (size_t)rows * (size_t)cols * 2u;
     size_t x_need = (size_t)cols * 4u;
     size_t y_need = (size_t)rows * 4u;
-    if (tm_check_buffer(ctx, w, w_need, err, err_cap, "f16_gemv.weights") != TM_METAL_OK ||
-        tm_check_buffer(ctx, x, x_need, err, err_cap, "f16_gemv.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, y_need, err, err_cap, "f16_gemv.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "f16_gemv.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, x_need, err, err_cap, "f16_gemv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, y_need, err, err_cap, "f16_gemv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            @"f16_gemv: command encoder unavailable");
         }
         [enc setComputePipelineState:ctx->pso_f16gemv];
@@ -1231,29 +1231,29 @@ int tm_metal_f16_gemv(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
         [enc setBytes:&cols length:sizeof(cols) atIndex:4];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "f16_gemv");
+        return ch_frame_commit(ctx, &f, err, err_cap, "f16_gemv");
     }
 }
 
-int tm_metal_q8_0_row_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *out,
+int ch_metal_q8_0_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
                           uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "q8_0_row") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "q8_0_row") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (cols == 0 || (cols % 32u) != 0u) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"q8_0_row: cols must be a positive multiple of 32");
     }
     size_t w_need = ((size_t)row + 1u) * ((size_t)cols / 32u) * 34u;
-    if (tm_check_buffer(ctx, w, w_need, err, err_cap, "q8_0_row.weights") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "q8_0_row.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "q8_0_row.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "q8_0_row.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            @"q8_0_row: command encoder unavailable");
         }
         [enc setComputePipelineState:ctx->pso_q8row];
@@ -1269,33 +1269,33 @@ int tm_metal_q8_0_row_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer
         if (width > 0 && width < tg) { tg = width * 8; }
         [enc dispatchThreads:MTLSizeMake((NSUInteger)cols, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "q8_0_row");
+        return ch_frame_commit(ctx, &f, err, err_cap, "q8_0_row");
     }
 }
 
-static int tm_rmsnorm_dispatch(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
-                               tm_metal_buffer *x, tm_metal_buffer *weight,
-                               tm_metal_buffer *y, uint32_t rows, uint32_t cols, float eps,
+static int ch_rmsnorm_dispatch(ch_metal_ctx *ctx, id<MTLComputePipelineState> pso,
+                               ch_metal_buffer *x, ch_metal_buffer *weight,
+                               ch_metal_buffer *y, uint32_t rows, uint32_t cols, float eps,
                                size_t weight_window, char *err, size_t err_cap,
                                const char *what) {
-    if (tm_check_ctx(ctx, err, err_cap, what) != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, what) != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: zero shape", what]);
     }
     size_t x_need = (size_t)rows * (size_t)cols * 4u;
-    if (tm_check_buffer(ctx, x, x_need, err, err_cap, "rmsnorm.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, weight, (size_t)cols * weight_window, err, err_cap, "rmsnorm.weight") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, x_need, err, err_cap, "rmsnorm.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, x, x_need, err, err_cap, "rmsnorm.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, weight, (size_t)cols * weight_window, err, err_cap, "rmsnorm.weight") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, x_need, err, err_cap, "rmsnorm.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"%s: no encoder", what]);
         }
         [enc setComputePipelineState:pso];
@@ -1309,38 +1309,38 @@ static int tm_rmsnorm_dispatch(tm_metal_ctx *ctx, id<MTLComputePipelineState> ps
         [enc setBytes:&eps length:sizeof(eps) atIndex:4];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, what);
+        return ch_frame_commit(ctx, &f, err, err_cap, what);
     }
 }
 
-int tm_metal_rmsnorm_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *weight,
-                         tm_metal_buffer *y, uint32_t rows, uint32_t cols, float eps,
+int ch_metal_rmsnorm_f32(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *weight,
+                         ch_metal_buffer *y, uint32_t rows, uint32_t cols, float eps,
                          char *err, size_t err_cap) {
-    return tm_rmsnorm_dispatch(ctx, ctx->pso_rmsnorm, x, weight, y, rows, cols, eps, 4,
+    return ch_rmsnorm_dispatch(ctx, ctx->pso_rmsnorm, x, weight, y, rows, cols, eps, 4,
                                err, err_cap, "rmsnorm");
 }
 
-int tm_metal_norm_add_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *weight,
-                           tm_metal_buffer *res, tm_metal_buffer *y, uint32_t rows,
+int ch_metal_norm_add_f32(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *weight,
+                           ch_metal_buffer *res, ch_metal_buffer *y, uint32_t rows,
                            uint32_t cols, float eps, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "norm_add") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "norm_add") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED, @"norm_add: zero shape");
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED, @"norm_add: zero shape");
     }
     size_t need = (size_t)rows * (size_t)cols * 4u;
-    if (tm_check_buffer(ctx, x, need, err, err_cap, "norm_add.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, weight, (size_t)cols * 4u, err, err_cap, "norm_add.weight") != TM_METAL_OK ||
-        tm_check_buffer(ctx, res, need, err, err_cap, "norm_add.res") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, need, err, err_cap, "norm_add.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, x, need, err, err_cap, "norm_add.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, weight, (size_t)cols * 4u, err, err_cap, "norm_add.weight") != CH_METAL_OK ||
+        ch_check_buffer(ctx, res, need, err, err_cap, "norm_add.res") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, need, err, err_cap, "norm_add.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"norm_add: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"norm_add: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_norm_add];
         [enc setBuffer:x->buffer offset:0 atIndex:0];
@@ -1355,35 +1355,35 @@ int tm_metal_norm_add_f32(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer
         [enc setBytes:&eps length:sizeof(eps) atIndex:5];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "norm_add");
+        return ch_frame_commit(ctx, &f, err, err_cap, "norm_add");
     }
 }
 
-int tm_metal_qk_norm_f32(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *q_weight,
-                          tm_metal_buffer *q_out, tm_metal_buffer *k, tm_metal_buffer *k_weight,
-                          tm_metal_buffer *k_out, uint32_t q_rows, uint32_t k_rows, uint32_t cols,
+int ch_metal_qk_norm_f32(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *q_weight,
+                          ch_metal_buffer *q_out, ch_metal_buffer *k, ch_metal_buffer *k_weight,
+                          ch_metal_buffer *k_out, uint32_t q_rows, uint32_t k_rows, uint32_t cols,
                           float eps, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qk_norm") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qk_norm") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (q_rows == 0 || k_rows == 0 || cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED, @"qk_norm: zero shape");
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED, @"qk_norm: zero shape");
     }
     size_t q_need = (size_t)q_rows * (size_t)cols * 4u;
     size_t k_need = (size_t)k_rows * (size_t)cols * 4u;
-    if (tm_check_buffer(ctx, q, q_need, err, err_cap, "qk_norm.q") != TM_METAL_OK ||
-        tm_check_buffer(ctx, q_weight, (size_t)cols * 4u, err, err_cap, "qk_norm.q_weight") != TM_METAL_OK ||
-        tm_check_buffer(ctx, q_out, q_need, err, err_cap, "qk_norm.q_out") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k, k_need, err, err_cap, "qk_norm.k") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k_weight, (size_t)cols * 4u, err, err_cap, "qk_norm.k_weight") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k_out, k_need, err, err_cap, "qk_norm.k_out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, q, q_need, err, err_cap, "qk_norm.q") != CH_METAL_OK ||
+        ch_check_buffer(ctx, q_weight, (size_t)cols * 4u, err, err_cap, "qk_norm.q_weight") != CH_METAL_OK ||
+        ch_check_buffer(ctx, q_out, q_need, err, err_cap, "qk_norm.q_out") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k, k_need, err, err_cap, "qk_norm.k") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k_weight, (size_t)cols * 4u, err, err_cap, "qk_norm.k_weight") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k_out, k_need, err, err_cap, "qk_norm.k_out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qk_norm: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"qk_norm: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_qk_norm];
         [enc setBuffer:q->buffer offset:0 atIndex:0];
@@ -1404,29 +1404,29 @@ int tm_metal_qk_norm_f32(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer 
         [enc setBytes:&eps length:sizeof(eps) atIndex:9];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)(q_rows + k_rows), 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qk_norm");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qk_norm");
     }
 }
 
-int tm_metal_silu_mul_f32(tm_metal_ctx *ctx, tm_metal_buffer *gate, tm_metal_buffer *up,
-                          tm_metal_buffer *out, uint32_t n, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "silu_mul") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_silu_mul_f32(ch_metal_ctx *ctx, ch_metal_buffer *gate, ch_metal_buffer *up,
+                          ch_metal_buffer *out, uint32_t n, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "silu_mul") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"silu_mul: zero length");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"silu_mul: zero length");
     }
     size_t need = (size_t)n * 4u;
-    if (tm_check_buffer(ctx, gate, need, err, err_cap, "silu_mul.gate") != TM_METAL_OK ||
-        tm_check_buffer(ctx, up, need, err, err_cap, "silu_mul.up") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, need, err, err_cap, "silu_mul.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, gate, need, err, err_cap, "silu_mul.gate") != CH_METAL_OK ||
+        ch_check_buffer(ctx, up, need, err, err_cap, "silu_mul.up") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, need, err, err_cap, "silu_mul.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"silu_mul: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"silu_mul: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_silu];
         [enc setBuffer:gate->buffer offset:0 atIndex:0];
@@ -1440,29 +1440,29 @@ int tm_metal_silu_mul_f32(tm_metal_ctx *ctx, tm_metal_buffer *gate, tm_metal_buf
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "silu_mul");
+        return ch_frame_commit(ctx, &f, err, err_cap, "silu_mul");
     }
 }
 
-int tm_metal_gelu_tanh_mul_f32(tm_metal_ctx *ctx, tm_metal_buffer *gate, tm_metal_buffer *up,
-                          tm_metal_buffer *out, uint32_t n, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "gelu_tanh_mul") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_gelu_tanh_mul_f32(ch_metal_ctx *ctx, ch_metal_buffer *gate, ch_metal_buffer *up,
+                          ch_metal_buffer *out, uint32_t n, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "gelu_tanh_mul") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"gelu_tanh_mul: zero length");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"gelu_tanh_mul: zero length");
     }
     size_t need = (size_t)n * 4u;
-    if (tm_check_buffer(ctx, gate, need, err, err_cap, "gelu_tanh_mul.gate") != TM_METAL_OK ||
-        tm_check_buffer(ctx, up, need, err, err_cap, "gelu_tanh_mul.up") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, need, err, err_cap, "gelu_tanh_mul.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, gate, need, err, err_cap, "gelu_tanh_mul.gate") != CH_METAL_OK ||
+        ch_check_buffer(ctx, up, need, err, err_cap, "gelu_tanh_mul.up") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, need, err, err_cap, "gelu_tanh_mul.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"gelu_tanh_mul: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"gelu_tanh_mul: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_gelu_tanh_mul];
         [enc setBuffer:gate->buffer offset:0 atIndex:0];
@@ -1476,28 +1476,28 @@ int tm_metal_gelu_tanh_mul_f32(tm_metal_ctx *ctx, tm_metal_buffer *gate, tm_meta
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "gelu_tanh_mul");
+        return ch_frame_commit(ctx, &f, err, err_cap, "gelu_tanh_mul");
     }
 }
 
-int tm_metal_f16_row_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *out,
+int ch_metal_f16_row_f32(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *out,
                          uint32_t row, uint32_t cols, uint32_t out_off, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "f16_row") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "f16_row") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED, @"f16_row: zero cols");
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED, @"f16_row: zero cols");
     }
     size_t w_need = ((size_t)row + 1u) * (size_t)cols * 2u;
-    if (tm_check_buffer(ctx, w, w_need, err, err_cap, "f16_row.weights") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "f16_row.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "f16_row.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, ((size_t)out_off + cols) * 4u, err, err_cap, "f16_row.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"f16_row: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"f16_row: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_f16row];
         [enc setBuffer:w->buffer offset:0 atIndex:0];
@@ -1510,57 +1510,57 @@ int tm_metal_f16_row_f32(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer 
         NSUInteger tg = 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)cols, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "f16_row");
+        return ch_frame_commit(ctx, &f, err, err_cap, "f16_row");
     }
 }
 
-static int tm_gemm_dispatch_rows(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
-                                 tm_metal_buffer *w, size_t w_need, tm_metal_buffer *x,
-                                 tm_metal_buffer *y, uint32_t rows, uint32_t cols,
+static int ch_gemm_dispatch_rows(ch_metal_ctx *ctx, id<MTLComputePipelineState> pso,
+                                 ch_metal_buffer *w, size_t w_need, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols,
                                  uint32_t batch, uint32_t x_off, uint32_t y_off,
                                  NSUInteger rows_per_tg, NSUInteger threads,
                                  uint32_t max_batch, NSUInteger tokens_per_tg, char *err,
                                  size_t err_cap, const char *what);
 
-static int tm_gemm_dispatch(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
-                            tm_metal_buffer *w, size_t w_need, tm_metal_buffer *x,
-                            tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+static int ch_gemm_dispatch(ch_metal_ctx *ctx, id<MTLComputePipelineState> pso,
+                            ch_metal_buffer *w, size_t w_need, ch_metal_buffer *x,
+                            ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                             uint32_t x_off, uint32_t y_off, char *err, size_t err_cap,
                             const char *what) {
-    return tm_gemm_dispatch_rows(ctx, pso, w, w_need, x, y, rows, cols, batch, x_off, y_off, 1,
+    return ch_gemm_dispatch_rows(ctx, pso, w, w_need, x, y, rows, cols, batch, x_off, y_off, 1,
                                  32, 32, 0, err, err_cap, what);
 }
 
 /* One threadgroup of `threads` lanes per `rows_per_tg` output rows and,
  * when `tokens_per_tg` is nonzero, per `tokens_per_tg` tokens (a 1-D grid
  * of row tiles x token tiles; the kernel decodes the pair). */
-static int tm_gemm_dispatch_rows(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
-                                 tm_metal_buffer *w, size_t w_need, tm_metal_buffer *x,
-                                 tm_metal_buffer *y, uint32_t rows, uint32_t cols,
+static int ch_gemm_dispatch_rows(ch_metal_ctx *ctx, id<MTLComputePipelineState> pso,
+                                 ch_metal_buffer *w, size_t w_need, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols,
                                  uint32_t batch, uint32_t x_off, uint32_t y_off,
                                  NSUInteger rows_per_tg, NSUInteger threads,
                                  uint32_t max_batch, NSUInteger tokens_per_tg, char *err,
                                  size_t err_cap, const char *what) {
-    if (tm_check_ctx(ctx, err, err_cap, what) != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, what) != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0 || batch == 0 || batch > max_batch) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: rows %u, cols %u, batch %u (1..=%u)",
                                                   what, rows, cols, batch, max_batch]);
     }
     size_t x_need = ((size_t)x_off + (size_t)batch * (size_t)cols) * 4u;
     size_t y_need = ((size_t)y_off + (size_t)batch * (size_t)rows) * 4u;
-    if (tm_check_buffer(ctx, w, w_need, err, err_cap, "gemm.weights") != TM_METAL_OK ||
-        tm_check_buffer(ctx, x, x_need, err, err_cap, "gemm.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, y_need, err, err_cap, "gemm.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, w, w_need, err, err_cap, "gemm.weights") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, x_need, err, err_cap, "gemm.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, y_need, err, err_cap, "gemm.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"%s: no encoder", what]);
         }
         [enc setComputePipelineState:pso];
@@ -1580,108 +1580,108 @@ static int tm_gemm_dispatch_rows(tm_metal_ctx *ctx, id<MTLComputePipelineState> 
             tokens_per_tg == 0 ? 1 : ((NSUInteger)batch + tokens_per_tg - 1) / tokens_per_tg;
         [enc dispatchThreadgroups:MTLSizeMake(groups * token_groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, what);
+        return ch_frame_commit(ctx, &f, err, err_cap, what);
     }
 }
 
-int tm_metal_q8_0_gemm_mma(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
-                           tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+int ch_metal_q8_0_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                            uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
-    if (cols == 0 || (cols % 32u) != 0u || batch == 0 || batch > TM_METAL_GEMM_MMA_MAX_BATCH) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+    if (cols == 0 || (cols % 32u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"q8_0_gemm_mma: cols %u (positive multiple of 32), batch %u (1..=%u)",
-                                                  cols, batch, TM_METAL_GEMM_MMA_MAX_BATCH]);
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
     }
     size_t w_need = (size_t)rows * ((size_t)cols / 32u) * 34u;
-    /* 4 SIMD groups own a 64-row x 32-token tile (TM_MMA_* in kernels.metal). */
-    return tm_gemm_dispatch_rows(ctx, ctx->pso_q8gemm_mma, w, w_need, x, y, rows, cols, batch,
-                                 x_off, y_off, 64, 128, TM_METAL_GEMM_MMA_MAX_BATCH, 32, err,
+    /* 4 SIMD groups own a 64-row x 32-token tile (CH_MMA_* in kernels.metal). */
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q8gemm_mma, w, w_need, x, y, rows, cols, batch,
+                                 x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32, err,
                                  err_cap, "q8_0_gemm_mma");
 }
 
-int tm_metal_q8_0_gemm_mma_f16op(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
-                                 tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+int ch_metal_q8_0_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                 ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                                  uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
-    if (cols == 0 || (cols % 32u) != 0u || batch == 0 || batch > TM_METAL_GEMM_MMA_MAX_BATCH) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+    if (cols == 0 || (cols % 32u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"q8_0_gemm_mma_f16op: cols %u (positive multiple of 32), batch %u (1..=%u)",
-                                                   cols, batch, TM_METAL_GEMM_MMA_MAX_BATCH]);
+                                                   cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
     }
     size_t w_need = (size_t)rows * ((size_t)cols / 32u) * 34u;
-    /* Same 64-row x 32-token tiles as tm_q8_0_gemm_mma; only the staged
+    /* Same 64-row x 32-token tiles as ch_q8_0_gemm_mma; only the staged
      * operand precision differs (metal-f16-act, ADR-010). */
-    return tm_gemm_dispatch_rows(ctx, ctx->pso_q8gemm_mma_f16op, w, w_need, x, y, rows, cols,
-                                 batch, x_off, y_off, 64, 128, TM_METAL_GEMM_MMA_MAX_BATCH, 32,
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_q8gemm_mma_f16op, w, w_need, x, y, rows, cols,
+                                 batch, x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32,
                                  err, err_cap, "q8_0_gemm_mma_f16op");
 }
 
-int tm_metal_q8_0_gemm(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
-                       tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+int ch_metal_q8_0_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                        uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
     if (cols == 0 || (cols % 32u) != 0u) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"q8_0_gemm: cols must be a positive multiple of 32");
     }
     size_t w_need = (size_t)rows * ((size_t)cols / 32u) * 34u;
-    return tm_gemm_dispatch(ctx, ctx->pso_q8gemm, w, w_need, x, y, rows, cols, batch, x_off,
+    return ch_gemm_dispatch(ctx, ctx->pso_q8gemm, w, w_need, x, y, rows, cols, batch, x_off,
                             y_off, err, err_cap, "q8_0_gemm");
 }
 
-int tm_metal_f16_gemm(tm_metal_ctx *ctx, tm_metal_buffer *w, tm_metal_buffer *x,
-                      tm_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+int ch_metal_f16_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                      ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
     size_t w_need = (size_t)rows * (size_t)cols * 2u;
-    return tm_gemm_dispatch(ctx, ctx->pso_f16gemm, w, w_need, x, y, rows, cols, batch, x_off,
+    return ch_gemm_dispatch(ctx, ctx->pso_f16gemm, w, w_need, x, y, rows, cols, batch, x_off,
                             y_off, err, err_cap, "f16_gemm");
 }
 
-int tm_metal_fence(tm_metal_ctx *ctx, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "fence") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+int ch_metal_fence(ch_metal_ctx *ctx, char *err, size_t err_cap) {
+    if (ch_check_ctx(ctx, err, err_cap, "fence") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (ctx->group_active) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"fence: a dispatch group is open; end or abort it first");
     }
-    return tm_wait_pending(ctx, err, err_cap);
+    return ch_wait_pending(ctx, err, err_cap);
 }
 
-uint64_t tm_metal_committed_dispatches(const tm_metal_ctx *ctx) {
+uint64_t ch_metal_committed_dispatches(const ch_metal_ctx *ctx) {
     return ctx == NULL ? 0 : atomic_load_explicit(&ctx->committed, memory_order_relaxed);
 }
 
-uint64_t tm_metal_completed_dispatches(const tm_metal_ctx *ctx) {
+uint64_t ch_metal_completed_dispatches(const ch_metal_ctx *ctx) {
     return ctx == NULL ? 0 : atomic_load_explicit(&ctx->completed, memory_order_relaxed);
 }
 
-double tm_metal_last_gpu_ms(const tm_metal_ctx *ctx) {
+double ch_metal_last_gpu_ms(const ch_metal_ctx *ctx) {
     if (ctx == NULL) {
         return 0.0;
     }
     return (double)atomic_load_explicit(&ctx->last_gpu_nanos, memory_order_relaxed) / 1e6;
 }
 
-uint64_t tm_metal_gpu_nanos_total(const tm_metal_ctx *ctx) {
+uint64_t ch_metal_gpu_nanos_total(const ch_metal_ctx *ctx) {
     return ctx == NULL ? 0 : atomic_load_explicit(&ctx->gpu_nanos_total, memory_order_relaxed);
 }
 
-int tm_metal_profile_set(tm_metal_ctx *ctx, int enabled) {
+int ch_metal_profile_set(ch_metal_ctx *ctx, int enabled) {
     if (ctx == NULL) {
-        return TM_METAL_ERR_UNSUPPORTED;
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     os_unfair_lock_lock(&ctx->profile_lock);
     ctx->profile_used = 0;
     memset(ctx->profile, 0, sizeof ctx->profile);
     os_unfair_lock_unlock(&ctx->profile_lock);
     atomic_store_explicit(&ctx->profiling, enabled ? 1 : 0, memory_order_relaxed);
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 
-int tm_metal_counter_sampling_supported(tm_metal_ctx *ctx) {
+int ch_metal_counter_sampling_supported(ch_metal_ctx *ctx) {
     return ctx != NULL && ctx->counter_ready;
 }
 
-int tm_metal_profile_read(tm_metal_ctx *ctx, uint32_t index, char *name, size_t name_cap,
+int ch_metal_profile_read(ch_metal_ctx *ctx, uint32_t index, char *name, size_t name_cap,
                           uint64_t *nanos, uint64_t *count) {
     if (ctx == NULL || name == NULL || name_cap == 0 || nanos == NULL || count == NULL) {
         return 0;
@@ -1698,38 +1698,38 @@ int tm_metal_profile_read(tm_metal_ctx *ctx, uint32_t index, char *name, size_t 
     return found;
 }
 
-uint64_t tm_metal_allocated_bytes(const tm_metal_ctx *ctx) {
+uint64_t ch_metal_allocated_bytes(const ch_metal_ctx *ctx) {
     return ctx == NULL ? 0 : atomic_load_explicit(&ctx->allocated, memory_order_relaxed);
 }
 
-uint64_t tm_metal_in_flight_bytes(const tm_metal_ctx *ctx) {
+uint64_t ch_metal_in_flight_bytes(const ch_metal_ctx *ctx) {
     return ctx == NULL ? 0 : atomic_load_explicit(&ctx->leased, memory_order_relaxed);
 }
 
 /* ---------------- Q35-2A: Gated DeltaNet operator dispatches ---------------- */
 
-int tm_metal_qwen35_conv_step(tm_metal_ctx *ctx, tm_metal_buffer *hist, tm_metal_buffer *x,
-                              tm_metal_buffer *w, tm_metal_buffer *y, uint32_t channels,
+int ch_metal_qwen35_conv_step(ch_metal_ctx *ctx, ch_metal_buffer *hist, ch_metal_buffer *x,
+                              ch_metal_buffer *w, ch_metal_buffer *y, uint32_t channels,
                               uint32_t kernel, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qwen35_conv") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qwen35_conv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (channels == 0 || kernel == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qwen35_conv: zero geometry");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qwen35_conv: zero geometry");
     }
-    if (tm_check_buffer(ctx, hist, (size_t)(kernel - 1) * channels * 4u, err, err_cap,
-                        "qwen35_conv.hist") != TM_METAL_OK ||
-        tm_check_buffer(ctx, x, (size_t)channels * 4u, err, err_cap, "qwen35_conv.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, w, (size_t)kernel * channels * 4u, err, err_cap,
-                        "qwen35_conv.w") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, (size_t)channels * 4u, err, err_cap, "qwen35_conv.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, hist, (size_t)(kernel - 1) * channels * 4u, err, err_cap,
+                        "qwen35_conv.hist") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, (size_t)channels * 4u, err, err_cap, "qwen35_conv.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, w, (size_t)kernel * channels * 4u, err, err_cap,
+                        "qwen35_conv.w") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, (size_t)channels * 4u, err, err_cap, "qwen35_conv.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qwen35_conv: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"qwen35_conv: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_conv];
         [enc setBuffer:hist->buffer offset:0 atIndex:0];
@@ -1746,29 +1746,29 @@ int tm_metal_qwen35_conv_step(tm_metal_ctx *ctx, tm_metal_buffer *hist, tm_metal
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)channels, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_conv");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_conv");
     }
 }
 
-int tm_metal_qwen35_conv_shift(tm_metal_ctx *ctx, tm_metal_buffer *hist, tm_metal_buffer *x,
+int ch_metal_qwen35_conv_shift(ch_metal_ctx *ctx, ch_metal_buffer *hist, ch_metal_buffer *x,
                                uint32_t channels, uint32_t kernel, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qwen35_conv_shift") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qwen35_conv_shift") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (channels == 0 || kernel == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qwen35_conv_shift: zero geometry");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qwen35_conv_shift: zero geometry");
     }
-    if (tm_check_buffer(ctx, hist, (size_t)(kernel - 1) * channels * 4u, err, err_cap,
-                        "qwen35_conv_shift.hist") != TM_METAL_OK ||
-        tm_check_buffer(ctx, x, (size_t)channels * 4u, err, err_cap,
-                        "qwen35_conv_shift.x") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, hist, (size_t)(kernel - 1) * channels * 4u, err, err_cap,
+                        "qwen35_conv_shift.hist") != CH_METAL_OK ||
+        ch_check_buffer(ctx, x, (size_t)channels * 4u, err, err_cap,
+                        "qwen35_conv_shift.x") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qwen35_conv_shift: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"qwen35_conv_shift: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_conv_shift];
         [enc setBuffer:hist->buffer offset:0 atIndex:0];
@@ -1781,28 +1781,28 @@ int tm_metal_qwen35_conv_shift(tm_metal_ctx *ctx, tm_metal_buffer *hist, tm_meta
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)channels, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_conv_shift");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_conv_shift");
     }
 }
 
-int tm_metal_qwen35_l2norm_heads(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal_buffer *y,
+int ch_metal_qwen35_l2norm_heads(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *y,
                                  uint32_t rows, uint32_t cols, float eps, char *err,
                                  size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qwen35_l2norm") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qwen35_l2norm") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qwen35_l2norm: zero geometry");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qwen35_l2norm: zero geometry");
     }
-    if (tm_check_buffer(ctx, x, (size_t)rows * cols * 4u, err, err_cap, "qwen35_l2norm.x") != TM_METAL_OK ||
-        tm_check_buffer(ctx, y, (size_t)rows * cols * 4u, err, err_cap, "qwen35_l2norm.y") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, x, (size_t)rows * cols * 4u, err, err_cap, "qwen35_l2norm.x") != CH_METAL_OK ||
+        ch_check_buffer(ctx, y, (size_t)rows * cols * 4u, err, err_cap, "qwen35_l2norm.y") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qwen35_l2norm: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"qwen35_l2norm: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_l2norm];
         [enc setBuffer:x->buffer offset:0 atIndex:0];
@@ -1813,34 +1813,34 @@ int tm_metal_qwen35_l2norm_heads(tm_metal_ctx *ctx, tm_metal_buffer *x, tm_metal
         [enc setBytes:&eps length:sizeof(eps) atIndex:3];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_l2norm");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_l2norm");
     }
 }
 
-int tm_metal_qwen35_beta_decay(tm_metal_ctx *ctx, tm_metal_buffer *raw_beta, tm_metal_buffer *alpha,
-                               tm_metal_buffer *dt_bias, tm_metal_buffer *ssm_a,
-                               tm_metal_buffer *beta_out, tm_metal_buffer *gate_out, uint32_t n,
+int ch_metal_qwen35_beta_decay(ch_metal_ctx *ctx, ch_metal_buffer *raw_beta, ch_metal_buffer *alpha,
+                               ch_metal_buffer *dt_bias, ch_metal_buffer *ssm_a,
+                               ch_metal_buffer *beta_out, ch_metal_buffer *gate_out, uint32_t n,
                                char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qwen35_beta_decay") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qwen35_beta_decay") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qwen35_beta_decay: zero length");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qwen35_beta_decay: zero length");
     }
     size_t need = (size_t)n * 4u;
-    if (tm_check_buffer(ctx, raw_beta, need, err, err_cap, "qwen35_beta_decay.beta") != TM_METAL_OK ||
-        tm_check_buffer(ctx, alpha, need, err, err_cap, "qwen35_beta_decay.alpha") != TM_METAL_OK ||
-        tm_check_buffer(ctx, dt_bias, need, err, err_cap, "qwen35_beta_decay.dt") != TM_METAL_OK ||
-        tm_check_buffer(ctx, ssm_a, need, err, err_cap, "qwen35_beta_decay.a") != TM_METAL_OK ||
-        tm_check_buffer(ctx, beta_out, need, err, err_cap, "qwen35_beta_decay.beta_out") != TM_METAL_OK ||
-        tm_check_buffer(ctx, gate_out, need, err, err_cap, "qwen35_beta_decay.gate_out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, raw_beta, need, err, err_cap, "qwen35_beta_decay.beta") != CH_METAL_OK ||
+        ch_check_buffer(ctx, alpha, need, err, err_cap, "qwen35_beta_decay.alpha") != CH_METAL_OK ||
+        ch_check_buffer(ctx, dt_bias, need, err, err_cap, "qwen35_beta_decay.dt") != CH_METAL_OK ||
+        ch_check_buffer(ctx, ssm_a, need, err, err_cap, "qwen35_beta_decay.a") != CH_METAL_OK ||
+        ch_check_buffer(ctx, beta_out, need, err, err_cap, "qwen35_beta_decay.beta_out") != CH_METAL_OK ||
+        ch_check_buffer(ctx, gate_out, need, err, err_cap, "qwen35_beta_decay.gate_out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qwen35_beta_decay: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"qwen35_beta_decay: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_beta_decay];
         [enc setBuffer:raw_beta->buffer offset:0 atIndex:0];
@@ -1860,38 +1860,38 @@ int tm_metal_qwen35_beta_decay(tm_metal_ctx *ctx, tm_metal_buffer *raw_beta, tm_
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_beta_decay");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_beta_decay");
     }
 }
 
-int tm_metal_qwen35_gdn_step(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k,
-                             tm_metal_buffer *v, tm_metal_buffer *gate, tm_metal_buffer *beta,
-                             tm_metal_buffer *state, tm_metal_buffer *out, uint32_t heads,
+int ch_metal_qwen35_gdn_step(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k,
+                             ch_metal_buffer *v, ch_metal_buffer *gate, ch_metal_buffer *beta,
+                             ch_metal_buffer *state, ch_metal_buffer *out, uint32_t heads,
                              uint32_t k_dim, uint32_t v_dim, float q_scale, char *err,
                              size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qwen35_gdn_step") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qwen35_gdn_step") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (heads == 0 || k_dim == 0 || v_dim == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qwen35_gdn_step: zero geometry");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qwen35_gdn_step: zero geometry");
     }
     size_t qk = (size_t)heads * k_dim * 4u;
     size_t vv = (size_t)heads * v_dim * 4u;
-    if (tm_check_buffer(ctx, q, qk, err, err_cap, "gdn_step.q") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k, qk, err, err_cap, "gdn_step.k") != TM_METAL_OK ||
-        tm_check_buffer(ctx, v, vv, err, err_cap, "gdn_step.v") != TM_METAL_OK ||
-        tm_check_buffer(ctx, gate, (size_t)heads * 4u, err, err_cap, "gdn_step.gate") != TM_METAL_OK ||
-        tm_check_buffer(ctx, beta, (size_t)heads * 4u, err, err_cap, "gdn_step.beta") != TM_METAL_OK ||
-        tm_check_buffer(ctx, state, (size_t)heads * k_dim * v_dim * 4u, err, err_cap,
-                        "gdn_step.state") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, vv, err, err_cap, "gdn_step.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, q, qk, err, err_cap, "gdn_step.q") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k, qk, err, err_cap, "gdn_step.k") != CH_METAL_OK ||
+        ch_check_buffer(ctx, v, vv, err, err_cap, "gdn_step.v") != CH_METAL_OK ||
+        ch_check_buffer(ctx, gate, (size_t)heads * 4u, err, err_cap, "gdn_step.gate") != CH_METAL_OK ||
+        ch_check_buffer(ctx, beta, (size_t)heads * 4u, err, err_cap, "gdn_step.beta") != CH_METAL_OK ||
+        ch_check_buffer(ctx, state, (size_t)heads * k_dim * v_dim * 4u, err, err_cap,
+                        "gdn_step.state") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, vv, err, err_cap, "gdn_step.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"gdn_step: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"gdn_step: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_gdn_step];
         [enc setBuffer:q->buffer offset:0 atIndex:0];
@@ -1922,31 +1922,31 @@ int tm_metal_qwen35_gdn_step(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buf
         }
         [enc dispatchThreads:MTLSizeMake((NSUInteger)v_dim, (NSUInteger)heads, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_gdn_step");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_gdn_step");
     }
 }
 
-int tm_metal_qwen35_gated_norm(tm_metal_ctx *ctx, tm_metal_buffer *o, tm_metal_buffer *z,
-                               tm_metal_buffer *weight, tm_metal_buffer *out, uint32_t rows,
+int ch_metal_qwen35_gated_norm(ch_metal_ctx *ctx, ch_metal_buffer *o, ch_metal_buffer *z,
+                               ch_metal_buffer *weight, ch_metal_buffer *out, uint32_t rows,
                                uint32_t cols, float eps, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qwen35_gated_norm") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qwen35_gated_norm") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (rows == 0 || cols == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qwen35_gated_norm: zero geometry");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qwen35_gated_norm: zero geometry");
     }
     size_t need = (size_t)rows * cols * 4u;
-    if (tm_check_buffer(ctx, o, need, err, err_cap, "gated_norm.o") != TM_METAL_OK ||
-        tm_check_buffer(ctx, z, need, err, err_cap, "gated_norm.z") != TM_METAL_OK ||
-        tm_check_buffer(ctx, weight, (size_t)cols * 4u, err, err_cap, "gated_norm.w") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, need, err, err_cap, "gated_norm.out") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, o, need, err, err_cap, "gated_norm.o") != CH_METAL_OK ||
+        ch_check_buffer(ctx, z, need, err, err_cap, "gated_norm.z") != CH_METAL_OK ||
+        ch_check_buffer(ctx, weight, (size_t)cols * 4u, err, err_cap, "gated_norm.w") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, need, err, err_cap, "gated_norm.out") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"gated_norm: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"gated_norm: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_gated_norm];
         [enc setBuffer:o->buffer offset:0 atIndex:0];
@@ -1963,32 +1963,32 @@ int tm_metal_qwen35_gated_norm(tm_metal_ctx *ctx, tm_metal_buffer *o, tm_metal_b
         NSUInteger tg = width > 0 ? width : 32;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)rows, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_gated_norm");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_gated_norm");
     }
 }
 
 /* ---------------- Q35-2B: full-attention operator dispatches ---------------- */
 
-int tm_metal_qwen35_q_gate_split(tm_metal_ctx *ctx, tm_metal_buffer *qg, tm_metal_buffer *q_out,
-                                 tm_metal_buffer *gate_out, uint32_t heads, uint32_t head_dim,
+int ch_metal_qwen35_q_gate_split(ch_metal_ctx *ctx, ch_metal_buffer *qg, ch_metal_buffer *q_out,
+                                 ch_metal_buffer *gate_out, uint32_t heads, uint32_t head_dim,
                                  char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "qg_split") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "qg_split") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (heads == 0 || head_dim == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"qg_split: zero geometry");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"qg_split: zero geometry");
     }
     size_t row = (size_t)heads * head_dim * 4u;
-    if (tm_check_buffer(ctx, qg, row * 2u, err, err_cap, "qg_split.qg") != TM_METAL_OK ||
-        tm_check_buffer(ctx, q_out, row, err, err_cap, "qg_split.q") != TM_METAL_OK ||
-        tm_check_buffer(ctx, gate_out, row, err, err_cap, "qg_split.gate") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, qg, row * 2u, err, err_cap, "qg_split.qg") != CH_METAL_OK ||
+        ch_check_buffer(ctx, q_out, row, err, err_cap, "qg_split.q") != CH_METAL_OK ||
+        ch_check_buffer(ctx, gate_out, row, err, err_cap, "qg_split.gate") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"qg_split: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"qg_split: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_qg_split];
         [enc setBuffer:qg->buffer offset:0 atIndex:0];
@@ -2004,34 +2004,34 @@ int tm_metal_qwen35_q_gate_split(tm_metal_ctx *ctx, tm_metal_buffer *qg, tm_meta
         NSUInteger total = (NSUInteger)heads * head_dim;
         [enc dispatchThreads:MTLSizeMake(total, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_qg_split");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_qg_split");
     }
 }
 
-int tm_metal_qwen35_rope_partial(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k,
-                                 tm_metal_buffer *inv_freq, uint32_t pos, uint32_t n_q_heads,
+int ch_metal_qwen35_rope_partial(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k,
+                                 ch_metal_buffer *inv_freq, uint32_t pos, uint32_t n_q_heads,
                                  uint32_t n_kv_heads, uint32_t head_dim, uint32_t n_rot,
                                  char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "q35_rope_partial") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "q35_rope_partial") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (head_dim == 0 || n_rot == 0 || n_rot > head_dim || n_rot % 2u != 0u) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS,
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS,
                        @"q35_rope_partial: n_rot must be an even prefix of head_dim");
     }
-    if (tm_check_buffer(ctx, q, (size_t)n_q_heads * head_dim * 4u, err, err_cap,
-                        "rope.q") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k, (size_t)n_kv_heads * head_dim * 4u, err, err_cap,
-                        "rope.k") != TM_METAL_OK ||
-        tm_check_buffer(ctx, inv_freq, (size_t)(n_rot / 2u) * 4u, err, err_cap,
-                        "rope.inv_freq") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, q, (size_t)n_q_heads * head_dim * 4u, err, err_cap,
+                        "rope.q") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k, (size_t)n_kv_heads * head_dim * 4u, err, err_cap,
+                        "rope.k") != CH_METAL_OK ||
+        ch_check_buffer(ctx, inv_freq, (size_t)(n_rot / 2u) * 4u, err, err_cap,
+                        "rope.inv_freq") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"q35_rope_partial: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q35_rope_partial: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_rope_partial];
         [enc setBuffer:q->buffer offset:0 atIndex:0];
@@ -2048,33 +2048,33 @@ int tm_metal_qwen35_rope_partial(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal
         NSUInteger total = (NSUInteger)(n_q_heads + n_kv_heads);
         [enc dispatchThreadgroups:MTLSizeMake(total, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_rope_partial");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_rope_partial");
     }
 }
 
-int tm_metal_qwen35_kv_store_f16(tm_metal_ctx *ctx, tm_metal_buffer *k_src, tm_metal_buffer *v_src,
-                                 tm_metal_buffer *k_cache, tm_metal_buffer *v_cache, uint32_t pos,
+int ch_metal_qwen35_kv_store_f16(ch_metal_ctx *ctx, ch_metal_buffer *k_src, ch_metal_buffer *v_src,
+                                 ch_metal_buffer *k_cache, ch_metal_buffer *v_cache, uint32_t pos,
                                  uint32_t cap, uint32_t head_dim, uint32_t kv_heads, char *err,
                                  size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "kv_store_f16") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "kv_store_f16") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (head_dim == 0 || kv_heads == 0 || pos >= cap) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"kv_store_f16: geometry out of range");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"kv_store_f16: geometry out of range");
     }
     size_t src = (size_t)kv_heads * head_dim * 4u;
     size_t dst = (size_t)kv_heads * cap * head_dim * 2u;
-    if (tm_check_buffer(ctx, k_src, src, err, err_cap, "kv_store_f16.k_src") != TM_METAL_OK ||
-        tm_check_buffer(ctx, v_src, src, err, err_cap, "kv_store_f16.v_src") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k_cache, dst, err, err_cap, "kv_store_f16.k_cache") != TM_METAL_OK ||
-        tm_check_buffer(ctx, v_cache, dst, err, err_cap, "kv_store_f16.v_cache") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, k_src, src, err, err_cap, "kv_store_f16.k_src") != CH_METAL_OK ||
+        ch_check_buffer(ctx, v_src, src, err, err_cap, "kv_store_f16.v_src") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k_cache, dst, err, err_cap, "kv_store_f16.k_cache") != CH_METAL_OK ||
+        ch_check_buffer(ctx, v_cache, dst, err, err_cap, "kv_store_f16.v_cache") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"kv_store_f16: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"kv_store_f16: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_kv_store_f16];
         [enc setBuffer:k_src->buffer offset:0 atIndex:0];
@@ -2091,47 +2091,47 @@ int tm_metal_qwen35_kv_store_f16(tm_metal_ctx *ctx, tm_metal_buffer *k_src, tm_m
         /* A full row per head: head_dim can exceed the 128-thread group. */
         [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_heads * head_dim, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_kv_store_f16");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_kv_store_f16");
     }
 }
 
-static id<MTLComputePipelineState> tm_attn_sk_partial_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+static id<MTLComputePipelineState> ch_attn_sk_partial_pso(ch_metal_ctx *ctx, uint32_t head_dim,
                                                           uint32_t group, int f32_cache);
 
-int tm_metal_qwen35_attention_f16(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k_cache,
-                                  tm_metal_buffer *v_cache, tm_metal_buffer *out,
-                                  tm_metal_buffer *scratch, uint32_t heads, uint32_t pos,
+int ch_metal_qwen35_attention_f16(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k_cache,
+                                  ch_metal_buffer *v_cache, ch_metal_buffer *out,
+                                  ch_metal_buffer *scratch, uint32_t heads, uint32_t pos,
                                   uint32_t cap, uint32_t head_dim, uint32_t group, float scale,
                                   char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "attn_f16") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "attn_f16") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (heads == 0 || head_dim == 0 || group == 0 || pos >= cap || heads % group != 0u) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"attn_f16: geometry out of range");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"attn_f16: geometry out of range");
     }
     /* One query row through the split-K chunk kernels (the decode path;
      * chunked prefill keeps the one-group-per-row kernel - see
-     * tm_attention_chunk). */
-    if (tm_attn_sk_partial_pso(ctx, head_dim, group, 0) != nil) {
-        return tm_metal_qwen35_attention_f16_chunk(ctx, q, k_cache, v_cache, out, scratch, heads,
+     * ch_attention_chunk). */
+    if (ch_attn_sk_partial_pso(ctx, head_dim, group, 0) != nil) {
+        return ch_metal_qwen35_attention_f16_chunk(ctx, q, k_cache, v_cache, out, scratch, heads,
                                                    pos, cap, head_dim, group, scale, 1u, 0u,
                                                    err, err_cap);
     }
     size_t qb = (size_t)heads * head_dim * 4u;
     size_t cache = (size_t)(heads / group) * cap * head_dim * 2u;
-    if (tm_check_buffer(ctx, q, qb, err, err_cap, "attn_f16.q") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k_cache, cache, err, err_cap, "attn_f16.k") != TM_METAL_OK ||
-        tm_check_buffer(ctx, v_cache, cache, err, err_cap, "attn_f16.v") != TM_METAL_OK ||
-        tm_check_buffer(ctx, out, qb, err, err_cap, "attn_f16.out") != TM_METAL_OK ||
-        tm_check_buffer(ctx, scratch, (size_t)heads * cap * 4u, err, err_cap,
-                        "attn_f16.scratch") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, q, qb, err, err_cap, "attn_f16.q") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k_cache, cache, err, err_cap, "attn_f16.k") != CH_METAL_OK ||
+        ch_check_buffer(ctx, v_cache, cache, err, err_cap, "attn_f16.v") != CH_METAL_OK ||
+        ch_check_buffer(ctx, out, qb, err, err_cap, "attn_f16.out") != CH_METAL_OK ||
+        ch_check_buffer(ctx, scratch, (size_t)heads * cap * 4u, err, err_cap,
+                        "attn_f16.scratch") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"attn_f16: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"attn_f16: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_attention_f16];
         [enc setBuffer:q->buffer offset:0 atIndex:0];
@@ -2154,28 +2154,28 @@ int tm_metal_qwen35_attention_f16(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_meta
         [enc setBytes:&scale length:sizeof(scale) atIndex:9];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)heads, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_attention_f16");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_attention_f16");
     }
 }
 
-int tm_metal_qwen35_attn_gate(tm_metal_ctx *ctx, tm_metal_buffer *attn, tm_metal_buffer *gate,
+int ch_metal_qwen35_attn_gate(ch_metal_ctx *ctx, ch_metal_buffer *attn, ch_metal_buffer *gate,
                               uint32_t n, char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "attn_gate") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "attn_gate") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"attn_gate: zero length");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"attn_gate: zero length");
     }
     size_t need = (size_t)n * 4u;
-    if (tm_check_buffer(ctx, attn, need, err, err_cap, "attn_gate.attn") != TM_METAL_OK ||
-        tm_check_buffer(ctx, gate, need, err, err_cap, "attn_gate.gate") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, attn, need, err, err_cap, "attn_gate.attn") != CH_METAL_OK ||
+        ch_check_buffer(ctx, gate, need, err, err_cap, "attn_gate.gate") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"attn_gate: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"attn_gate: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_attn_gate];
         [enc setBuffer:attn->buffer offset:0 atIndex:0];
@@ -2187,26 +2187,26 @@ int tm_metal_qwen35_attn_gate(tm_metal_ctx *ctx, tm_metal_buffer *attn, tm_metal
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_attn_gate");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_attn_gate");
     }
 }
 
-int tm_metal_qwen35_silu(tm_metal_ctx *ctx, tm_metal_buffer *x, uint32_t n, char *err,
+int ch_metal_qwen35_silu(ch_metal_ctx *ctx, ch_metal_buffer *x, uint32_t n, char *err,
                          size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "q35_silu") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "q35_silu") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"q35_silu: zero length");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"q35_silu: zero length");
     }
-    if (tm_check_buffer(ctx, x, (size_t)n * 4u, err, err_cap, "q35_silu.x") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, x, (size_t)n * 4u, err, err_cap, "q35_silu.x") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"q35_silu: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q35_silu: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_silu];
         [enc setBuffer:x->buffer offset:0 atIndex:0];
@@ -2216,31 +2216,31 @@ int tm_metal_qwen35_silu(tm_metal_ctx *ctx, tm_metal_buffer *x, uint32_t n, char
         NSUInteger tg = width > 0 ? width * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_silu");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_silu");
     }
 }
 
-int tm_metal_qwen35_split_qkv(tm_metal_ctx *ctx, tm_metal_buffer *y, tm_metal_buffer *q,
-                              tm_metal_buffer *k, tm_metal_buffer *v, uint32_t width, char *err,
+int ch_metal_qwen35_split_qkv(ch_metal_ctx *ctx, ch_metal_buffer *y, ch_metal_buffer *q,
+                              ch_metal_buffer *k, ch_metal_buffer *v, uint32_t width, char *err,
                               size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "q35_split_qkv") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "q35_split_qkv") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (width == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"q35_split_qkv: zero width");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"q35_split_qkv: zero width");
     }
     size_t qk = (size_t)width * 4u;
-    if (tm_check_buffer(ctx, y, qk * 3u, err, err_cap, "split_qkv.y") != TM_METAL_OK ||
-        tm_check_buffer(ctx, q, qk, err, err_cap, "split_qkv.q") != TM_METAL_OK ||
-        tm_check_buffer(ctx, k, qk, err, err_cap, "split_qkv.k") != TM_METAL_OK ||
-        tm_check_buffer(ctx, v, qk, err, err_cap, "split_qkv.v") != TM_METAL_OK) {
-        return TM_METAL_ERR_BOUNDS;
+    if (ch_check_buffer(ctx, y, qk * 3u, err, err_cap, "split_qkv.y") != CH_METAL_OK ||
+        ch_check_buffer(ctx, q, qk, err, err_cap, "split_qkv.q") != CH_METAL_OK ||
+        ch_check_buffer(ctx, k, qk, err, err_cap, "split_qkv.k") != CH_METAL_OK ||
+        ch_check_buffer(ctx, v, qk, err, err_cap, "split_qkv.v") != CH_METAL_OK) {
+        return CH_METAL_ERR_BOUNDS;
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"q35_split_qkv: no encoder");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"q35_split_qkv: no encoder");
         }
         [enc setComputePipelineState:ctx->pso_q35_split_qkv];
         [enc setBuffer:y->buffer offset:0 atIndex:0];
@@ -2256,34 +2256,34 @@ int tm_metal_qwen35_split_qkv(tm_metal_ctx *ctx, tm_metal_buffer *y, tm_metal_bu
         NSUInteger tg = tw > 0 ? tw * 8 : 256;
         [enc dispatchThreads:MTLSizeMake((NSUInteger)width, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        return tm_frame_commit(ctx, &f, err, err_cap, "qwen35_split_qkv");
+        return ch_frame_commit(ctx, &f, err, err_cap, "qwen35_split_qkv");
     }
 }
 
-int tm_metal_buffer_zero(tm_metal_ctx *ctx, tm_metal_buffer *buffer, size_t off, size_t len,
+int ch_metal_buffer_zero(ch_metal_ctx *ctx, ch_metal_buffer *buffer, size_t off, size_t len,
                          char *err, size_t err_cap) {
-    if (tm_check_ctx(ctx, err, err_cap, "buffer_zero") != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, "buffer_zero") != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     if (buffer == NULL || buffer->owner != ctx) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"buffer_zero: foreign buffer");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"buffer_zero: foreign buffer");
     }
     if (len == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"buffer_zero: zero length");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"buffer_zero: zero length");
     }
     if (off + len > buffer->len) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS, @"buffer_zero: range outside the buffer");
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS, @"buffer_zero: range outside the buffer");
     }
     @autoreleasepool {
         if (buffer->shared) {
             /* Shared storage is host-coherent: zero in place, no staging. */
             memset((char *)buffer->buffer.contents + off, 0, len);
-            return TM_METAL_OK;
+            return CH_METAL_OK;
         }
         /* Private storage: GPU-side fill (cold path, synchronous). */
         id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
         if (cb == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"buffer_zero: no command buffer");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"buffer_zero: no command buffer");
         }
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
         [blit fillBuffer:buffer->buffer range:NSMakeRange(off, len) value:0];
@@ -2291,39 +2291,39 @@ int tm_metal_buffer_zero(tm_metal_ctx *ctx, tm_metal_buffer *buffer, size_t off,
         [cb commit];
         [cb waitUntilCompleted];
         if (cb.status == MTLCommandBufferStatusError) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL, @"buffer_zero: GPU fill failed");
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL, @"buffer_zero: GPU fill failed");
         }
-        return TM_METAL_OK;
+        return CH_METAL_OK;
     }
 }
 
 /* ---- chunk-wide Gated DeltaNet core (engine prefill) ---- */
 
 typedef struct {
-    tm_metal_buffer *buf;
+    ch_metal_buffer *buf;
     size_t need; /* bytes the kernel may touch */
     const char *name;
-} tm_arg_buffer;
+} ch_arg_buffer;
 
 /* Encode one compute dispatch over checked buffers and 32-bit constants. */
-static int tm_dispatch_args(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
-                            const tm_arg_buffer *bufs, int nbufs, const uint32_t *consts,
+static int ch_dispatch_args(ch_metal_ctx *ctx, id<MTLComputePipelineState> pso,
+                            const ch_arg_buffer *bufs, int nbufs, const uint32_t *consts,
                             int nconsts, MTLSize grid, MTLSize group, char *err,
                             size_t err_cap, const char *what) {
-    if (tm_check_ctx(ctx, err, err_cap, what) != TM_METAL_OK) {
-        return TM_METAL_ERR_UNSUPPORTED;
+    if (ch_check_ctx(ctx, err, err_cap, what) != CH_METAL_OK) {
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     for (int i = 0; i < nbufs; ++i) {
-        if (tm_check_buffer(ctx, bufs[i].buf, bufs[i].need, err, err_cap, bufs[i].name) !=
-            TM_METAL_OK) {
-            return TM_METAL_ERR_BOUNDS;
+        if (ch_check_buffer(ctx, bufs[i].buf, bufs[i].need, err, err_cap, bufs[i].name) !=
+            CH_METAL_OK) {
+            return CH_METAL_ERR_BOUNDS;
         }
     }
     @autoreleasepool {
-        tm_frame f;
-        id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+        ch_frame f;
+        id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
         if (enc == nil) {
-            return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+            return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"%s: no encoder", what]);
         }
         [enc setComputePipelineState:pso];
@@ -2335,132 +2335,132 @@ static int tm_dispatch_args(tm_metal_ctx *ctx, id<MTLComputePipelineState> pso,
             [enc setBytes:&consts[i] length:sizeof(uint32_t) atIndex:(NSUInteger)(nbufs + i)];
         }
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
-        return tm_frame_commit(ctx, &f, err, err_cap, what);
+        return ch_frame_commit(ctx, &f, err, err_cap, what);
     }
 }
 
-int tm_metal_qwen35_conv_chunk(tm_metal_ctx *ctx, tm_metal_buffer *hist, tm_metal_buffer *x,
-                               tm_metal_buffer *w, tm_metal_buffer *y, uint32_t channels,
+int ch_metal_qwen35_conv_chunk(ch_metal_ctx *ctx, ch_metal_buffer *hist, ch_metal_buffer *x,
+                               ch_metal_buffer *w, ch_metal_buffer *y, uint32_t channels,
                                uint32_t kern, uint32_t n, char *err, size_t err_cap) {
     if (channels == 0 || kern < 2 || n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"qwen35_conv_chunk: channels, n must be positive and kernel >= 2");
     }
     size_t row = (size_t)channels * 4u;
-    tm_arg_buffer bufs[4] = {
+    ch_arg_buffer bufs[4] = {
         {hist, (size_t)(kern - 1u) * row, "conv_chunk.hist"},
         {x, (size_t)n * row, "conv_chunk.x"},
         {w, (size_t)channels * kern * 4u, "conv_chunk.w"},
         {y, (size_t)n * row, "conv_chunk.y"},
     };
     uint32_t consts[3] = {channels, kern, n};
-    int rc = tm_dispatch_args(ctx, ctx->pso_q35_conv_chunk, bufs, 4, consts, 3,
+    int rc = ch_dispatch_args(ctx, ctx->pso_q35_conv_chunk, bufs, 4, consts, 3,
                               MTLSizeMake(channels, n, 1), MTLSizeMake(64, 1, 1), err, err_cap,
                               "qwen35_conv_chunk");
-    if (rc != TM_METAL_OK) {
+    if (rc != CH_METAL_OK) {
         return rc;
     }
     /* History refresh after every output of the chunk was computed (the
      * queue/encoder orders the two dispatches). */
-    tm_arg_buffer sbufs[2] = {
+    ch_arg_buffer sbufs[2] = {
         {hist, (size_t)(kern - 1u) * row, "conv_chunk.hist"},
         {x, (size_t)n * row, "conv_chunk.x"},
     };
-    return tm_dispatch_args(ctx, ctx->pso_q35_conv_chunk_shift, sbufs, 2, consts, 3,
+    return ch_dispatch_args(ctx, ctx->pso_q35_conv_chunk_shift, sbufs, 2, consts, 3,
                             MTLSizeMake(channels, 1, 1), MTLSizeMake(64, 1, 1), err, err_cap,
                             "qwen35_conv_chunk_shift");
 }
 
-int tm_metal_qwen35_conv_chunk_shift(tm_metal_ctx *ctx, tm_metal_buffer *hist,
-                                     tm_metal_buffer *x, uint32_t channels, uint32_t kern,
+int ch_metal_qwen35_conv_chunk_shift(ch_metal_ctx *ctx, ch_metal_buffer *hist,
+                                     ch_metal_buffer *x, uint32_t channels, uint32_t kern,
                                      uint32_t n, char *err, size_t err_cap) {
     if (channels == 0 || kern < 2 || n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"qwen35_conv_chunk_shift: channels, n must be positive and kernel >= 2");
     }
     size_t row = (size_t)channels * 4u;
-    tm_arg_buffer bufs[2] = {
+    ch_arg_buffer bufs[2] = {
         {hist, (size_t)(kern - 1u) * row, "conv_chunk_shift.hist"},
         {x, (size_t)n * row, "conv_chunk_shift.x"},
     };
     uint32_t consts[3] = {channels, kern, n};
-    return tm_dispatch_args(ctx, ctx->pso_q35_conv_chunk_shift, bufs, 2, consts, 3,
+    return ch_dispatch_args(ctx, ctx->pso_q35_conv_chunk_shift, bufs, 2, consts, 3,
                             MTLSizeMake(channels, 1, 1), MTLSizeMake(64, 1, 1), err, err_cap,
                             "qwen35_conv_chunk_shift");
 }
 
-int tm_metal_qwen35_split_qkv_chunk(tm_metal_ctx *ctx, tm_metal_buffer *y, tm_metal_buffer *q,
-                                    tm_metal_buffer *k, tm_metal_buffer *v, uint32_t width,
+int ch_metal_qwen35_split_qkv_chunk(ch_metal_ctx *ctx, ch_metal_buffer *y, ch_metal_buffer *q,
+                                    ch_metal_buffer *k, ch_metal_buffer *v, uint32_t width,
                                     uint32_t n, char *err, size_t err_cap) {
     if (width == 0 || n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"qwen35_split_qkv_chunk: width and n must be positive");
     }
     size_t out = (size_t)n * width * 4u;
-    tm_arg_buffer bufs[4] = {
+    ch_arg_buffer bufs[4] = {
         {y, 3u * out, "split_chunk.y"},
         {q, out, "split_chunk.q"},
         {k, out, "split_chunk.k"},
         {v, out, "split_chunk.v"},
     };
     uint32_t consts[2] = {width, n};
-    return tm_dispatch_args(ctx, ctx->pso_q35_split_qkv_chunk, bufs, 4, consts, 2,
+    return ch_dispatch_args(ctx, ctx->pso_q35_split_qkv_chunk, bufs, 4, consts, 2,
                             MTLSizeMake(width, n, 1), MTLSizeMake(64, 1, 1), err, err_cap,
                             "qwen35_split_qkv_chunk");
 }
 
-int tm_metal_qwen35_beta_decay_chunk(tm_metal_ctx *ctx, tm_metal_buffer *raw_beta,
-                                     tm_metal_buffer *alpha, tm_metal_buffer *dt_bias,
-                                     tm_metal_buffer *ssm_a, tm_metal_buffer *beta_out,
-                                     tm_metal_buffer *gate_out, uint32_t per, uint32_t n,
+int ch_metal_qwen35_beta_decay_chunk(ch_metal_ctx *ctx, ch_metal_buffer *raw_beta,
+                                     ch_metal_buffer *alpha, ch_metal_buffer *dt_bias,
+                                     ch_metal_buffer *ssm_a, ch_metal_buffer *beta_out,
+                                     ch_metal_buffer *gate_out, uint32_t per, uint32_t n,
                                      char *err, size_t err_cap) {
     if (per == 0 || n == 0) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"qwen35_beta_decay_chunk: per and n must be positive");
     }
     uint32_t total = per * n;
     size_t rows = (size_t)total * 4u;
-    tm_arg_buffer bufs[6] = {
+    ch_arg_buffer bufs[6] = {
         {raw_beta, rows, "beta_chunk.raw_beta"}, {alpha, rows, "beta_chunk.alpha"},
         {dt_bias, (size_t)per * 4u, "beta_chunk.dt_bias"}, {ssm_a, (size_t)per * 4u, "beta_chunk.ssm_a"},
         {beta_out, rows, "beta_chunk.beta_out"}, {gate_out, rows, "beta_chunk.gate_out"},
     };
     uint32_t consts[2] = {total, per};
-    return tm_dispatch_args(ctx, ctx->pso_q35_beta_decay_chunk, bufs, 6, consts, 2,
+    return ch_dispatch_args(ctx, ctx->pso_q35_beta_decay_chunk, bufs, 6, consts, 2,
                             MTLSizeMake(total, 1, 1), MTLSizeMake(64, 1, 1), err, err_cap,
                             "qwen35_beta_decay_chunk");
 }
 
-/* Lanes per state column in tm_qwen35_gdn_chunk_k128 (kernels.metal). */
-#define TM_GDN_LANES 8u
+/* Lanes per state column in ch_qwen35_gdn_chunk_k128 (kernels.metal). */
+#define CH_GDN_LANES 8u
 
-int tm_metal_qwen35_gdn_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k,
-                              tm_metal_buffer *v, tm_metal_buffer *gate, tm_metal_buffer *beta,
-                              tm_metal_buffer *state, tm_metal_buffer *out, uint32_t heads,
+int ch_metal_qwen35_gdn_chunk(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k,
+                              ch_metal_buffer *v, ch_metal_buffer *gate, ch_metal_buffer *beta,
+                              ch_metal_buffer *state, ch_metal_buffer *out, uint32_t heads,
                               uint32_t k_dim, uint32_t v_dim, float q_scale, uint32_t n,
                               uint32_t qk_stride, uint32_t v_stride, uint32_t g_stride,
                               char *err, size_t err_cap) {
     /* No rollback point: the state buffer stands in for the snapshot and
      * snap_t never matches. */
-    return tm_metal_qwen35_gdn_chunk_snap(ctx, q, k, v, gate, beta, state, out, state, UINT32_MAX,
+    return ch_metal_qwen35_gdn_chunk_snap(ctx, q, k, v, gate, beta, state, out, state, UINT32_MAX,
                                           heads, k_dim, v_dim, q_scale, n, qk_stride, v_stride,
                                           g_stride, err, err_cap);
 }
 
-int tm_metal_qwen35_gdn_chunk_snap(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k,
-                                   tm_metal_buffer *v, tm_metal_buffer *gate,
-                                   tm_metal_buffer *beta, tm_metal_buffer *state,
-                                   tm_metal_buffer *out, tm_metal_buffer *snap, uint32_t snap_t,
+int ch_metal_qwen35_gdn_chunk_snap(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k,
+                                   ch_metal_buffer *v, ch_metal_buffer *gate,
+                                   ch_metal_buffer *beta, ch_metal_buffer *state,
+                                   ch_metal_buffer *out, ch_metal_buffer *snap, uint32_t snap_t,
                                    uint32_t heads, uint32_t k_dim, uint32_t v_dim, float q_scale,
                                    uint32_t n, uint32_t qk_stride, uint32_t v_stride,
                                    uint32_t g_stride, char *err, size_t err_cap) {
     if (heads == 0 || k_dim == 0 || v_dim == 0 || n == 0 || qk_stride < heads * k_dim ||
         v_stride < heads * v_dim || g_stride < heads ||
         (snap_t != UINT32_MAX && snap_t >= n)) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"qwen35_gdn_chunk: invalid geometry, strides or rollback token");
     }
-    tm_arg_buffer bufs[8] = {
+    ch_arg_buffer bufs[8] = {
         {q, (size_t)n * qk_stride * 4u, "gdn_chunk.q"},
         {k, (size_t)n * qk_stride * 4u, "gdn_chunk.k"},
         {v, (size_t)n * v_stride * 4u, "gdn_chunk.v"},
@@ -2476,58 +2476,58 @@ int tm_metal_qwen35_gdn_chunk_snap(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_met
     uint32_t scale_bits;
     memcpy(&scale_bits, &q_scale, sizeof scale_bits);
     uint32_t consts[9] = {k_dim, v_dim, scale_bits, heads, n, qk_stride, v_stride, g_stride, snap_t};
-    /* Register-resident state column, split across TM_GDN_LANES lanes,
+    /* Register-resident state column, split across CH_GDN_LANES lanes,
      * when the key dimension has an instantiation (see kernels.metal). */
-    const bool reg = k_dim == 128u && (v_dim % (32u / TM_GDN_LANES)) == 0u &&
+    const bool reg = k_dim == 128u && (v_dim % (32u / CH_GDN_LANES)) == 0u &&
                      !ctx->gdn_chunk_generic;
     id<MTLComputePipelineState> pso = reg ? ctx->pso_q35_gdn_chunk_k128 : ctx->pso_q35_gdn_chunk;
-    NSUInteger lanes = reg ? (NSUInteger)v_dim * TM_GDN_LANES : (NSUInteger)v_dim;
+    NSUInteger lanes = reg ? (NSUInteger)v_dim * CH_GDN_LANES : (NSUInteger)v_dim;
     /* The lane-split kernel maps lanes in whole SIMD groups of 32. */
     NSUInteger tg = lanes < 32u ? lanes : 32u;
-    return tm_dispatch_args(ctx, pso, bufs, 8, consts, 9, MTLSizeMake(lanes, heads, 1),
+    return ch_dispatch_args(ctx, pso, bufs, 8, consts, 9, MTLSizeMake(lanes, heads, 1),
                             MTLSizeMake(tg, 1, 1), err, err_cap, "qwen35_gdn_chunk");
 }
 
 /* ---- chunk-wide gated attention core (engine prefill) ---- */
 
-int tm_metal_qwen35_rope_partial_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k,
-                                       tm_metal_buffer *inv_freq, uint32_t pos0,
+int ch_metal_qwen35_rope_partial_chunk(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k,
+                                       ch_metal_buffer *inv_freq, uint32_t pos0,
                                        uint32_t n_q_heads, uint32_t n_kv_heads,
                                        uint32_t head_dim, uint32_t n_rot, uint32_t n, char *err,
                                        size_t err_cap) {
     if (n == 0 || head_dim == 0 || n_rot == 0 || n_rot > head_dim || (n_rot % 2u) != 0u ||
         n_rot / 2u > 128u) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        @"qwen35_rope_partial_chunk: invalid geometry");
     }
-    tm_arg_buffer bufs[3] = {
+    ch_arg_buffer bufs[3] = {
         {q, (size_t)n * n_q_heads * head_dim * 4u, "rope_chunk.q"},
         {k, (size_t)n * n_kv_heads * head_dim * 4u, "rope_chunk.k"},
         {inv_freq, (size_t)(n_rot / 2u) * 4u, "rope_chunk.inv_freq"},
     };
     uint32_t consts[5] = {pos0, n_q_heads, n_kv_heads, head_dim, n_rot};
-    return tm_dispatch_args(ctx, ctx->pso_q35_rope_chunk, bufs, 3, consts, 5,
+    return ch_dispatch_args(ctx, ctx->pso_q35_rope_chunk, bufs, 3, consts, 5,
                             MTLSizeMake((NSUInteger)(n_q_heads + n_kv_heads) * 128u, n, 1),
                             MTLSizeMake(128, 1, 1), err, err_cap, "qwen35_rope_partial_chunk");
 }
 
 /* KV store of a chunk into a packed f16 (f32_cache 0) or f32 (1) cache. */
-static int tm_kv_store_chunk(tm_metal_ctx *ctx, tm_metal_buffer *k_src, tm_metal_buffer *v_src,
-                             tm_metal_buffer *k_cache, tm_metal_buffer *v_cache, uint32_t pos0,
+static int ch_kv_store_chunk(ch_metal_ctx *ctx, ch_metal_buffer *k_src, ch_metal_buffer *v_src,
+                             ch_metal_buffer *k_cache, ch_metal_buffer *v_cache, uint32_t pos0,
                              uint32_t cap, uint32_t head_dim, uint32_t kv_heads, uint32_t n,
                              int f32_cache, char *err, size_t err_cap, const char *what) {
     if (n == 0 || head_dim == 0 || kv_heads == 0 || (uint64_t)pos0 + n > cap) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_BOUNDS,
+        return ch_fail(err, err_cap, CH_METAL_ERR_BOUNDS,
                        [NSString stringWithFormat:@"%s: positions beyond the cache capacity", what]);
     }
     size_t rows = (size_t)n * kv_heads * head_dim * 4u;
     size_t plane = (size_t)kv_heads * cap * head_dim * (f32_cache ? 4u : 2u);
-    tm_arg_buffer bufs[4] = {
+    ch_arg_buffer bufs[4] = {
         {k_src, rows, "kv_chunk.k"}, {v_src, rows, "kv_chunk.v"},
         {k_cache, plane, "kv_chunk.k_cache"}, {v_cache, plane, "kv_chunk.v_cache"},
     };
     uint32_t consts[5] = {pos0, cap, head_dim, kv_heads, n};
-    return tm_dispatch_args(ctx,
+    return ch_dispatch_args(ctx,
                             f32_cache ? ctx->pso_q35_kv_store_chunk_f32
                                       : ctx->pso_q35_kv_store_chunk,
                             bufs, 4, consts, 5,
@@ -2535,29 +2535,29 @@ static int tm_kv_store_chunk(tm_metal_ctx *ctx, tm_metal_buffer *k_src, tm_metal
                             MTLSizeMake(128, 1, 1), err, err_cap, what);
 }
 
-int tm_metal_qwen35_kv_store_f16_chunk(tm_metal_ctx *ctx, tm_metal_buffer *k_src,
-                                       tm_metal_buffer *v_src, tm_metal_buffer *k_cache,
-                                       tm_metal_buffer *v_cache, uint32_t pos0, uint32_t cap,
+int ch_metal_qwen35_kv_store_f16_chunk(ch_metal_ctx *ctx, ch_metal_buffer *k_src,
+                                       ch_metal_buffer *v_src, ch_metal_buffer *k_cache,
+                                       ch_metal_buffer *v_cache, uint32_t pos0, uint32_t cap,
                                        uint32_t head_dim, uint32_t kv_heads, uint32_t n, char *err,
                                        size_t err_cap) {
-    return tm_kv_store_chunk(ctx, k_src, v_src, k_cache, v_cache, pos0, cap, head_dim, kv_heads,
+    return ch_kv_store_chunk(ctx, k_src, v_src, k_cache, v_cache, pos0, cap, head_dim, kv_heads,
                              n, 0, err, err_cap, "qwen35_kv_store_f16_chunk");
 }
 
-int tm_metal_qwen35_kv_store_f32_chunk(tm_metal_ctx *ctx, tm_metal_buffer *k_src,
-                                       tm_metal_buffer *v_src, tm_metal_buffer *k_cache,
-                                       tm_metal_buffer *v_cache, uint32_t pos0, uint32_t cap,
+int ch_metal_qwen35_kv_store_f32_chunk(ch_metal_ctx *ctx, ch_metal_buffer *k_src,
+                                       ch_metal_buffer *v_src, ch_metal_buffer *k_cache,
+                                       ch_metal_buffer *v_cache, uint32_t pos0, uint32_t cap,
                                        uint32_t head_dim, uint32_t kv_heads, uint32_t n, char *err,
                                        size_t err_cap) {
-    return tm_kv_store_chunk(ctx, k_src, v_src, k_cache, v_cache, pos0, cap, head_dim, kv_heads,
+    return ch_kv_store_chunk(ctx, k_src, v_src, k_cache, v_cache, pos0, cap, head_dim, kv_heads,
                              n, 1, err, err_cap, "qwen35_kv_store_f32_chunk");
 }
 
 /* The grouped attention instance for this geometry and cache type, or
  * nil (the generic chunk kernel then runs). */
-#define TM_ATTN_SK_SLICES 16u
+#define CH_ATTN_SK_SLICES 16u
 
-static id<MTLComputePipelineState> tm_attn_sk_partial_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+static id<MTLComputePipelineState> ch_attn_sk_partial_pso(ch_metal_ctx *ctx, uint32_t head_dim,
                                                           uint32_t group, int f32_cache) {
     if (f32_cache) {
         if (head_dim == 16u && group == 2u) {
@@ -2586,7 +2586,7 @@ static id<MTLComputePipelineState> tm_attn_sk_partial_pso(tm_metal_ctx *ctx, uin
     return nil;
 }
 
-static id<MTLComputePipelineState> tm_attention_gqa_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+static id<MTLComputePipelineState> ch_attention_gqa_pso(ch_metal_ctx *ctx, uint32_t head_dim,
                                                        uint32_t group, int f32_cache) {
     if (f32_cache) {
         if (head_dim == 16u && group == 2u) {
@@ -2615,7 +2615,7 @@ static id<MTLComputePipelineState> tm_attention_gqa_pso(tm_metal_ctx *ctx, uint3
     return nil;
 }
 
-static id<MTLComputePipelineState> tm_attn_sk_merge_pso(tm_metal_ctx *ctx, uint32_t head_dim,
+static id<MTLComputePipelineState> ch_attn_sk_merge_pso(ch_metal_ctx *ctx, uint32_t head_dim,
                                                        uint32_t group) {
     if (head_dim == 256u && group == 4u) {
         return ctx->pso_q35_attn_sk_merge_256x4;
@@ -2633,21 +2633,21 @@ static id<MTLComputePipelineState> tm_attn_sk_merge_pso(tm_metal_ctx *ctx, uint3
 }
 
 /* Chunk attention over a packed f16 (f32_cache 0) or f32 (1) cache. */
-static int tm_attention_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_buffer *k_cache,
-                              tm_metal_buffer *v_cache, tm_metal_buffer *out,
-                              tm_metal_buffer *scratch, uint32_t heads, uint32_t pos0,
+static int ch_attention_chunk(ch_metal_ctx *ctx, ch_metal_buffer *q, ch_metal_buffer *k_cache,
+                              ch_metal_buffer *v_cache, ch_metal_buffer *out,
+                              ch_metal_buffer *scratch, uint32_t heads, uint32_t pos0,
                               uint32_t cap, uint32_t head_dim, uint32_t group, float scale,
                               uint32_t n, uint32_t window, int f32_cache, char *err,
                               size_t err_cap, const char *what) {
     if (n == 0 || heads == 0 || head_dim == 0 || group == 0 || (heads % group) != 0u ||
         (uint64_t)pos0 + n > cap) {
-        return tm_fail(err, err_cap, TM_METAL_ERR_UNSUPPORTED,
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
                        [NSString stringWithFormat:@"%s: invalid geometry or positions", what]);
     }
     uint32_t kv_heads = heads / group;
     size_t rows = (size_t)n * heads * head_dim * 4u;
     size_t plane = (size_t)kv_heads * cap * head_dim * (f32_cache ? 4u : 2u);
-    tm_arg_buffer bufs[5] = {
+    ch_arg_buffer bufs[5] = {
         {q, rows, "attn_chunk.q"}, {k_cache, plane, "attn_chunk.k_cache"},
         {v_cache, plane, "attn_chunk.v_cache"}, {out, rows, "attn_chunk.out"},
         {scratch, (size_t)n * heads * cap * 4u, "attn_chunk.scratch"},
@@ -2660,25 +2660,25 @@ static int tm_attention_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_bu
     /* Split-K kernels when the geometry has an instantiation; decode
      * routes here too (n = 1). One frame, two raw dispatchThreadgroups
      * calls (this direct encoder API is groups - NOT the total-threads
-     * encoding of tm_dispatch_args): up to SLICES groups per (KV head,
+     * encoding of ch_dispatch_args): up to SLICES groups per (KV head,
      * row) write [m, l, acc] partials to scratch (head_dim + 2 floats
      * per (row head, slice); layout [(n, heads, SLICES, head_dim+2)]),
      * then the merge folds them. The kernels derive each row's slice
      * count from its absolute position, so a position's reduction order
      * is identical in chunked prefill and per-token decode. */
-    id<MTLComputePipelineState> part = tm_attn_sk_partial_pso(ctx, head_dim, group, f32_cache);
-    id<MTLComputePipelineState> merge = tm_attn_sk_merge_pso(ctx, head_dim, group);
+    id<MTLComputePipelineState> part = ch_attn_sk_partial_pso(ctx, head_dim, group, f32_cache);
+    id<MTLComputePipelineState> merge = ch_attn_sk_merge_pso(ctx, head_dim, group);
     if (part != nil && merge != nil && n == 1u) {
-        size_t partial_need = (size_t)n * heads * TM_ATTN_SK_SLICES * ((size_t)head_dim + 2u) * 4u;
-        if (tm_check_buffer(ctx, scratch, partial_need, err, err_cap, "attn_sk.partials") !=
-            TM_METAL_OK) {
-            return TM_METAL_ERR_BOUNDS;
+        size_t partial_need = (size_t)n * heads * CH_ATTN_SK_SLICES * ((size_t)head_dim + 2u) * 4u;
+        if (ch_check_buffer(ctx, scratch, partial_need, err, err_cap, "attn_sk.partials") !=
+            CH_METAL_OK) {
+            return CH_METAL_ERR_BOUNDS;
         }
         @autoreleasepool {
-            tm_frame f;
-            id<MTLComputeCommandEncoder> enc = tm_frame_open(ctx, &f);
+            ch_frame f;
+            id<MTLComputeCommandEncoder> enc = ch_frame_open(ctx, &f);
             if (enc == nil) {
-                return tm_fail(err, err_cap, TM_METAL_ERR_INTERNAL,
+                return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                                [NSString stringWithFormat:@"%s: no encoder", what]);
             }
             [f.keep addObject:q->buffer];
@@ -2698,7 +2698,7 @@ static int tm_attention_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_bu
             [enc setBytes:&consts[4] length:sizeof consts[4] atIndex:8];
             [enc setBytes:&heads length:sizeof heads atIndex:9];
             [enc setBytes:&window length:sizeof window atIndex:10];
-            [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)kv_heads * TM_ATTN_SK_SLICES, n, 1)
+            [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)kv_heads * CH_ATTN_SK_SLICES, n, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             [enc setComputePipelineState:merge];
             [enc setBuffer:scratch->buffer offset:0 atIndex:0];
@@ -2710,7 +2710,7 @@ static int tm_attention_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_bu
             [enc setBytes:&window length:sizeof window atIndex:6];
             [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)kv_heads, n, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            return tm_frame_commit(ctx, &f, err, err_cap, what);
+            return ch_frame_commit(ctx, &f, err, err_cap, what);
         }
     }
     /* Prefill (n > 1): one threadgroup per (KV head, row) - the split-K
@@ -2720,46 +2720,46 @@ static int tm_attention_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q, tm_metal_bu
      * chunks). The two reduction orders differ, so cross-mode logits are
      * drift-registered (the metal-f16-act precedent); the decode path
      * itself is CPU-reference-qualified at 1e-6. */
-    id<MTLComputePipelineState> gqa = tm_attention_gqa_pso(ctx, head_dim, group, f32_cache);
+    id<MTLComputePipelineState> gqa = ch_attention_gqa_pso(ctx, head_dim, group, f32_cache);
     if (gqa != nil) {
-        return tm_dispatch_args(ctx, gqa, bufs, 5, consts, 7,
+        return ch_dispatch_args(ctx, gqa, bufs, 5, consts, 7,
                                 MTLSizeMake((NSUInteger)kv_heads * 128u, n, 1),
                                 MTLSizeMake(128, 1, 1), err, err_cap, what);
     }
-    return tm_dispatch_args(ctx,
+    return ch_dispatch_args(ctx,
                             f32_cache ? ctx->pso_q35_attention_chunk_f32
                                       : ctx->pso_q35_attention_chunk,
                             bufs, 5, consts, 7, MTLSizeMake((NSUInteger)heads * 128u, n, 1),
                             MTLSizeMake(128, 1, 1), err, err_cap, what);
 }
 
-int tm_metal_qwen35_attention_f16_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q,
-                                        tm_metal_buffer *k_cache, tm_metal_buffer *v_cache,
-                                        tm_metal_buffer *out, tm_metal_buffer *scratch,
+int ch_metal_qwen35_attention_f16_chunk(ch_metal_ctx *ctx, ch_metal_buffer *q,
+                                        ch_metal_buffer *k_cache, ch_metal_buffer *v_cache,
+                                        ch_metal_buffer *out, ch_metal_buffer *scratch,
                                         uint32_t heads, uint32_t pos0, uint32_t cap,
                                         uint32_t head_dim, uint32_t group, float scale, uint32_t n,
                                         uint32_t window, char *err, size_t err_cap) {
-    return tm_attention_chunk(ctx, q, k_cache, v_cache, out, scratch, heads, pos0, cap,
+    return ch_attention_chunk(ctx, q, k_cache, v_cache, out, scratch, heads, pos0, cap,
                               head_dim, group, scale, n, window, 0, err, err_cap,
                               "qwen35_attention_f16_chunk");
 }
 
-int tm_metal_qwen35_attention_f32_chunk(tm_metal_ctx *ctx, tm_metal_buffer *q,
-                                        tm_metal_buffer *k_cache, tm_metal_buffer *v_cache,
-                                        tm_metal_buffer *out, tm_metal_buffer *scratch,
+int ch_metal_qwen35_attention_f32_chunk(ch_metal_ctx *ctx, ch_metal_buffer *q,
+                                        ch_metal_buffer *k_cache, ch_metal_buffer *v_cache,
+                                        ch_metal_buffer *out, ch_metal_buffer *scratch,
                                         uint32_t heads, uint32_t pos0, uint32_t cap,
                                         uint32_t head_dim, uint32_t group, float scale, uint32_t n,
                                         uint32_t window, char *err, size_t err_cap) {
-    return tm_attention_chunk(ctx, q, k_cache, v_cache, out, scratch, heads, pos0, cap,
+    return ch_attention_chunk(ctx, q, k_cache, v_cache, out, scratch, heads, pos0, cap,
                               head_dim, group, scale, n, window, 1, err, err_cap,
                               "qwen35_attention_f32_chunk");
 }
 
-int tm_metal_set_gdn_chunk_generic(tm_metal_ctx *ctx, int generic) {
+int ch_metal_set_gdn_chunk_generic(ch_metal_ctx *ctx, int generic) {
     if (ctx == NULL) {
-        return TM_METAL_ERR_UNSUPPORTED;
+        return CH_METAL_ERR_UNSUPPORTED;
     }
     ctx->gdn_chunk_generic = generic ? 1 : 0;
-    return TM_METAL_OK;
+    return CH_METAL_OK;
 }
 

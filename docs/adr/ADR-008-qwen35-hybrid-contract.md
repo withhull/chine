@@ -4,7 +4,7 @@ Status: accepted (Q35-0)
 
 ## Context
 
-Gate C4.0 (`e73196d`) is accepted; TuckCore is still a dense-Qwen3 executor.
+Gate C4.0 (`e73196d`) is accepted; ChineCore is still a dense-Qwen3 executor.
 The next target family is Qwen3.5-0.8B: a 3:1 hybrid of Gated DeltaNet and
 full-attention layers. Its GGUF architecture id is `qwen35` (not `qwen3.5`),
 and the adapter that shipped earlier was speculative — wrong namespace, an
@@ -53,7 +53,7 @@ never accepted by any real artifact.
 - The adapter is no longer speculative: `adapters/qwen3.5-hybrid.json`
   declares the verified `qwen35` namespace; portable contract tests use a
   synthetic hybrid fixture; the real-artifact gate is a machine-local e2e
-  test (`TUCKMILL_QWEN35_GGUF`) that pins the store identity and size.
+  test (`CHINE_QWEN35_GGUF`) that pins the store identity and size.
 - Adapter schema v2 is a compatible extension of v1's field set, but the
   version check is strict: every builtin adapter now declares v2 (migration
   note: bump `schema_version`; no field changes for non-hybrid adapters).
@@ -75,7 +75,7 @@ never accepted by any real artifact.
   priced at 2 B/element; f32 priced at 4 B/element) and must prove by
   test that the admitted plan covers what it allocates. Recurrent and
   convolution state are f32 as declared by `mamba_ssm_dtype`.
-- **Typed contract (Q35-1A).** `crates/tuckcore/src/qwen35.rs` resolves
+- **Typed contract (Q35-1A).** `crates/chinecore/src/qwen35.rs` resolves
   `Qwen35Config`, the exact layer map, the tensor map (every served
   tensor consumed exactly once with dimensions verified; unknown tensors
   inside the served stack refuse; MTP blocks excluded) and the state
@@ -105,7 +105,7 @@ never accepted by any real artifact.
 ## Addendum 3 (Q35-1B)
 
 - Scalar reference operators for the Gated DeltaNet layers live in
-  `crates/tuckcore/src/qwen35_ops.rs`, with semantics taken from the
+  `crates/chinecore/src/qwen35_ops.rs`, with semantics taken from the
   pinned build: `ggml_ssm_conv` (windowed per-channel dot, no flip,
   `(kernel - 1)`-row history), `build_gdn_l2_norm` (`x / sqrt(sum(x^2) +
   eps)`, exactly `rms_norm(x, eps/n) / sqrt(n)`), the autoregressive
@@ -123,7 +123,7 @@ never accepted by any real artifact.
 ## Addendum 4 (Q35-1C)
 
 - Full-attention and FFN operators join the scalar reference library
-  (`crates/tuckcore/src/qwen35_ops.rs`): weighted per-head RMS norm via
+  (`crates/chinecore/src/qwen35_ops.rs`): weighted per-head RMS norm via
   the shared `rmsnorm_in_place` primitive; partial split-half RoPE that
   rotates only the declared span (`rope.dimension_count` = 64 of 256),
   with the frequency table spaced over the rotated dims exactly as
@@ -142,7 +142,7 @@ never accepted by any real artifact.
 
 ## Addendum 5 (Q35-1D state contract)
 
-- **Packed KV storage is the declared precision.** `crates/tuckcore/src/
+- **Packed KV storage is the declared precision.** `crates/chinecore/src/
   qwen35_kv.rs` stores per-attention-layer K/V planes at the declared
   element width (packed f16 default, f32 selectable) via the shared
   round-to-nearest-even converters. A cache allocates exactly
@@ -163,7 +163,7 @@ never accepted by any real artifact.
 
 ## Addendum 6 (Q35-1D execution and reference qualification)
 
-- **Complete CPU reference forward pass.** `crates/tuckcore/src/
+- **Complete CPU reference forward pass.** `crates/chinecore/src/
   qwen35_forward.rs` executes the served 24-layer hybrid stack (18 GDN +
   6 full attention; MTP excluded) over explicit token IDs: tied token
   embedding; per layer the pre-attention norm, the kind-specific
@@ -213,8 +213,8 @@ never accepted by any real artifact.
   scratch bound from inspected geometry before anything allocates; the
   model's actual allocations equal it (fixture and pinned numbers:
   25,165,824 B KV at ctx 2048 f16, 20,201,472 B state). The supervisor's
-  KV width is now resolved by backend AND model family: dense TuckCore
-  stays 4 B/element (f32 store), hybrid TuckCore prices the declared
+  KV width is now resolved by backend AND model family: dense ChineCore
+  stays 4 B/element (f32 store), hybrid ChineCore prices the declared
   packed precision (2 default, 4 for f32), llama.cpp unchanged.
 
 ## Addendum 8 (Q35-2A: Gated DeltaNet Metal operators)
@@ -225,7 +225,7 @@ never accepted by any real artifact.
   gates, the f32 delta-rule recurrence with device-resident state, and
   the gated output normalization. Host dispatches follow the existing
   frame/group discipline; the Rust wrapper set mirrors the CPU operator
-  signatures in `crates/tuckcore/src/qwen35_gpu.rs`.
+  signatures in `crates/chinecore/src/qwen35_gpu.rs`.
 - The recurrence is one thread per head (correct-first): per-head
   arithmetic order matches the scalar rule, and prefill batching waits
   until decode and state transitions are qualified.
@@ -250,7 +250,7 @@ never accepted by any real artifact.
   GQA over a packed f16 cache; per-head Q/K RMS norm reuses the
   existing weighted-rmsnorm kernel. All qualified against the CPU
   oracle on fixture and pinned shapes.
-- **Packed f16 GPU KV.** `tm_qwen35_kv_store_f16` stores true two-byte
+- **Packed f16 GPU KV.** `ch_qwen35_kv_store_f16` stores true two-byte
   entries; a test proves the stored bytes are bit-identical to the CPU
   RNE packer, and the f16 attention path matches the CPU packed-cache
   reference token by token. Recurrent DeltaNet state stays f32. One
@@ -322,7 +322,7 @@ never accepted by any real artifact.
   bitwise-identical output (tests mirror the CPU oracle's lifecycle).
 - **No large host staging.** Buffers are zeroed in place (shared
   storage) or via a GPU fill for private storage (new ABI
-  `tm_metal_buffer_zero`); weights stream to the device in bounded
+  `ch_metal_buffer_zero`); weights stream to the device in bounded
   4 MiB chunks from a lightweight `ArtifactTensorSource` that holds
   only the file handle, inspection and resolved contract — device
   clients no longer need a CPU inference session (tested).
@@ -332,7 +332,7 @@ never accepted by any real artifact.
 
 ## Addendum 13 (Q35-1E.2: supervised worker wiring)
 
-- **Served path.** `TuckCore` declares `qwen35` and routes it, after the
+- **Served path.** `ChineCore` declares `qwen35` and routes it, after the
   shared identity prologue (metadata/tensor-index hashes, full content
   digest through the one opened handle), to `Qwen35GpuModel` on the
   resident Metal path. The CPU forward stays the oracle: any other
@@ -346,7 +346,7 @@ never accepted by any real artifact.
   load the device ledger must equal the preflight total. On the pinned
   artifact at context 2048 the plan's kv_state reservation (45,367,296 B)
   equals the preflighted state exactly.
-- **Session state is held, so reuse re-checks it.** Unlike dense TuckCore
+- **Session state is held, so reuse re-checks it.** Unlike dense ChineCore
   (KV per request), the hybrid model allocates its KV and recurrent state
   once at load. The worker reports it as `retained_state_bytes`, and the
   supervisor's reuse gate now requires it to fit the current plan's KV
@@ -375,10 +375,10 @@ never accepted by any real artifact.
 ## Addendum 14 (Phase 1B: decode profile, column-parallel delta rule)
 
 - **Measured first.** The Metal context now accumulates GPU time over
-  every completed command buffer (`tm_metal_gpu_nanos_total`) and, opt-in,
-  per operator label (`tm_metal_profile_set` / `_read`; grouped buffers
+  every completed command buffer (`ch_metal_gpu_nanos_total`) and, opt-in,
+  per operator label (`ch_metal_profile_set` / `_read`; grouped buffers
   count as "group"). A machine-local harness
-  (`profile_pinned_decode_when_requested`, `TUCKMILL_PROFILE=1`) prints
+  (`profile_pinned_decode_when_requested`, `CHINE_PROFILE=1`) prints
   per-token wall time, GPU busy time, command buffers, and GPU time per
   operator on the pinned 0.8B.
 - **Finding.** The decode was GPU-bound, not dispatch-bound: wall 178.8
@@ -409,7 +409,7 @@ never accepted by any real artifact.
   - per token, on the same kernels and buffers as decode: each layer's
     sequential core (convolution, L2 norms, gates, delta rule, gated norm;
     or gate split, Q/K norms, RoPE, KV store, attention, gate). Slices
-    move with a new bit-exact device copy (`tm_metal_copy_f32`).
+    move with a new bit-exact device copy (`ch_metal_copy_f32`).
   Decode and prefill share one `core` per layer kind, so they cannot
   diverge. Logits are computed for the last prompt token only. The shared
   scratch is priced in `gpu_alloc_plan`, and the ledger still equals the
@@ -433,13 +433,13 @@ never accepted by any real artifact.
 
 ## Addendum 16 (prefill GEMM on the SIMD-group matrix units)
 
-- `tm_q8_0_gemm_mma`: a new ABI entry for Q8_0 batches of 1..=16. One
+- `ch_q8_0_gemm_mma`: a new ABI entry for Q8_0 batches of 1..=16. One
   threadgroup (4 SIMD groups) owns a 32-row × 16-token tile; W is
   dequantized (`d * q`, exactly the CPU dequant) and X is staged in
   threadgroup memory as **f32**; 8×8×8 f32 multiply-accumulates. The
   precision profile stays oracle-f32; only the summation order differs.
 - Scope: used only by Qwen3.5 prefill for Q8_0 batches of 2..=16. The
-  dense Qwen3 path keeps `tm_q8_0_gemm` and its recorded claim that
+  dense Qwen3 path keeps `ch_q8_0_gemm` and its recorded claim that
   logits are bit-identical across batch sizes 1–8. F16 matrices and
   batch 1 keep the GEMV-identical kernels.
 - Contract change: Qwen3.5 batched prefill is now **tolerance-qualified**

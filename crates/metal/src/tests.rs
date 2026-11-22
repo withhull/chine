@@ -1,21 +1,21 @@
-//! Correctness and lifetime tests for the TuckCore Metal path.
+//! Correctness and lifetime tests for the ChineCore Metal path.
 //!
 //! GPU tests skip with a loud note when no Metal device is present and fail
-//! instead when `TUCKMILL_REQUIRE_METAL` is set (the repository gate on
+//! instead when `CHINE_REQUIRE_METAL` is set (the repository gate on
 //! owned hardware). Comparisons against the CPU scalar reference are
 //! tolerance-registered: GPU reduction order differs from the CPU sequence,
 //! so exact bit equality is not claimed anywhere.
 
 use super::*;
 
-/// Skip helper: `None` means "no GPU"; with TUCKMILL_REQUIRE_METAL set that
+/// Skip helper: `None` means "no GPU"; with CHINE_REQUIRE_METAL set that
 /// is a test failure, never a silent pass.
 fn metal_context() -> Option<MetalContext> {
     let probe = probe();
     if !probe.available {
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available ({})",
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available ({})",
             probe.info
         );
         eprintln!("skipping: no Metal device ({})", probe.info);
@@ -228,8 +228,8 @@ fn probe_reports_device_presence() {
 #[test]
 fn context_creation_reports_bad_msl_with_a_typed_error() {
     if !probe().available {
-        if std::env::var("TUCKMILL_REQUIRE_METAL").is_ok() {
-            panic!("TUCKMILL_REQUIRE_METAL is set but no Metal device is available");
+        if std::env::var("CHINE_REQUIRE_METAL").is_ok() {
+            panic!("CHINE_REQUIRE_METAL is set but no Metal device is available");
         }
         eprintln!("skipping: no Metal device");
         return;
@@ -610,7 +610,7 @@ fn grouped_encoding_matches_individual_dispatch_and_aborts_cleanly() {
     ctx.abort_group().unwrap();
 }
 
-/// CPU references for the transformer ops (mirroring tuckcore's scalar
+/// CPU references for the transformer ops (mirroring chinecore's scalar
 /// executor semantics: f32, sequential accumulation).
 fn cpu_rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
     let ss: f32 = x.iter().map(|v| v * v).sum();
@@ -802,8 +802,8 @@ fn norm_add_matches_the_sequential_pair() {
 
 #[test]
 fn norm_add_pair_timing_when_requested() {
-    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
         return;
     }
     let Some(ctx) = metal_context() else {
@@ -1073,17 +1073,16 @@ fn f16_gemv_matches_the_scalar_reference() {
 /// the scalar reference on real Q8_0 tensor bytes, not just synthetic data.
 #[test]
 fn q8_0_gemv_matches_on_real_artifact_bytes() {
-    let Ok(gguf) = std::env::var("TUCKMILL_REAL_GGUF") else {
-        eprintln!("skipping: TUCKMILL_REAL_GGUF not set (real-weight label)");
+    let Ok(gguf) = std::env::var("CHINE_REAL_GGUF") else {
+        eprintln!("skipping: CHINE_REAL_GGUF not set (real-weight label)");
         return;
     };
     let Some(ctx) = metal_context() else {
         return;
     };
     let path = std::path::PathBuf::from(&gguf);
-    let inspection =
-        tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-            .expect("inspect real artifact");
+    let inspection = chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default())
+        .expect("inspect real artifact");
     let tensor = inspection
         .tensors
         .iter()
@@ -1360,13 +1359,13 @@ fn gpu_time_is_accumulated_and_attributed_per_operator_when_profiling() {
     assert!(ctx.profile_snapshot().is_empty());
 }
 
-/// Phase 1C measurement (opt-in, `TUCKMILL_PROFILE=1`): GPU time and
+/// Phase 1C measurement (opt-in, `CHINE_PROFILE=1`): GPU time and
 /// effective weight bandwidth of the Q8_0 GEMV on the pinned Qwen3.5-0.8B
 /// matrix shapes. Prints only; asserts nothing about speed.
 #[test]
 fn q8_0_gemv_shape_bandwidth_when_requested() {
-    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
         return;
     }
     let Some(ctx) = metal_context() else {
@@ -1455,20 +1454,20 @@ fn copy_f32_moves_exact_slices_and_refuses_out_of_range() {
     );
 }
 
-/// Phase 1C measurement (opt-in, `TUCKMILL_PROFILE=1`): batched Q8_0 GEMM
+/// Phase 1C measurement (opt-in, `CHINE_PROFILE=1`): batched Q8_0 GEMM
 /// time per shape at prefill batch sizes, against the single-token GEMV.
 #[test]
 fn q8_0_gemm_batch_timing_when_requested() {
-    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
         return;
     }
     let Some(ctx) = metal_context() else {
         return;
     };
-    // `TUCKMILL_GEMM_MMA=1` times the matrix-unit kernel at prefill chunk
+    // `CHINE_GEMM_MMA=1` times the matrix-unit kernel at prefill chunk
     // sizes instead of the per-row GEMM.
-    let mma = std::env::var("TUCKMILL_GEMM_MMA").is_ok();
+    let mma = std::env::var("CHINE_GEMM_MMA").is_ok();
     let batches: &[usize] = if mma { &[32, 128] } else { &[1, 4, 8, 16] };
     for (rows, cols) in [(3584usize, 1024usize), (6144, 1024), (1024, 3584)] {
         let w = boundary_weights(rows, cols, 3);
@@ -1511,18 +1510,18 @@ fn q8_0_gemm_batch_timing_when_requested() {
 
 #[test]
 fn q8_0_gemv_timing_when_requested() {
-    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
         return;
     }
     let Some(ctx) = metal_context() else {
         return;
     };
-    // `TUCKMILL_GEMV_SHAPES=rowsxcols,...` overrides the Gemma-decode
+    // `CHINE_GEMV_SHAPES=rowsxcols,...` overrides the Gemma-decode
     // default list. Per-dispatch wall over 16 serial dispatches; the
     // printed number is the achieved DRAM-equivalent bandwidth on the
     // weight bytes (measurement only; ADR-011 engine note records runs).
-    let shapes = std::env::var("TUCKMILL_GEMV_SHAPES")
+    let shapes = std::env::var("CHINE_GEMV_SHAPES")
         .ok()
         .map(|s| {
             s.split(',')
@@ -1803,8 +1802,8 @@ fn split_k_attention_matches_the_cpu_reference() {
 
 #[test]
 fn attention_decode_timing_when_requested() {
-    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
         return;
     }
     let Some(ctx) = metal_context() else {
@@ -2053,7 +2052,7 @@ fn argmax_matches_the_cpu_greedy_rule_exactly() {
     let Some(ctx) = metal_context() else {
         return;
     };
-    // The CPU rule (tuckmill_backend::sampling::argmax), restated here so
+    // The CPU rule (chine_backend::sampling::argmax), restated here so
     // the metal crate keeps no backend dependency: NaN skipped, strict >,
     // so ties go to the lowest index.
     fn cpu(x: &[f32]) -> u32 {
@@ -2156,21 +2155,21 @@ fn argmax_matches_the_cpu_greedy_rule_exactly() {
     }
 }
 
-/// Measurement only (`TUCKMILL_PROFILE=1`): the matrix-unit GEMM timed the
+/// Measurement only (`CHINE_PROFILE=1`): the matrix-unit GEMM timed the
 /// way ggml's graph runs it, 16 dispatches in one command buffer, as wall
 /// time per dispatch.
 #[test]
 fn q8_0_gemm_mma_grouped_wall_timing_when_requested() {
-    if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-        eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+    if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+        eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
         return;
     }
     let Some(ctx) = metal_context() else {
         return;
     };
-    // `TUCKMILL_GEMM_SHAPES=rowsxcols,...` overrides the 0.8B default list
+    // `CHINE_GEMM_SHAPES=rowsxcols,...` overrides the 0.8B default list
     // (measurement only; ADR-011 engine notes record the runs).
-    let shapes = std::env::var("TUCKMILL_GEMM_SHAPES")
+    let shapes = std::env::var("CHINE_GEMM_SHAPES")
         .ok()
         .map(|s| {
             s.split(',')

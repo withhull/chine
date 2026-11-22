@@ -70,7 +70,7 @@ impl ErrorCode {
     pub fn next_action(self) -> &'static str {
         match self {
             ErrorCode::UnsupportedArchitecture => {
-                "Run 'tuckmill inspect' to confirm the architecture, then install a matching adapter or choose a supported model."
+                "Run 'chine inspect' to confirm the architecture, then install a matching adapter or choose a supported model."
             }
             ErrorCode::UnsupportedQuantization => {
                 "Choose an artifact whose quantization profile is listed as supported, or convert it with an approved tool."
@@ -82,7 +82,7 @@ impl ErrorCode {
                 "Lower --context or raise --memory-budget; the request was rejected before loading."
             }
             ErrorCode::PlanStale => {
-                "Re-run 'tuckmill plan' to produce a fresh plan for the current artifact and device."
+                "Re-run 'chine plan' to produce a fresh plan for the current artifact and device."
             }
             ErrorCode::MemoryPressurePause => {
                 "Close memory-heavy applications and retry; the request paused safely and retained its committed position."
@@ -101,20 +101,20 @@ impl ErrorCode {
             }
             ErrorCode::Cancelled => "No action required; the request was cancelled.",
             ErrorCode::InvalidArtifact => {
-                "Point at a complete .gguf or .safetensors file; run 'tuckmill inspect' for details."
+                "Point at a complete .gguf or .safetensors file; run 'chine inspect' for details."
             }
             ErrorCode::InvalidRequest => {
                 "Fix the request fields; only the documented API subset is accepted."
             }
             ErrorCode::InvalidPlan => {
-                "Re-run 'tuckmill plan'; if the problem persists, report the plan id."
+                "Re-run 'chine plan'; if the problem persists, report the plan id."
             }
             ErrorCode::InvalidConfiguration => {
-                "Run 'tuckmill doctor' and correct the reported configuration issue."
+                "Run 'chine doctor' and correct the reported configuration issue."
             }
             ErrorCode::Io => "Check file permissions and available space, then retry.",
             ErrorCode::Unavailable => {
-                "This capability is not available in this build or on this device; see 'tuckmill doctor'."
+                "This capability is not available in this build or on this device; see 'chine doctor'."
             }
             ErrorCode::Internal => "This indicates a bug; please report it with the displayed context.",
         }
@@ -129,14 +129,14 @@ impl fmt::Display for ErrorCode {
 
 /// The single error type crossing crate boundaries.
 #[derive(Debug)]
-pub struct TuckmillError {
+pub struct ChineError {
     code: ErrorCode,
     message: String,
     action: String,
     source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
-impl TuckmillError {
+impl ChineError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -180,7 +180,7 @@ impl TuckmillError {
     }
 }
 
-impl fmt::Display for TuckmillError {
+impl fmt::Display for ChineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -190,7 +190,7 @@ impl fmt::Display for TuckmillError {
     }
 }
 
-impl std::error::Error for TuckmillError {
+impl std::error::Error for ChineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source
             .as_deref()
@@ -198,9 +198,9 @@ impl std::error::Error for TuckmillError {
     }
 }
 
-impl From<std::io::Error> for TuckmillError {
+impl From<std::io::Error> for ChineError {
     fn from(err: std::io::Error) -> Self {
-        TuckmillError::new(ErrorCode::Io, err.to_string())
+        ChineError::new(ErrorCode::Io, err.to_string())
     }
 }
 
@@ -208,19 +208,19 @@ impl From<std::io::Error> for TuckmillError {
 #[macro_export]
 macro_rules! bail {
     ($code:ident, $($arg:tt)*) => {
-        return Err($crate::error::TuckmillError::new(
+        return Err($crate::error::ChineError::new(
             $crate::error::ErrorCode::$code,
             format!($($arg)*),
         ))
     };
 }
 
-pub type Result<T> = std::result::Result<T, TuckmillError>;
+pub type Result<T> = std::result::Result<T, ChineError>;
 
 /// Attach a context code to a serde_json failure, which otherwise would be an
 /// opaque string.
-pub fn json_error(err: serde_json::Error, code: ErrorCode, what: &str) -> TuckmillError {
-    TuckmillError::new(code, format!("{what}: {err}")).with_source(err)
+pub fn json_error(err: serde_json::Error, code: ErrorCode, what: &str) -> ChineError {
+    ChineError::new(code, format!("{what}: {err}")).with_source(err)
 }
 
 #[cfg(test)]
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn json_form_has_error_object() {
-        let err = TuckmillError::new(ErrorCode::QueueFull, "depth 8 reached");
+        let err = ChineError::new(ErrorCode::QueueFull, "depth 8 reached");
         let v = err.to_json();
         assert_eq!(v["error"]["code"], "QUEUE_FULL");
         assert!(v["error"]["action"].as_str().unwrap().len() > 10);

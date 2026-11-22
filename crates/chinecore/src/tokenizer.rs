@@ -5,7 +5,7 @@
 //! BPE, byte-coverage fallback. Decoding: exact reverse over non-control
 //! tokens, lossy UTF-8 assembly.
 //!
-//! Honest scope (claims ledger): this is tuckmill's own implementation,
+//! Honest scope (claims ledger): this is chine's own implementation,
 //! validated by round-trip and structural tests plus fixture goldens. Full
 //! equivalence with llama.cpp's tokenizer (including architecture-specific
 //! pre-tokenizers such as `tokenizer.ggml.pre = "qwen2"`) is a separately
@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
-use tuckmill_manifest::bytes_alphabet::bytes_to_unicode;
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::{GgufInspection, GgufValue};
+use chine_manifest::bytes_alphabet::bytes_to_unicode;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::{GgufInspection, GgufValue};
 
 /// GGUF `tokenizer.ggml.token_type` values (llama.cpp convention).
 pub const TOKEN_TYPE_NORMAL: u8 = 1;
@@ -73,7 +73,7 @@ impl Tokenizer {
             .unwrap_or("")
             .to_string();
         if model != "gpt2" {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "tokenizer model {model:?} is not supported in this build (byte-level BPE \"gpt2\" only); no text was tokenized"
@@ -83,19 +83,19 @@ impl Tokenizer {
         }
 
         let tokens_value = inspection.get("tokenizer.ggml.tokens").ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidArtifact,
                 "artifact embeds no tokenizer.ggml.tokens",
             )
         })?;
         let items = tokens_value.as_array().ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidArtifact,
                 "tokenizer.ggml.tokens is not an array",
             )
         })?;
         if items.is_empty() || items.len() > MAX_VOCAB {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!("vocabulary size {} is outside 1..={MAX_VOCAB}", items.len()),
             ));
@@ -103,7 +103,7 @@ impl Tokenizer {
         let mut tokens = Vec::with_capacity(items.len());
         for item in items {
             let s = item.as_str().ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     "tokenizer.ggml.tokens contains a non-string entry",
                 )
@@ -117,7 +117,7 @@ impl Tokenizer {
             .and_then(|v| v.as_array())
         {
             if types.len() != tokens.len() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!(
                         "tokenizer.ggml.token_type has {} entries for {} tokens",
@@ -140,7 +140,7 @@ impl Tokenizer {
         {
             for (rank, item) in list.iter().enumerate() {
                 let Some(s) = item.as_str() else {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidArtifact,
                         "tokenizer.ggml.merges contains a non-string entry",
                     ));
@@ -225,13 +225,13 @@ impl Tokenizer {
     }
 
     /// Disclosed limitation when encoding would not be exact: callers must
-    /// use the llama.cpp reference tokenizer (TUCKMILL_LLAMA_LIB) instead.
+    /// use the llama.cpp reference tokenizer (CHINE_LLAMA_LIB) instead.
     pub fn pretokenizer_note(&self) -> Option<String> {
         if self.encode_is_exact() {
             None
         } else {
             Some(format!(
-                "artifact declares pre-tokenizer {:?}; exact encoding requires the llama.cpp reference tokenizer (TUCKMILL_LLAMA_LIB), which this build will use in preference",
+                "artifact declares pre-tokenizer {:?}; exact encoding requires the llama.cpp reference tokenizer (CHINE_LLAMA_LIB), which this build will use in preference",
                 self.pretokenizer
             ))
         }
@@ -247,19 +247,19 @@ impl Tokenizer {
     /// both engines.
     pub fn encode(&self, text: &str, add_bos: bool) -> Result<Vec<u32>> {
         if !self.encode_is_exact() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
-                    "artifact declares pre-tokenizer {:?}; tuckmill's built-in tokenizer only reproduces GPT-2-style splits exactly and will not approximate this one (token IDs must match the model's intended tokenizer)",
+                    "artifact declares pre-tokenizer {:?}; chine's built-in tokenizer only reproduces GPT-2-style splits exactly and will not approximate this one (token IDs must match the model's intended tokenizer)",
                     self.pretokenizer
                 ),
             )
             .with_action(
-                "Set TUCKMILL_LLAMA_LIB (scripts/fetch-llama.sh) so encoding uses the pinned llama.cpp reference tokenizer.",
+                "Set CHINE_LLAMA_LIB (scripts/fetch-llama.sh) so encoding uses the pinned llama.cpp reference tokenizer.",
             ));
         }
         if !self.byte_coverage {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "artifact tokenizer lacks full byte coverage; encoding would require substitutions, which are never silent",
             )
@@ -312,7 +312,7 @@ impl Tokenizer {
                 .collect();
             for piece in self.bpe(mapped) {
                 let id = piece_ids.get(piece.as_str()).ok_or_else(|| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::IntegrityFailure,
                         format!(
                             "BPE produced piece {piece:?} that is absent from the vocabulary; the tokenizer tables are inconsistent"
@@ -454,7 +454,7 @@ impl DecodeVocab {
     /// that byte, unknown tokens are `▅`, control tokens are invisible.
     /// Decode only: encoding needs the llama.cpp reference tokenizer.
     fn from_sentencepiece(inspection: &GgufInspection) -> Result<Self> {
-        let bad = |what: &str| TuckmillError::new(ErrorCode::InvalidArtifact, what.to_string());
+        let bad = |what: &str| ChineError::new(ErrorCode::InvalidArtifact, what.to_string());
         let items = inspection
             .get("tokenizer.ggml.tokens")
             .and_then(|v| v.as_array())
@@ -509,7 +509,7 @@ impl DecodeVocab {
             bytes,
             offsets,
             pretokenizer_note: Some(
-                "SentencePiece vocabulary; exact encoding requires the llama.cpp reference tokenizer (TUCKMILL_LLAMA_LIB), which this build uses".to_string(),
+                "SentencePiece vocabulary; exact encoding requires the llama.cpp reference tokenizer (CHINE_LLAMA_LIB), which this build uses".to_string(),
             ),
         })
     }
@@ -522,7 +522,7 @@ impl DecodeVocab {
         for id in 0..count as u32 {
             bytes.extend_from_slice(&tokenizer.token_bytes(id));
             let end = u32::try_from(bytes.len()).map_err(|_| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     "vocabulary bytes exceed the decode table's u32 offsets",
                 )
@@ -571,7 +571,7 @@ fn meta_u32(inspection: &GgufInspection, key: &str) -> Option<u32> {
 }
 
 /// Stateful incremental UTF-8 decoder (shared implementation).
-pub use tuckmill_manifest::utf8::Utf8StreamDecoder;
+pub use chine_manifest::utf8::Utf8StreamDecoder;
 
 /// GPT-2 pre-tokenization. Implemented manually (no regex dependency) to the
 /// canonical pattern:
@@ -664,7 +664,7 @@ pub fn pretokenize(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     #[test]
     fn decode_vocab_matches_the_tokenizer_for_every_id() {
@@ -690,17 +690,16 @@ mod tests {
     /// (248,320 entries), with the heap it saves.
     #[test]
     fn decode_vocab_matches_the_pinned_vocabulary_when_available() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let tok = Tokenizer::from_gguf(&insp).unwrap();
         let vocab = DecodeVocab::from_tokenizer(&tok).unwrap();
         let count = tok.tokens.len() as u32;
@@ -728,10 +727,10 @@ mod tests {
     fn fixture_inspection() -> GgufInspection {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen3());
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        tuckmill_manifest::gguf::inspect_reader(
+        chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap()
@@ -862,10 +861,10 @@ mod tests {
         }
         let len = bytes.len() as u64;
         let mut cursor = std::io::Cursor::new(bytes);
-        let insp = tuckmill_manifest::gguf::inspect_reader(
+        let insp = chine_manifest::gguf::inspect_reader(
             &mut cursor,
             len,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap();

@@ -1,7 +1,7 @@
 # Kernel work packages (K01–K09)
 
 Statuses live in [`registry.json`](registry.json) and are enforced by
-`tuckmill_planner::kernel_registry`: a kernel must never be selected before
+`chine_planner::kernel_registry`: a kernel must never be selected before
 its correctness gate passes, and every selection keeps a validated reference
 fallback decision. **K01 has implemented increments** on the CPU (aarch64
 NEON fused Q8_0/F16 packed dot with zero-copy mapped blocks; Q4_0/Q4_1 stay

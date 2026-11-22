@@ -6,14 +6,14 @@
 //! themselves; kernel gates and certifications decide availability.
 //!
 //! Built-in adapters are embedded from the repository `adapters/` directory
-//! at compile time; `TUCKMILL_ADAPTERS_DIR` can supply experimental
+//! at compile time; `CHINE_ADAPTERS_DIR` can supply experimental
 //! overrides at runtime.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 use crate::gguf::{GgufInspection, GgufValue};
 use crate::ids::hash_of;
 
@@ -183,7 +183,7 @@ pub struct ExpertGeometry {
 
 impl AdapterSpec {
     pub fn validate(&self) -> Result<()> {
-        let err = |msg: String| TuckmillError::new(ErrorCode::InvalidConfiguration, msg);
+        let err = |msg: String| ChineError::new(ErrorCode::InvalidConfiguration, msg);
         if self.schema_version != ADAPTER_SCHEMA_VERSION {
             return Err(err(format!(
                 "adapter {} has schema version {} (want {})",
@@ -262,7 +262,7 @@ impl AdapterSpec {
         if problems.is_empty() {
             return Ok(());
         }
-        Err(TuckmillError::new(
+        Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "artifact does not satisfy adapter {}: {}",
@@ -271,13 +271,13 @@ impl AdapterSpec {
             ),
         )
         .with_action(
-            "Confirm the artifact family with 'tuckmill inspect'; if it is a different architecture, install or update its adapter.",
+            "Confirm the artifact family with 'chine inspect'; if it is a different architecture, install or update its adapter.",
         ))
     }
 
     fn get_u64_required(&self, insp: &GgufInspection, key: &str) -> Result<u64> {
         insp.get_u64(key).filter(|v| *v > 0).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "adapter {} requires positive integer metadata {key:?}",
@@ -299,7 +299,7 @@ impl AdapterSpec {
             None => 0,
         };
         if excluded_tail >= total_layers {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "adapter {}: {excluded_tail} trailing non-served blocks leave no served stack out of {total_layers} blocks",
@@ -321,7 +321,7 @@ impl AdapterSpec {
                         None => None,
                         Some(GgufValue::Array(items)) => {
                             if (items.len() as u64) < layers {
-                                return Err(TuckmillError::new(
+                                return Err(ChineError::new(
                                     ErrorCode::UnsupportedArchitecture,
                                     format!(
                                         "adapter {}: recurrent layer array {key:?} has {} entries for {layers} served layers",
@@ -336,7 +336,7 @@ impl AdapterSpec {
                                     GgufValue::Bool(true) => recurrent += 1,
                                     GgufValue::Bool(false) => {}
                                     other => {
-                                        return Err(TuckmillError::new(
+                                        return Err(ChineError::new(
                                             ErrorCode::UnsupportedArchitecture,
                                             format!(
                                                 "adapter {}: recurrent layer array {key:?} entry {i} is {} but a boolean is required",
@@ -350,7 +350,7 @@ impl AdapterSpec {
                             Some(recurrent)
                         }
                         Some(_) => {
-                            return Err(TuckmillError::new(
+                            return Err(ChineError::new(
                                 ErrorCode::UnsupportedArchitecture,
                                 format!(
                                     "adapter {}: recurrent layer key {key:?} is present but not an array",
@@ -363,7 +363,7 @@ impl AdapterSpec {
                 match recurrent_from_array {
                     Some(recurrent) if recurrent < layers => layers - recurrent,
                     Some(recurrent) => {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::UnsupportedArchitecture,
                             format!(
                                 "adapter {}: per-layer array marks all {recurrent} served layers as recurrent (no attention layer remains)",
@@ -379,7 +379,7 @@ impl AdapterSpec {
                         // no attention layer, so this is floor division.
                         let attention = layers / interval;
                         if attention == 0 {
-                            return Err(TuckmillError::new(
+                            return Err(ChineError::new(
                                 ErrorCode::UnsupportedArchitecture,
                                 format!(
                                     "adapter {}: full-attention interval {interval} exceeds the {layers}-layer served stack",
@@ -396,7 +396,7 @@ impl AdapterSpec {
         let kv_head_count = self.get_u64_required(insp, &self.kv.kv_head_count_key)?;
         let embedding = self.get_u64_required(insp, &self.kv.embedding_key)?;
         if head_count == 0 || embedding % head_count != 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "adapter {}: embedding length {embedding} is not divisible by head count {head_count}",
@@ -414,7 +414,7 @@ impl AdapterSpec {
             None => key_length,
         };
         if key_length == 0 || value_length == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "adapter {}: key/value length metadata resolves to zero",
@@ -449,7 +449,7 @@ impl AdapterSpec {
             return Ok(0);
         };
         let overflow = || {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!("adapter {}: recurrent state geometry overflows", self.id),
             )
@@ -490,7 +490,7 @@ impl AdapterSpec {
         let count = self.get_u64_required(insp, &meta.count_key)?;
         let used_per_token = self.get_u64_required(insp, &meta.used_key)?;
         if used_per_token > count {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "adapter {}: expert_used_count {used_per_token} exceeds expert_count {count}",
@@ -566,7 +566,7 @@ impl AdapterRegistry {
         let mut registry = Self::builtin()?;
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidConfiguration,
                     format!("cannot read adapters directory {}: {e}", dir.display()),
                 )
@@ -577,7 +577,7 @@ impl AdapterRegistry {
             .collect();
         entries.sort();
         for path in entries {
-            let src = std::fs::read_to_string(&path).map_err(TuckmillError::from)?;
+            let src = std::fs::read_to_string(&path).map_err(ChineError::from)?;
             let spec: AdapterSpec = serde_json::from_str(&src).map_err(|e| {
                 crate::error::json_error(
                     e,

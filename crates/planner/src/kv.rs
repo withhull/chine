@@ -5,7 +5,7 @@
 //! This module computes the exact analog from the resolved geometry:
 //! `layers x seq x kv_heads x (key_length + value_length) x bytes`.
 
-use tuckmill_manifest::adapter::KvGeometry;
+use chine_manifest::adapter::KvGeometry;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KvEstimate {

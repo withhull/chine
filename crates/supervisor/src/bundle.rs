@@ -20,20 +20,20 @@
 
 use std::path::Path;
 
-use tuckmill_backend::SamplingPolicy;
-use tuckmill_manifest::chat::{
+use chine_backend::SamplingPolicy;
+use chine_manifest::chat::{
     QWEN35_CHAT_TEMPLATE_0_8B, QWEN35_CHAT_TEMPLATE_2B, QWEN35_THINK_END, QWEN35_THINK_START,
     QWEN3_CHAT_TEMPLATE, QWEN3_IM_END, QWEN3_IM_START,
 };
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::Id;
-use tuckmill_manifest::records::ModelArtifact;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::Id;
+use chine_manifest::records::ModelArtifact;
 
 use crate::tokenization::{open_encoder, ArtifactEncoder};
 
 /// A chat message in the supported subset: one of the three Qwen3 roles
 /// with string content. Tool calls, tool responses and separate reasoning
-/// fields are not part of the tuckmill request contract and are refused
+/// fields are not part of the chine request contract and are refused
 /// upstream, never synthesized here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessageSpec {
@@ -181,8 +181,8 @@ fn py_strip(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
-fn template_refusal(message: &str) -> TuckmillError {
-    TuckmillError::new(
+fn template_refusal(message: &str) -> ChineError {
+    ChineError::new(
         ErrorCode::InvalidRequest,
         format!("the model's chat template rejects this conversation: {message}"),
     )
@@ -301,15 +301,14 @@ pub struct ModelBundle {
 
 impl ModelBundle {
     /// Open the bundle for an installed artifact.
-    pub fn open(layout: &tuckmill_store::StoreLayout, artifact: &ModelArtifact) -> Result<Self> {
+    pub fn open(layout: &chine_store::StoreLayout, artifact: &ModelArtifact) -> Result<Self> {
         let path = layout.artifact_payload_path(&artifact.artifact_id);
         Self::open_path(&path, &artifact.artifact_id)
     }
 
     /// Open the bundle for an artifact payload path.
     pub fn open_path(path: &Path, artifact_id: &Id) -> Result<Self> {
-        let insp =
-            tuckmill_manifest::gguf::inspect(path, &tuckmill_manifest::gguf::Limits::default())?;
+        let insp = chine_manifest::gguf::inspect(path, &chine_manifest::gguf::Limits::default())?;
         let encoder = open_encoder(path, None)?;
         let declared = insp
             .get_str("tokenizer.chat_template")
@@ -356,7 +355,7 @@ impl ModelBundle {
                 ),
                 None => "the artifact declares no tokenizer.chat_template".to_string(),
             };
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!("chat completion is unavailable: {detail}"),
             )
@@ -420,7 +419,7 @@ impl RequestSpec {
         context_total: u64,
     ) -> Result<Self> {
         if messages.is_empty() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "messages must not be empty",
             ));
@@ -477,7 +476,7 @@ impl RequestSpec {
     /// tokens, and prompt + output must fit the admitted context.
     fn validate_allowance(&self, context_total: u64) -> Result<()> {
         if self.max_output_tokens == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "max_tokens must be positive",
             ));
@@ -504,13 +503,13 @@ pub fn check_allowance(
     context_total: u64,
 ) -> Result<()> {
     if prompt_tokens == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "the prompt tokenizes to zero tokens",
         ));
     }
     if prompt_tokens + max_output_tokens > context_total {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::ContextExceedsBudget,
             format!(
                 "prompt ({prompt_tokens} tokens) plus max_tokens ({max_output_tokens}) exceeds the admitted context of {context_total} tokens"
@@ -534,9 +533,9 @@ mod tests {
 
     fn bundle_from_fixture(dir: &tempfile::TempDir) -> ModelBundle {
         let path = dir.path().join("f.gguf");
-        tuckmill_manifest::testing::write_synthetic(
+        chine_manifest::testing::write_synthetic(
             &path,
-            &tuckmill_manifest::testing::SyntheticConfig::tiny_qwen3(),
+            &chine_manifest::testing::SyntheticConfig::tiny_qwen3(),
         )
         .unwrap();
         ModelBundle::open_path(&path, &Id::new("a".repeat(64)).unwrap()).unwrap()
@@ -548,13 +547,13 @@ mod tests {
         // stays valid, recognition (byte-exact) must fail.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.gguf");
-        tuckmill_manifest::testing::write_synthetic(
+        chine_manifest::testing::write_synthetic(
             &path,
-            &tuckmill_manifest::testing::SyntheticConfig::tiny_qwen3(),
+            &chine_manifest::testing::SyntheticConfig::tiny_qwen3(),
         )
         .unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        let template = tuckmill_manifest::chat::QWEN3_CHAT_TEMPLATE.as_bytes();
+        let template = chine_manifest::chat::QWEN3_CHAT_TEMPLATE.as_bytes();
         let at = bytes
             .windows(template.len())
             .position(|w| w == template)
@@ -661,7 +660,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                tuckmill_manifest::ids::sha256_hex(template.as_bytes()),
+                chine_manifest::ids::sha256_hex(template.as_bytes()),
                 sha,
                 "pinned template bytes"
             );
@@ -692,10 +691,10 @@ mod tests {
     #[test]
     fn qwen35_reference_token_ids_are_reproduced_when_the_pinned_library_is_configured() {
         let (Ok(_lib), Ok(gguf)) = (
-            std::env::var("TUCKMILL_LLAMA_LIB"),
-            std::env::var("TUCKMILL_QWEN35_GGUF"),
+            std::env::var("CHINE_LLAMA_LIB"),
+            std::env::var("CHINE_QWEN35_GGUF"),
         ) else {
-            eprintln!("skipping: set TUCKMILL_LLAMA_LIB and TUCKMILL_QWEN35_GGUF");
+            eprintln!("skipping: set CHINE_LLAMA_LIB and CHINE_QWEN35_GGUF");
             return;
         };
         let path = std::path::PathBuf::from(gguf);
@@ -718,10 +717,10 @@ mod tests {
     #[test]
     fn reference_token_ids_are_reproduced_when_the_pinned_library_is_configured() {
         let (Ok(_lib), Ok(gguf)) = (
-            std::env::var("TUCKMILL_LLAMA_LIB"),
-            std::env::var("TUCKMILL_REAL_GGUF"),
+            std::env::var("CHINE_LLAMA_LIB"),
+            std::env::var("CHINE_REAL_GGUF"),
         ) else {
-            eprintln!("skipping: set TUCKMILL_LLAMA_LIB and TUCKMILL_REAL_GGUF");
+            eprintln!("skipping: set CHINE_LLAMA_LIB and CHINE_REAL_GGUF");
             return;
         };
         let path = std::path::PathBuf::from(gguf);

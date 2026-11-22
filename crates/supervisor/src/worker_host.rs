@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tuckmill_backend::{BackendId, EngineKind, InferenceBackend};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_backend::{BackendId, EngineKind, InferenceBackend};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 use crate::engine::{GenControl, ReferenceTestEngine, RunState};
 use crate::proto::{hello_ack, validate_handshake, WorkerFrame};
@@ -39,8 +39,8 @@ const SCORE_CHUNK_FLOATS: usize = 16_384;
 fn make_backend(kind: EngineKind) -> Box<dyn InferenceBackend> {
     match kind {
         EngineKind::ReferenceTest => Box::new(ReferenceTestEngine::new()),
-        EngineKind::TuckCore => Box::new(tuckmill_tuckcore::TuckCore::new()),
-        EngineKind::LlamaCpp => Box::new(tuckmill_llamaref::LlamaRef::new()),
+        EngineKind::ChineCore => Box::new(chine_chinecore::ChineCore::new()),
+        EngineKind::LlamaCpp => Box::new(chine_llamaref::LlamaRef::new()),
     }
 }
 
@@ -51,7 +51,7 @@ type Writer = Arc<Mutex<UnixStream>>;
 fn write_frame(writer: &Writer, frame: &WorkerFrame) -> Result<()> {
     let mut stream = writer
         .lock()
-        .map_err(|_| TuckmillError::new(ErrorCode::WorkerFailed, "worker writer lock poisoned"))?;
+        .map_err(|_| ChineError::new(ErrorCode::WorkerFailed, "worker writer lock poisoned"))?;
     frame.write_to(&mut *stream)
 }
 
@@ -63,17 +63,17 @@ fn write_frame_best_effort(writer: &Writer, frame: &WorkerFrame) {
 /// be a private path (the store's tmp directory).
 pub fn run_worker(socket_path: &Path, engine: EngineKind) -> Result<()> {
     if socket_path.exists() {
-        std::fs::remove_file(socket_path).map_err(TuckmillError::from)?;
+        std::fs::remove_file(socket_path).map_err(ChineError::from)?;
     }
     let listener = UnixListener::bind(socket_path).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::WorkerFailed,
             format!("cannot bind worker socket {}: {e}", socket_path.display()),
         )
         .with_source(e)
     })?;
     let (stream, _) = listener.accept().map_err(|e| {
-        TuckmillError::new(ErrorCode::WorkerFailed, format!("accept failed: {e}")).with_source(e)
+        ChineError::new(ErrorCode::WorkerFailed, format!("accept failed: {e}")).with_source(e)
     })?;
     let result = serve(stream, engine);
     let _ = std::fs::remove_file(socket_path);
@@ -124,7 +124,7 @@ fn serve(stream: UnixStream, kind: EngineKind) -> Result<()> {
     let mut loaded = false;
 
     // Reader (main thread only) and shared writer (main + heartbeat threads).
-    let reader = RefCell::new(stream.try_clone().map_err(TuckmillError::from)?);
+    let reader = RefCell::new(stream.try_clone().map_err(ChineError::from)?);
     let writer: Writer = Arc::new(Mutex::new(stream));
     let cancel = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
@@ -154,7 +154,7 @@ fn serve(stream: UnixStream, kind: EngineKind) -> Result<()> {
             )?;
         }
         Some(_) => {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "first frame was not Hello",
             ))
@@ -195,7 +195,7 @@ fn serve(stream: UnixStream, kind: EngineKind) -> Result<()> {
                         if !caps.architectures.is_empty() {
                             if let Some(arch) = artifact.arch_id.as_deref() {
                                 if !caps.supports_arch(arch) {
-                                    return Err(TuckmillError::new(
+                                    return Err(ChineError::new(
                                         ErrorCode::UnsupportedArchitecture,
                                         format!(
                                             "backend {} does not execute architecture {arch:?} in this build (supported: {})",
@@ -398,7 +398,7 @@ fn serve(stream: UnixStream, kind: EngineKind) -> Result<()> {
                 other => {
                     // Unexpected but harmless control frames (e.g. heartbeat
                     // from a confused client) are a protocol violation.
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("unexpected control frame in worker: {other:?}"),
                     ));
@@ -408,7 +408,7 @@ fn serve(stream: UnixStream, kind: EngineKind) -> Result<()> {
     }
 }
 
-fn error_frame(e: &TuckmillError) -> WorkerFrame {
+fn error_frame(e: &ChineError) -> WorkerFrame {
     WorkerFrame::Error {
         code: e.code().as_str().into(),
         message: e.message().to_string(),
@@ -463,7 +463,7 @@ fn generate_streaming(
         }
     };
     let pending_state: Cell<Option<RunState>> = Cell::new(None);
-    let mut outcome_slot: Option<TuckmillError> = None;
+    let mut outcome_slot: Option<ChineError> = None;
     let result = {
         let mut on_token = |index: u64, text: &str| -> bool {
             let _ = drain_control(reader, cancel, paused, trim_epoch, prefetch_enabled, writer);
@@ -484,7 +484,7 @@ fn generate_streaming(
             )
             .is_err()
             {
-                outcome_slot = Some(TuckmillError::new(
+                outcome_slot = Some(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "supervisor connection lost while streaming",
                 ));
@@ -564,7 +564,7 @@ fn poll_frame(reader: &RefCell<UnixStream>, timeout: Duration) -> Result<PollRes
         if err.kind() == std::io::ErrorKind::Interrupted {
             return Ok(PollResult::Timeout);
         }
-        return Err(TuckmillError::from(err));
+        return Err(ChineError::from(err));
     }
     if rc == 0 {
         return Ok(PollResult::Timeout);
@@ -577,7 +577,7 @@ fn poll_frame(reader: &RefCell<UnixStream>, timeout: Duration) -> Result<PollRes
     let mut stream = reader.borrow_mut();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(TuckmillError::from)?;
+        .map_err(ChineError::from)?;
     match WorkerFrame::read_from(&mut *stream)? {
         Some(frame) => Ok(PollResult::Frame(Box::new(frame))),
         None => Ok(PollResult::Eof),
@@ -588,7 +588,7 @@ fn read_frame_blocking(reader: &RefCell<UnixStream>) -> Result<Option<WorkerFram
     let mut stream = reader.borrow_mut();
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(TuckmillError::from)?;
+        .map_err(ChineError::from)?;
     WorkerFrame::read_from(&mut *stream)
 }
 
@@ -598,13 +598,13 @@ pub fn engine_from_args(args: &[String]) -> Result<EngineKind> {
     while let Some(arg) = iter.next() {
         if arg == "--engine" {
             let value = iter.next().ok_or_else(|| {
-                TuckmillError::new(ErrorCode::InvalidRequest, "--engine needs a value")
+                ChineError::new(ErrorCode::InvalidRequest, "--engine needs a value")
             })?;
             return match BackendId::parse(value) {
                 Some(BackendId::ReferenceTest) => Ok(EngineKind::ReferenceTest),
-                Some(BackendId::TuckCore) => Ok(EngineKind::TuckCore),
+                Some(BackendId::ChineCore) => Ok(EngineKind::ChineCore),
                 Some(BackendId::LlamaCpp) => Ok(EngineKind::LlamaCpp),
-                None => Err(TuckmillError::new(
+                None => Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("unknown worker engine {value:?}"),
                 )),
@@ -618,9 +618,9 @@ pub fn engine_from_args(args: &[String]) -> Result<EngineKind> {
 mod tests {
     use super::*;
     use crate::proto::{hello, WorkerFrame};
-    use tuckmill_backend::ArtifactRef;
-    use tuckmill_manifest::ids::Id;
-    use tuckmill_manifest::plan::{ExecutionMode, ExecutionPlan, PlanContext};
+    use chine_backend::ArtifactRef;
+    use chine_manifest::ids::Id;
+    use chine_manifest::plan::{ExecutionMode, ExecutionPlan, PlanContext};
 
     fn admitted_plan() -> ExecutionPlan {
         let mut p = ExecutionPlan::new_skeleton(
@@ -664,8 +664,8 @@ mod tests {
     fn engine_arg_parsing_is_strict() {
         assert_eq!(engine_from_args(&[]).unwrap(), EngineKind::ReferenceTest);
         assert_eq!(
-            engine_from_args(&["--engine".into(), "tuckcore".into()]).unwrap(),
-            EngineKind::TuckCore
+            engine_from_args(&["--engine".into(), "chinecore".into()]).unwrap(),
+            EngineKind::ChineCore
         );
         assert_eq!(
             engine_from_args(&["--engine".into(), "llama".into()]).unwrap(),
@@ -710,7 +710,7 @@ mod tests {
             max_output_tokens: 50,
             stop: vec![],
             seed: 1,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
         }
         .write_to(&mut stream)
@@ -860,7 +860,7 @@ mod tests {
             max_output_tokens: 60,
             stop: vec![],
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
         }
         .write_to(&mut stream)

@@ -1,4 +1,4 @@
-//! TuckCore: experimental custom native executor (ADR-005).
+//! ChineCore: experimental custom native executor (ADR-005).
 //!
 //! Stage 0 is deliberately narrow and honest: dense Qwen3 GGUF artifacts,
 //! scalar f32 reference kernels, bounded weight streaming through a block
@@ -6,7 +6,7 @@
 //! numerical oracle later Metal kernels are validated against, and the
 //! vehicle for proving the 8 GB streaming architecture before optimizing it.
 //!
-//! TuckCore never changes the model: same artifact (identity-verified),
+//! ChineCore never changes the model: same artifact (identity-verified),
 //! same token IDs, same declared numerical profile. Custom Metal kernels are
 //! added only after profiling identifies measurable gaps.
 
@@ -25,12 +25,12 @@ pub mod tensor;
 pub mod tokenizer;
 
 /// Deterministic sampling transforms and the RNG live in the backend
-/// contract (`tuckmill_backend::sampling`) so every engine selects tokens
+/// contract (`chine_backend::sampling`) so every engine selects tokens
 /// under the identical declared policy; re-exported here for existing paths.
-pub use tuckmill_backend::sampling;
+pub use chine_backend::sampling;
 
 pub use completion::{CompletionTracker, Lease};
-pub use executor::TuckCore;
+pub use executor::ChineCore;
 pub use kernels::{KernelSelection, ResolvedKernels};
 pub use loader::{
     BlockLoader, BlockPolicy, LoaderSnapshot, ResidencySample, ResolvedStorage, StorageSelection,
@@ -45,7 +45,7 @@ mod executor;
 /// (stats/identity) — a build id alone never identifies them.
 pub fn format_build_id() -> String {
     format!(
-        "tuckmill-tuckcore {} ({}, {}, rev {})",
+        "chine-chinecore {} ({}, {}, rev {})",
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) {
             "debug"
@@ -53,7 +53,7 @@ pub fn format_build_id() -> String {
             "release"
         },
         std::env::consts::ARCH,
-        env!("TUCKMILL_SOURCE_REV")
+        env!("CHINE_SOURCE_REV")
     )
 }
 

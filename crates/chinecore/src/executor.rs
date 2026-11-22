@@ -1,4 +1,4 @@
-//! TuckCore executor: the `InferenceBackend` implementation.
+//! ChineCore executor: the `InferenceBackend` implementation.
 //!
 //! Stage 0 executes dense Qwen3 GGUF artifacts with scalar f32 reference
 //! kernels and bounded weight streaming. It is uncertified by construction:
@@ -10,17 +10,17 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use tuckmill_backend::output::VisibleOutputBuffer;
-use tuckmill_backend::{
+use chine_backend::output::VisibleOutputBuffer;
+use chine_backend::{
     ArtifactRef, BackendCapabilities, BackendId, BackendStats, FinishReason, GenControl,
     GenOutcome, GenerateRequest, InferenceBackend, RequestTiming, RunState, StorageStats,
 };
-use tuckmill_manifest::adapter::AdapterRegistry;
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::{ExecutionMode, ExecutionPlan};
-use tuckmill_manifest::records::EngineIdentity;
-use tuckmill_manifest::units::Bytes;
-use tuckmill_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
+use chine_manifest::adapter::AdapterRegistry;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::{ExecutionMode, ExecutionPlan};
+use chine_manifest::records::EngineIdentity;
+use chine_manifest::units::Bytes;
+use chine_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
 
 use crate::completion::CompletionTracker;
 use crate::engine::metal::{
@@ -44,7 +44,7 @@ pub const DEFAULT_BLOCK_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct TuckCoreOptions {
+struct ChineCoreOptions {
     weight_cache_bytes: Option<u64>,
     block_bytes: Option<u64>,
     /// "oracle-f32" (default) or "llama-cpu" (mirrors pinned llama.cpp CPU
@@ -58,7 +58,7 @@ struct TuckCoreOptions {
     /// (default true; a bounded single streaming pass). Disabling is an
     /// explicit, recorded choice.
     verify_content_hash: Option<bool>,
-    /// Enable phase profiling counters (also via TUCKMILL_TUCKORE_PROFILE=1).
+    /// Enable phase profiling counters (also via CHINE_TUCKORE_PROFILE=1).
     profile: Option<bool>,
     /// Kernel implementation: "auto" (default; NEON where the target has
     /// it), "scalar" (force the portable reference kernels), or "neon"
@@ -140,7 +140,7 @@ struct EngineLoaded {
 }
 
 /// The experimental custom native executor.
-pub struct TuckCore {
+pub struct ChineCore {
     loaded: Option<Loaded>,
     /// A model served by the unified engine on Metal (qwen35, and dense
     /// qwen3 with `--kernels metal`).
@@ -154,13 +154,13 @@ pub struct TuckCore {
     applied_trim_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
-impl Default for TuckCore {
+impl Default for ChineCore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TuckCore {
+impl ChineCore {
     pub fn new() -> Self {
         Self {
             loaded: None,
@@ -204,7 +204,7 @@ impl TuckCore {
     /// package without claiming an implementation.
     pub fn identity(&self) -> EngineIdentity {
         EngineIdentity {
-            engine: BackendId::TuckCore.as_str().to_string(),
+            engine: BackendId::ChineCore.as_str().to_string(),
             certified: false,
             backend_abi_version: BACKEND_ABI_VERSION,
             worker_protocol_version: WORKER_PROTOCOL_VERSION,
@@ -218,9 +218,9 @@ impl TuckCore {
     }
 }
 
-impl InferenceBackend for TuckCore {
+impl InferenceBackend for ChineCore {
     fn backend_id(&self) -> BackendId {
-        BackendId::TuckCore
+        BackendId::ChineCore
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -253,19 +253,19 @@ impl InferenceBackend for TuckCore {
     ) -> Result<String> {
         plan.validate()?;
         if plan.mode == ExecutionMode::Rejected {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 "refusing to load a rejected plan",
             ));
         }
-        let opts: TuckCoreOptions = match options {
+        let opts: ChineCoreOptions = match options {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidRequest,
-                    format!("invalid tuckcore options: {e}"),
+                    format!("invalid chinecore options: {e}"),
                 )
             })?,
-            None => TuckCoreOptions::default(),
+            None => ChineCoreOptions::default(),
         };
         let policy = BlockPolicy {
             block_bytes: opts.block_bytes.unwrap_or(DEFAULT_BLOCK_BYTES),
@@ -291,7 +291,7 @@ impl InferenceBackend for TuckCore {
             Some("llama-cpu") => NumericalProfile::LlamaCpu,
             Some("metal-f16-act") => NumericalProfile::MetalF16Act,
             Some(other) => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!(
                         "unknown numerical profile {other:?}; use \"oracle-f32\", \"llama-cpu\" or \"metal-f16-act\""
@@ -301,7 +301,7 @@ impl InferenceBackend for TuckCore {
         };
         let verify_content_hash = opts.verify_content_hash.unwrap_or(true);
         let profile_enabled = opts.profile.unwrap_or(false)
-            || std::env::var("TUCKMILL_TUCKORE_PROFILE")
+            || std::env::var("CHINE_TUCKORE_PROFILE")
                 .map(|v| v == "1")
                 .unwrap_or(false);
         let counters = ProfileCounters {
@@ -310,13 +310,13 @@ impl InferenceBackend for TuckCore {
         };
         let storage_selection = opts.storage.unwrap_or(StorageSelection::Auto);
         if !metal_mode && opts.prefill_batch.is_some() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "prefill_batch applies only to the Metal kernel path; the resolved CPU kernels execute single-token steps and must not silently ignore it",
             ));
         }
         if metal_mode && storage_selection != StorageSelection::Auto {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "storage selection applies to CPU weight streaming; the Metal path keeps weights resident on the GPU",
             ));
@@ -327,14 +327,14 @@ impl InferenceBackend for TuckCore {
                 NumericalProfile::OracleF32 | NumericalProfile::MetalF16Act
             )
         {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "the Metal path implements the oracle-f32 and metal-f16-act numerical profiles; the llama-cpu activation-quantization profile is CPU-only",
             )
             .with_action("Select --numerical-profile metal-f16-act (the default) or oracle-f32 for --kernels metal."));
         }
         if !metal_mode && profile == NumericalProfile::MetalF16Act {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "metal-f16-act is the unified engine's Metal GEMM profile; the CPU kernels execute oracle-f32 or llama-cpu",
             )
@@ -345,7 +345,7 @@ impl InferenceBackend for TuckCore {
             None | Some("f32") => KvPrecision::F32,
             Some("f16") => KvPrecision::F16,
             Some(other) => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("unknown kv_precision {other:?}; use \"f32\" or \"f16\""),
                 ))
@@ -354,10 +354,9 @@ impl InferenceBackend for TuckCore {
 
         // ---- identity verification before anything executes ----
         let path = std::path::Path::new(&artifact.path);
-        let insp =
-            tuckmill_manifest::gguf::inspect(path, &tuckmill_manifest::gguf::Limits::default())?;
+        let insp = chine_manifest::gguf::inspect(path, &chine_manifest::gguf::Limits::default())?;
         if insp.file_len != artifact.file_bytes {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "artifact file is {} bytes but the recorded identity says {}",
@@ -370,7 +369,7 @@ impl InferenceBackend for TuckCore {
         if metadata_hash.as_str() != artifact.metadata_hash
             || tensor_index_hash.as_str() != artifact.tensor_index_hash
         {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 "artifact hashes do not match the recorded identity; refusing to execute",
             )
@@ -380,7 +379,7 @@ impl InferenceBackend for TuckCore {
             (&artifact.tokenizer_hash, insp.tokenizer_hash())
         {
             if actual.as_str() != expected.as_str() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::IntegrityFailure,
                     "tokenizer hash does not match the recorded identity",
                 ));
@@ -392,10 +391,10 @@ impl InferenceBackend for TuckCore {
         // identity that executes. Store replacement is atomic (rename or
         // unlink; see docs), and the length is re-checked after the
         // verification pass to catch truncation during the window.
-        let artifact_file = std::fs::File::open(path).map_err(TuckmillError::from)?;
-        let opened_len = artifact_file.metadata().map_err(TuckmillError::from)?.len();
+        let artifact_file = std::fs::File::open(path).map_err(ChineError::from)?;
+        let opened_len = artifact_file.metadata().map_err(ChineError::from)?.len();
         if opened_len != artifact.file_bytes {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "artifact file opened at {opened_len} bytes but the recorded identity says {}; refusing to execute",
@@ -413,14 +412,14 @@ impl InferenceBackend for TuckCore {
         let content_verified = if verify_content_hash {
             match &artifact.content_hash {
                 Some(expected) => {
-                    let (actual, _) = tuckmill_manifest::digest::digest_file(
+                    let (actual, _) = chine_manifest::digest::digest_file(
                         &artifact_file,
                         opened_len,
-                        tuckmill_manifest::digest::DEFAULT_CHUNK_BYTES,
+                        chine_manifest::digest::DEFAULT_CHUNK_BYTES,
                     )
-                    .map_err(TuckmillError::from)?;
+                    .map_err(ChineError::from)?;
                     if &actual != expected {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::IntegrityFailure,
                             "artifact content digest does not match the recorded identity; refusing to execute drifted weights",
                         ));
@@ -432,9 +431,9 @@ impl InferenceBackend for TuckCore {
         } else {
             false
         };
-        let post_len = artifact_file.metadata().map_err(TuckmillError::from)?.len();
+        let post_len = artifact_file.metadata().map_err(ChineError::from)?.len();
         if post_len != artifact.file_bytes {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "artifact changed size during verification ({post_len} bytes now); refusing to execute"
@@ -446,10 +445,10 @@ impl InferenceBackend for TuckCore {
         // ---- configuration and type checks ----
         for t in &insp.tensors {
             if !tensor::is_supported(t.type_id) {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::UnsupportedQuantization,
                     format!(
-                        "tensor {:?} uses {}, which tuckcore Stage 0 does not execute (supported: {})",
+                        "tensor {:?} uses {}, which chinecore Stage 0 does not execute (supported: {})",
                         t.name,
                         t.type_name,
                         tensor::supported_type_names()
@@ -513,12 +512,12 @@ impl InferenceBackend for TuckCore {
         }
         let kv_bound = KvState::bytes_for(&cfg, plan.context.total_context);
         if kv_bound > KvState::MAX_KV_BYTES {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "KV state for context {} needs {} bytes, beyond the stage-0 executor bound",
                     plan.context.total_context,
-                    tuckmill_manifest::units::Bytes(kv_bound)
+                    chine_manifest::units::Bytes(kv_bound)
                 ),
             ));
         }
@@ -528,7 +527,7 @@ impl InferenceBackend for TuckCore {
         // understated or foreign plan is refused before anything allocates.
         let kv_reserved = plan.budget.reservation_breakdown.kv_state.bytes();
         if kv_bound > kv_reserved {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "the plan reserves {} for KV state but this executor allocates {} for the admitted context {} in its f32 store; refusing to allocate beyond the acknowledged plan",
@@ -552,7 +551,7 @@ impl InferenceBackend for TuckCore {
         let effective_cache = policy.cache_bytes.min(payload);
         let cache_wanted = effective_cache.saturating_add(policy.block_bytes);
         if cache_wanted > weight_allowance {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 format!(
                     "the plan reserves {} for weights + I/O but this load requests up to {} (cache {} clamped to payload {} plus one block of {}); refusing an unacknowledged weight-cache allocation",
@@ -586,7 +585,7 @@ impl InferenceBackend for TuckCore {
         let weights = forward::prepare(&loader, cfg.clone(), names)?;
 
         let mut note = format!(
-            "tuckcore (experimental, uncertified): dense Qwen3, {} layers, vocab {}, byte-level BPE tokenizer, kernels {} [{}] (K01 scope: Q8_0/F16 CPU fused dot; Q4 and Metal unbuilt), weights {}; kv {}; real weights from {} ({} payload), weight cache {}, block {}",
+            "chinecore (experimental, uncertified): dense Qwen3, {} layers, vocab {}, byte-level BPE tokenizer, kernels {} [{}] (K01 scope: Q8_0/F16 CPU fused dot; Q4 and Metal unbuilt), weights {}; kv {}; real weights from {} ({} payload), weight cache {}, block {}",
             cfg.layers,
             cfg.vocab,
             kernels.as_str(),
@@ -594,9 +593,9 @@ impl InferenceBackend for TuckCore {
             loader.storage_mode().as_str(),
             kv_precision.as_str(),
             artifact.path,
-            tuckmill_manifest::units::Bytes(payload),
-            tuckmill_manifest::units::Bytes(policy.cache_bytes),
-            tuckmill_manifest::units::Bytes(policy.block_bytes)
+            chine_manifest::units::Bytes(payload),
+            chine_manifest::units::Bytes(policy.cache_bytes),
+            chine_manifest::units::Bytes(policy.block_bytes)
         );
         note.push_str(&format!(
             "; payload content hash {}",
@@ -634,27 +633,27 @@ impl InferenceBackend for TuckCore {
             (Some(l), _) => l.context_total,
             (None, Some(h)) => h.context_total,
             (None, None) => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
-                    "tuckcore has no loaded artifact",
+                    "chinecore has no loaded artifact",
                 ))
             }
         };
         let prompt_len = req.prompt_tokens.len() as u64;
         if prompt_len == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "prompt must contain at least one token",
             ));
         }
         if req.max_output_tokens == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "max_output_tokens must be positive",
             ));
         }
         if prompt_len + req.max_output_tokens > context_total {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "prompt {prompt_len} + max output {} exceeds admitted context {context_total}",
@@ -688,9 +687,9 @@ impl InferenceBackend for TuckCore {
             return run_session(&mut engine, &spec, req, ctl);
         }
         let Some(loaded) = self.loaded.as_ref() else {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
-                "tuckcore has no loaded artifact",
+                "chinecore has no loaded artifact",
             ));
         };
         // Control closure for the forward loops: services external input
@@ -752,7 +751,7 @@ impl InferenceBackend for TuckCore {
             return Self::score_engine(hybrid, tokens, positions, cancelled, sink);
         }
         let loaded = self.loaded.as_ref().ok_or_else(|| {
-            TuckmillError::new(ErrorCode::WorkerFailed, "tuckcore has no loaded artifact")
+            ChineError::new(ErrorCode::WorkerFailed, "chinecore has no loaded artifact")
         })?;
         let control = || {
             let _ = self.apply_pending_trim();
@@ -774,7 +773,7 @@ impl InferenceBackend for TuckCore {
         let mut scored = 0u64;
         for position in positions {
             if cancelled() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Cancelled,
                     "scoring cancelled at a position boundary",
                 ));
@@ -1023,7 +1022,7 @@ fn run_session(
                 sampling::sample(&logits, &sampling_cfg, &mut rng)
             };
             let Some(token) = choice else {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "sampling produced no token: every logit was non-finite",
                 ));
@@ -1086,7 +1085,7 @@ fn run_session(
                     // encoding overlaps the GPU's work.
                     (true, Some(model)) => (|| -> Result<()> {
                         if cancelled() {
-                            return Err(TuckmillError::new(
+                            return Err(ChineError::new(
                                 ErrorCode::Cancelled,
                                 "generation cancelled at a token boundary",
                             ));
@@ -1257,8 +1256,8 @@ impl<'a> StepEngine<'a> {
 /// One in-order hybrid step. Cancellation is honored at every token
 /// boundary; a position that disagrees with the model's own counter is an
 /// internal fault, never silently re-aligned.
-fn device_greedy_unsupported() -> TuckmillError {
-    TuckmillError::new(
+fn device_greedy_unsupported() -> ChineError {
+    ChineError::new(
         ErrorCode::Internal,
         "device greedy selection requested on an engine without it",
     )
@@ -1271,13 +1270,13 @@ fn engine_chunk_preamble(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     if cancelled() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::Cancelled,
             "prefill cancelled at a chunk boundary",
         ));
     }
     if model.positions() != start {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::Internal,
             format!(
                 "engine prefill at position {start} but the session holds {} positions",
@@ -1291,13 +1290,13 @@ fn engine_chunk_preamble(
 /// Token-boundary checks shared by the hybrid decode paths.
 fn engine_preamble(model: &EngineModel, pos: usize, cancelled: &dyn Fn() -> bool) -> Result<()> {
     if cancelled() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::Cancelled,
             "generation cancelled at a token boundary",
         ));
     }
     if model.positions() != pos {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::Internal,
             format!(
                 "engine step at position {pos} but the session holds {} positions",
@@ -1334,11 +1333,11 @@ const GEMMA3_ENGINE_KERNEL_ID: &str = "ADR013:gemma3-q8_0+f16:metal";
 /// Resolved GEMM operand profile for engine (Metal) loads: true is the
 /// declared metal-f16-act default; "oracle-f32" restores f32 operands.
 /// Unknown or CPU-only values were already refused at load entry.
-fn engine_gemm_f16_operands(opts: &TuckCoreOptions) -> Result<bool> {
+fn engine_gemm_f16_operands(opts: &ChineCoreOptions) -> Result<bool> {
     match opts.numerical_profile.as_deref() {
         None | Some("metal-f16-act") => Ok(true),
         Some("oracle-f32") => Ok(false),
-        Some(other) => Err(TuckmillError::new(
+        Some(other) => Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!(
                 "the unified engine's GEMM operand profile is metal-f16-act (default) or oracle-f32; got {other:?}"
@@ -1347,9 +1346,9 @@ fn engine_gemm_f16_operands(opts: &TuckCoreOptions) -> Result<bool> {
     }
 }
 
-fn check_resident_engine_options(plan: &ExecutionPlan, opts: &TuckCoreOptions) -> Result<()> {
+fn check_resident_engine_options(plan: &ExecutionPlan, opts: &ChineCoreOptions) -> Result<()> {
     if plan.mode != ExecutionMode::Resident {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidPlan,
             format!(
                 "the Metal path is resident-only, but the plan mode is {}; GPU streaming is not implemented (the CPU kernels stream)",
@@ -1359,7 +1358,7 @@ fn check_resident_engine_options(plan: &ExecutionPlan, opts: &TuckCoreOptions) -
         .with_action("Raise --memory-budget so the plan is resident, lower --context, or use the CPU kernels."));
     }
     if opts.prefill_batch.is_some() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!(
                 "the unified engine prefills in fixed chunks of {} tokens; prefill_batch must not be set",
@@ -1368,7 +1367,7 @@ fn check_resident_engine_options(plan: &ExecutionPlan, opts: &TuckCoreOptions) -
         ));
     }
     if opts.weight_cache_bytes.is_some() || opts.block_bytes.is_some() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "weight-cache and block options apply to CPU weight streaming; the Metal path keeps weights resident",
         ));
@@ -1385,7 +1384,7 @@ struct EngineLoadContext {
     load_start: Instant,
 }
 
-impl TuckCore {
+impl ChineCore {
     /// Q35-1E.2: load a verified `qwen35` artifact onto the resident Metal
     /// path. Every option that does not apply is refused rather than
     /// ignored, and every GPU allocation class is checked against its plan
@@ -1395,14 +1394,14 @@ impl TuckCore {
         &mut self,
         plan: &ExecutionPlan,
         artifact: &ArtifactRef,
-        opts: &TuckCoreOptions,
+        opts: &ChineCoreOptions,
         kernels: ResolvedKernels,
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
         artifact_file: &std::fs::File,
         ctx: EngineLoadContext,
     ) -> Result<String> {
         if kernels != ResolvedKernels::Metal {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "qwen35 executes on the resident Metal path only in this build (resolved kernels: {}); the CPU forward is the test oracle, not a served path",
@@ -1412,7 +1411,7 @@ impl TuckCore {
             .with_action("Select --kernels metal."));
         }
         if plan.mode != ExecutionMode::Resident {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 format!(
                     "the qwen35 Metal path is resident-only, but the plan mode is {}; streaming is not implemented for this architecture",
@@ -1422,13 +1421,13 @@ impl TuckCore {
             .with_action("Raise --memory-budget so the plan is resident, or lower --context."));
         }
         if opts.prefill_batch.is_some() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "qwen35 prefills in fixed chunks of 16 tokens in this build; prefill_batch must not be set",
             ));
         }
         if opts.weight_cache_bytes.is_some() || opts.block_bytes.is_some() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "weight-cache and block options apply to CPU weight streaming; the qwen35 Metal path keeps weights resident",
             ));
@@ -1436,14 +1435,14 @@ impl TuckCore {
         match opts.kv_precision.as_deref() {
             None | Some("f16") => {}
             Some("f32") => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     "the qwen35 GPU KV cache stores packed f16 only; f32 KV is not implemented on this path and is never substituted",
                 )
                 .with_action("Use the default (f16) KV precision for qwen35."))
             }
             Some(other) => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("unknown kv_precision {other:?}; use \"f32\" or \"f16\""),
                 ))
@@ -1479,10 +1478,10 @@ impl TuckCore {
         &mut self,
         plan: &ExecutionPlan,
         artifact: &ArtifactRef,
-        opts: &TuckCoreOptions,
+        opts: &ChineCoreOptions,
         cfg: &model::Qwen3Config,
         kv_precision: KvPrecision,
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
         artifact_file: &std::fs::File,
         ctx: EngineLoadContext,
     ) -> Result<String> {
@@ -1517,14 +1516,14 @@ impl TuckCore {
         &mut self,
         plan: &ExecutionPlan,
         artifact: &ArtifactRef,
-        opts: &TuckCoreOptions,
+        opts: &ChineCoreOptions,
         metal_mode: bool,
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
         artifact_file: &std::fs::File,
         ctx: EngineLoadContext,
     ) -> Result<String> {
         if !metal_mode {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "gemma3 runs on the unified engine's resident Metal path only; there is no CPU path for it",
             )
@@ -1535,7 +1534,7 @@ impl TuckCore {
             None | Some("f16") => KvCache::F16,
             Some("f32") => KvCache::F32,
             Some(other) => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("unknown kv_precision {other:?}; use \"f32\" or \"f16\""),
                 ))
@@ -1566,7 +1565,7 @@ impl TuckCore {
         &mut self,
         plan: &ExecutionPlan,
         artifact: &ArtifactRef,
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
         graph: crate::engine::ModelGraph,
         source: &dyn crate::engine::WeightSource,
         kv: KvCache,
@@ -1577,7 +1576,7 @@ impl TuckCore {
         ctx: EngineLoadContext,
     ) -> Result<String> {
         let capacity = usize::try_from(plan.context.total_context).map_err(|_| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 "admitted context does not fit this platform's address space",
             )
@@ -1604,7 +1603,7 @@ impl TuckCore {
             ("workspaces", alloc.scratch, reserved.workspaces.bytes()),
         ] {
             if need > have {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidPlan,
                     format!(
                         "the plan reserves {} for {class} but the {arch} GPU model needs {} at context {}; refusing before any GPU allocation",
@@ -1625,7 +1624,7 @@ impl TuckCore {
             engine_opts,
         )?;
         if model.allocated_bytes() != alloc.total() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "{arch} GPU ledger holds {} but the preflight priced {}; refusing an unaccounted allocation",
@@ -1640,7 +1639,7 @@ impl TuckCore {
             KvCache::F32 => "kv f32",
         };
         let mut note = format!(
-            "tuckcore (experimental, uncertified): unified engine (ADR-011), graph {} with {} layers, vocab {}, kernels metal [oracle-f32], {kv_note}, batched prefill x{}; real weights from {} ({} payload), GPU ledger {} = weights {} + state {} + scratch {}",
+            "chinecore (experimental, uncertified): unified engine (ADR-011), graph {} with {} layers, vocab {}, kernels metal [oracle-f32], {kv_note}, batched prefill x{}; real weights from {} ({} payload), GPU ledger {} = weights {} + state {} + scratch {}",
             model.graph().architecture,
             model.graph().layers.len(),
             model.graph().vocab,
@@ -1710,7 +1709,7 @@ impl TuckCore {
         for position in positions {
             let pos = usize::try_from(*position).unwrap_or(usize::MAX);
             if tokens.is_empty() || pos >= tokens.len() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     "scoring position is outside the token sequence",
                 ));
@@ -1720,7 +1719,7 @@ impl TuckCore {
             }
             while model.positions() <= pos {
                 if cancelled() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::Cancelled,
                         "scoring cancelled at a position boundary",
                     ));
@@ -1803,22 +1802,21 @@ fn pause_loop(ctl: &mut GenControl<'_>, mut remaining: Duration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chine_backend::SamplingPolicy;
+    use chine_manifest::ids::Id;
+    use chine_manifest::plan::PlanContext;
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
     use std::sync::atomic::AtomicBool;
-    use tuckmill_backend::SamplingPolicy;
-    use tuckmill_manifest::ids::Id;
-    use tuckmill_manifest::plan::PlanContext;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
 
     // Local alias to avoid importing the full plan module in every test.
-    use tuckmill_manifest::plan::ExecutionPlan as Plan;
+    use chine_manifest::plan::ExecutionPlan as Plan;
 
     fn fixture() -> (tempfile::TempDir, ArtifactRef, Plan) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let artifact = ArtifactRef {
             path: path.display().to_string(),
             file_bytes: insp.file_len,
@@ -1841,21 +1839,21 @@ mod tests {
         // Arena reservations the executor acknowledges at load: KV priced at
         // the actual f32 representation, plus generous weights/IO for the
         // tiny fixture. Understated plans are exercised separately.
-        plan.budget.requested_budget = tuckmill_manifest::units::Bytes::parse("2GiB").unwrap();
+        plan.budget.requested_budget = chine_manifest::units::Bytes::parse("2GiB").unwrap();
         plan.budget.add_reservation(
-            tuckmill_manifest::records::ReserveClass::KvState,
+            chine_manifest::records::ReserveClass::KvState,
             Bytes(64 * 1024 * 1024),
         );
         plan.budget.add_reservation(
-            tuckmill_manifest::records::ReserveClass::Weights,
+            chine_manifest::records::ReserveClass::Weights,
             Bytes(64 * 1024 * 1024),
         );
         plan.budget.add_reservation(
-            tuckmill_manifest::records::ReserveClass::IoBuffers,
+            chine_manifest::records::ReserveClass::IoBuffers,
             Bytes(16 * 1024 * 1024),
         );
         plan.budget.add_reservation(
-            tuckmill_manifest::records::ReserveClass::Workspaces,
+            chine_manifest::records::ReserveClass::Workspaces,
             Bytes(64 * 1024 * 1024),
         );
         plan.plan_id = plan.compute_id().unwrap();
@@ -1863,7 +1861,7 @@ mod tests {
     }
 
     fn run_generate(
-        engine: &mut TuckCore,
+        engine: &mut ChineCore,
         prompt: Vec<u32>,
         max_out: u64,
     ) -> (GenOutcome, Vec<String>) {
@@ -1878,7 +1876,7 @@ mod tests {
     }
 
     fn run_generate_with(
-        engine: &mut TuckCore,
+        engine: &mut ChineCore,
         prompt: Vec<u32>,
         max_out: u64,
         stop: Vec<String>,
@@ -1910,7 +1908,7 @@ mod tests {
     #[test]
     fn load_verifies_identity_and_reports_honestly() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         let note = engine
             .load(
                 &plan,
@@ -1925,7 +1923,7 @@ mod tests {
         );
         assert!(note.contains("K01 scope: Q8_0/F16 CPU fused dot"));
         let identity = engine.identity();
-        assert_eq!(identity.engine, "tuckcore");
+        assert_eq!(identity.engine, "chinecore");
         assert!(!identity.certified);
         assert!(engine.is_loaded());
 
@@ -1939,7 +1937,7 @@ mod tests {
     #[test]
     fn unknown_options_are_rejected_not_ignored() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         let err = engine
             .load(
                 &plan,
@@ -1953,7 +1951,7 @@ mod tests {
     #[test]
     fn generate_is_deterministic_and_bounded() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
         let (a, ta) = run_generate(&mut engine, vec![1, 2, 3], 6);
         let (_b, tb) = run_generate(&mut engine, vec![1, 2, 3], 6);
@@ -1975,7 +1973,7 @@ mod tests {
                 max_output_tokens: 200,
                 stop: vec![],
                 seed: 0,
-                sampling: tuckmill_backend::SamplingPolicy::default(),
+                sampling: chine_backend::SamplingPolicy::default(),
                 ignore_eos: false,
             };
             engine.generate(&req, &mut ctl).unwrap_err()
@@ -1986,7 +1984,7 @@ mod tests {
     #[test]
     fn understated_plan_reservations_are_refused_before_allocation() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
 
         // KV understated (the pre-Gate-B "2 bytes per element" mistake).
         let mut understated = plan.clone();
@@ -2017,9 +2015,9 @@ mod tests {
                 256
             ))
         );
-        let payload: u64 = tuckmill_manifest::gguf::inspect(
+        let payload: u64 = chine_manifest::gguf::inspect(
             std::path::Path::new(&artifact.path),
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
         )
         .unwrap()
         .tensors
@@ -2046,8 +2044,7 @@ mod tests {
         let path = dir.path().join("q35.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen35()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         artifact.path = path.display().to_string();
         artifact.file_bytes = insp.file_len;
         artifact.metadata_hash = insp.metadata_hash().unwrap().as_str().to_string();
@@ -2061,12 +2058,12 @@ mod tests {
     }
 
     fn metal_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -2075,7 +2072,7 @@ mod tests {
     #[test]
     fn hybrid_load_refuses_every_option_it_cannot_honor() {
         let (_dir, artifact, plan) = hybrid_fixture();
-        assert!(TuckCore::new().capabilities().supports_arch("qwen35"));
+        assert!(ChineCore::new().capabilities().supports_arch("qwen35"));
         for (opts, code) in [
             (
                 serde_json::json!({"kernels": "scalar"}),
@@ -2094,7 +2091,7 @@ mod tests {
                 ErrorCode::InvalidRequest,
             ),
         ] {
-            let mut engine = TuckCore::new();
+            let mut engine = ChineCore::new();
             let err = engine.load(&plan, &artifact, Some(&opts)).unwrap_err();
             assert_eq!(err.code(), code, "{opts}: {err}");
             assert!(!engine.is_loaded(), "{opts}: nothing is loaded on refusal");
@@ -2109,7 +2106,7 @@ mod tests {
         let (_dir, artifact, mut plan) = hybrid_fixture();
         plan.budget.reservation_breakdown.kv_state = Bytes(1);
         plan.plan_id = plan.compute_id().unwrap();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         let err = engine
             .load(
                 &plan,
@@ -2128,7 +2125,7 @@ mod tests {
             return;
         }
         let (_dir, artifact, plan) = hybrid_fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         let note = engine
             .load(
                 &plan,
@@ -2204,23 +2201,23 @@ mod tests {
 
     #[test]
     fn metal_forward_matches_scalar_on_fixture() {
-        if !tuckmill_metal::probe().available {
+        if !chine_metal::probe().available {
             assert!(
-                std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-                "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+                std::env::var("CHINE_REQUIRE_METAL").is_err(),
+                "CHINE_REQUIRE_METAL is set but no Metal device is available"
             );
             eprintln!("skipping: no Metal device");
             return;
         }
         let (_dir, artifact, plan) = fixture();
-        let mut cpu = TuckCore::new();
+        let mut cpu = ChineCore::new();
         cpu.load(
             &plan,
             &artifact,
             Some(&serde_json::json!({"kernels": "scalar"})),
         )
         .unwrap();
-        let mut gpu = TuckCore::new();
+        let mut gpu = ChineCore::new();
         let note = gpu
             .load(
                 &plan,
@@ -2238,7 +2235,7 @@ mod tests {
         // Teacher-forced logits on a fixed sequence (held positions).
         let tokens: Vec<u32> = vec![1, 9, 4, 17, 5, 23];
         let positions = [0u64, 2, 4];
-        let collect = |engine: &mut TuckCore| -> Vec<(u64, Vec<f32>)> {
+        let collect = |engine: &mut ChineCore| -> Vec<(u64, Vec<f32>)> {
             let mut out = Vec::new();
             {
                 let mut sink = |pos: u64, logits: &[f32]| {
@@ -2312,14 +2309,14 @@ mod tests {
             return;
         }
         let (_dir, artifact, plan) = fixture();
-        let mut cpu = TuckCore::new();
+        let mut cpu = ChineCore::new();
         cpu.load(
             &plan,
             &artifact,
             Some(&serde_json::json!({"kernels": "scalar", "kv_precision": "f16"})),
         )
         .unwrap();
-        let mut gpu = TuckCore::new();
+        let mut gpu = ChineCore::new();
         let note = gpu
             .load(
                 &plan,
@@ -2331,7 +2328,7 @@ mod tests {
         assert_eq!(gpu.stats().kv_precision.as_deref(), Some("f16"));
         let tokens: Vec<u32> = vec![1, 9, 4, 17, 5, 23];
         let positions = [1u64, 3, 5];
-        let collect = |engine: &mut TuckCore| -> Vec<Vec<f32>> {
+        let collect = |engine: &mut ChineCore| -> Vec<Vec<f32>> {
             let mut out = Vec::new();
             {
                 let mut sink = |_: u64, logits: &[f32]| {
@@ -2376,7 +2373,7 @@ mod tests {
             serde_json::json!({"kernels": "metal", "prefill_batch": 4}),
             serde_json::json!({"kernels": "metal", "weight_cache_bytes": 65536}),
         ] {
-            let mut engine = TuckCore::new();
+            let mut engine = ChineCore::new();
             let err = engine.load(&plan, &artifact, Some(&opts)).unwrap_err();
             assert_eq!(err.code(), ErrorCode::InvalidRequest, "{opts}: {err}");
             assert!(!engine.is_loaded(), "{opts}: nothing is loaded on refusal");
@@ -2388,27 +2385,26 @@ mod tests {
     /// Q8_0 artifact — teacher-forced logits at held positions and greedy
     /// generation — within a registered f32 reduction-order policy.
     /// Debug builds skip it (the CPU oracle is ~10x slower there); run with
-    /// `cargo test --release -p tuckmill-tuckcore real_model_metal` and
-    /// TUCKMILL_REAL_GGUF pointing at the pinned artifact.
+    /// `cargo test --release -p chine-chinecore real_model_metal` and
+    /// CHINE_REAL_GGUF pointing at the pinned artifact.
     #[cfg(not(debug_assertions))]
     #[test]
     fn real_model_metal_matches_the_cpu_oracle() {
-        let Ok(gguf) = std::env::var("TUCKMILL_REAL_GGUF") else {
-            eprintln!("skipping: TUCKMILL_REAL_GGUF not set (real-weight label)");
+        let Ok(gguf) = std::env::var("CHINE_REAL_GGUF") else {
+            eprintln!("skipping: CHINE_REAL_GGUF not set (real-weight label)");
             return;
         };
-        if !tuckmill_metal::probe().available {
+        if !chine_metal::probe().available {
             assert!(
-                std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-                "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+                std::env::var("CHINE_REQUIRE_METAL").is_err(),
+                "CHINE_REQUIRE_METAL is set but no Metal device is available"
             );
             eprintln!("skipping: no Metal device");
             return;
         }
         let path = std::path::PathBuf::from(&gguf);
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let registry = AdapterRegistry::builtin().unwrap();
         let (cfg, _) = crate::model::resolve(&insp, &registry).unwrap();
         // Fixed in-vocabulary token sequence: the comparison is about
@@ -2422,7 +2418,7 @@ mod tests {
         let artifact = {
             let meta = insp.metadata_hash().unwrap();
             let index = insp.tensor_index_hash().unwrap();
-            tuckmill_backend::ArtifactRef {
+            chine_backend::ArtifactRef {
                 path: path.display().to_string(),
                 file_bytes: insp.file_len,
                 metadata_hash: meta.as_str().to_string(),
@@ -2435,43 +2431,43 @@ mod tests {
         let payload: u64 = insp.tensors.iter().map(|t| t.byte_size).sum();
         let context = 2048u64;
         let plan = {
-            let mut p = tuckmill_manifest::plan::ExecutionPlan::new_skeleton(
+            let mut p = chine_manifest::plan::ExecutionPlan::new_skeleton(
                 artifact_artifact_id(),
-                tuckmill_manifest::ids::Id::new("d".repeat(64)).unwrap(),
+                chine_manifest::ids::Id::new("d".repeat(64)).unwrap(),
                 "qwen3".into(),
             );
-            p.mode = tuckmill_manifest::plan::ExecutionMode::Resident;
-            p.context = tuckmill_manifest::plan::PlanContext::new(context, 64);
-            p.budget.requested_budget = tuckmill_manifest::units::Bytes::parse("2GiB").unwrap();
+            p.mode = chine_manifest::plan::ExecutionMode::Resident;
+            p.context = chine_manifest::plan::PlanContext::new(context, 64);
+            p.budget.requested_budget = chine_manifest::units::Bytes::parse("2GiB").unwrap();
             p.budget.add_reservation(
-                tuckmill_manifest::records::ReserveClass::Weights,
-                tuckmill_manifest::units::Bytes(payload),
+                chine_manifest::records::ReserveClass::Weights,
+                chine_manifest::units::Bytes(payload),
             );
             p.budget.add_reservation(
-                tuckmill_manifest::records::ReserveClass::KvState,
-                tuckmill_manifest::units::Bytes(KvState::bytes_for(&cfg, context)),
+                chine_manifest::records::ReserveClass::KvState,
+                chine_manifest::units::Bytes(KvState::bytes_for(&cfg, context)),
             );
             p.budget.add_reservation(
-                tuckmill_manifest::records::ReserveClass::Workspaces,
-                tuckmill_manifest::units::Bytes(64 * 1024 * 1024),
+                chine_manifest::records::ReserveClass::Workspaces,
+                chine_manifest::units::Bytes(64 * 1024 * 1024),
             );
             p.budget.add_reservation(
-                tuckmill_manifest::records::ReserveClass::IoBuffers,
-                tuckmill_manifest::units::Bytes(16 * 1024 * 1024),
+                chine_manifest::records::ReserveClass::IoBuffers,
+                chine_manifest::units::Bytes(16 * 1024 * 1024),
             );
             p.budget.reservation = p.budget.reservation_breakdown.total();
             p.plan_id = p.compute_id().unwrap();
             p
         };
 
-        let mut cpu = TuckCore::new();
+        let mut cpu = ChineCore::new();
         cpu.load(
             &plan,
             &artifact,
             Some(&serde_json::json!({"kernels": "scalar", "verify_content_hash": false})),
         )
         .unwrap();
-        let mut gpu = TuckCore::new();
+        let mut gpu = ChineCore::new();
         gpu.load(
             &plan,
             &artifact,
@@ -2481,7 +2477,7 @@ mod tests {
 
         // Teacher-forced logits at held positions.
         let positions: Vec<u64> = vec![(tokens.len() - 1) as u64];
-        let collect = |engine: &mut TuckCore| -> Vec<(u64, Vec<f32>)> {
+        let collect = |engine: &mut ChineCore| -> Vec<(u64, Vec<f32>)> {
             let mut out = Vec::new();
             {
                 let mut sink = |pos: u64, logits: &[f32]| {
@@ -2538,8 +2534,8 @@ mod tests {
     }
 
     #[cfg(not(debug_assertions))]
-    fn artifact_artifact_id() -> tuckmill_manifest::ids::Id {
-        tuckmill_manifest::ids::Id::new("a".repeat(64)).unwrap()
+    fn artifact_artifact_id() -> chine_manifest::ids::Id {
+        chine_manifest::ids::Id::new("a".repeat(64)).unwrap()
     }
 
     #[test]
@@ -2548,7 +2544,7 @@ mod tests {
         // already prepared, a smaller request's KV session is allocated for
         // its own prompt+output need — never for the prepared capacity.
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
         // Snapshot the geometry so the closure does not hold the engine.
         let cfg = engine.loaded.as_ref().unwrap().weights.cfg.clone();
@@ -2581,7 +2577,7 @@ mod tests {
     #[test]
     fn stop_markers_never_reach_the_visible_stream() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
 
         // Learn the deterministic greedy continuation, then use its own
@@ -2628,7 +2624,7 @@ mod tests {
     #[test]
     fn sampling_policy_from_the_request_is_honored() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
 
         // Greedy stays deterministic regardless of seed.
@@ -2693,7 +2689,7 @@ mod tests {
     #[test]
     fn generation_cancels_at_a_boundary() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
@@ -2714,7 +2710,7 @@ mod tests {
             max_output_tokens: 200,
             stop: vec![],
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
         };
         let outcome = engine.generate(&req, &mut ctl).unwrap();
@@ -2726,7 +2722,7 @@ mod tests {
     #[test]
     fn scoring_returns_vocab_logits_per_position() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
         let tokens = [2u32, 4, 6, 8];
         let mut seen = Vec::new();
@@ -2761,7 +2757,7 @@ mod tests {
     fn streaming_config_changes_evidence_not_numbers() {
         let (_dir, artifact, plan) = fixture();
         let tokens = [3u32, 1, 4, 1, 5];
-        let mut resident = TuckCore::new();
+        let mut resident = ChineCore::new();
         resident
             .load(
                 &plan,
@@ -2769,7 +2765,7 @@ mod tests {
                 Some(&serde_json::json!({"weight_cache_bytes": 33554432, "block_bytes": 1048576})),
             )
             .unwrap();
-        let mut streamed = TuckCore::new();
+        let mut streamed = ChineCore::new();
         streamed
             .load(
                 &plan,
@@ -2800,7 +2796,7 @@ mod tests {
     #[test]
     fn governor_trim_epoch_evicts_caches_during_generation() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine
             .load(
                 &plan,
@@ -2830,7 +2826,7 @@ mod tests {
             max_output_tokens: 8,
             stop: vec![],
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
         };
         let before = engine.stats().evictions;
@@ -2851,7 +2847,7 @@ mod tests {
     #[test]
     fn shutdown_releases_everything() {
         let (_dir, artifact, plan) = fixture();
-        let mut engine = TuckCore::new();
+        let mut engine = ChineCore::new();
         engine.load(&plan, &artifact, None).unwrap();
         let _ = run_generate(&mut engine, vec![1], 2);
         engine.shutdown();

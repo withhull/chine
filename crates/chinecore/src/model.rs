@@ -1,8 +1,8 @@
 //! Qwen3 model configuration resolved from the artifact and its adapter.
 
-use tuckmill_manifest::adapter::{AdapterRegistry, AdapterSpec};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::GgufInspection;
+use chine_manifest::adapter::{AdapterRegistry, AdapterSpec};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::GgufInspection;
 
 /// Dense Qwen3 geometry plus the tensor names Stage 0 executes.
 #[derive(Debug, Clone)]
@@ -110,13 +110,13 @@ impl TensorNames {
     }
 }
 
-fn missing(name: &str) -> TuckmillError {
-    TuckmillError::new(
+fn missing(name: &str) -> ChineError {
+    ChineError::new(
         ErrorCode::UnsupportedArchitecture,
         format!("artifact is missing required tensor {name:?} for dense Qwen3"),
     )
     .with_action(
-        "Confirm the artifact family with 'tuckmill inspect'; tuckcore Stage 0 executes dense Qwen3 GGUF only.",
+        "Confirm the artifact family with 'chine inspect'; chinecore Stage 0 executes dense Qwen3 GGUF only.",
     )
 }
 
@@ -127,25 +127,25 @@ pub fn resolve(
     registry: &AdapterRegistry,
 ) -> Result<(Qwen3Config, AdapterSpec)> {
     let arch = inspection.arch_id().ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             "artifact declares no architecture",
         )
     })?;
     if arch == "qwen35" {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
-            "qwen35 is a hybrid Gated-DeltaNet + full-attention architecture; tuckcore does not implement its operators yet",
+            "qwen35 is a hybrid Gated-DeltaNet + full-attention architecture; chinecore does not implement its operators yet",
         )
         .with_action(
             "The artifact contract (inspect/import/plan) is recognized; execution waits for the Q35-1 CPU oracle and Q35-2 Metal gates (ADR-008).",
         ));
     }
     if arch != "qwen3" {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
-                "tuckcore Stage 0 executes dense qwen3 artifacts; this artifact is {arch:?}"
+                "chinecore Stage 0 executes dense qwen3 artifacts; this artifact is {arch:?}"
             ),
         )
         .with_action(
@@ -155,17 +155,17 @@ pub fn resolve(
     let adapter = registry
         .find(&arch)
         .ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!("no adapter is registered for architecture {arch:?}"),
             )
         })?
         .clone();
     if adapter.traits.moe || adapter.traits.hybrid_linear_attention {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
-                "tuckcore Stage 0 does not execute MoE or hybrid adapters ({})",
+                "chinecore Stage 0 does not execute MoE or hybrid adapters ({})",
                 adapter.id
             ),
         )
@@ -178,7 +178,7 @@ pub fn resolve(
         .get_u64("qwen3.embedding_length")
         .filter(|v| *v > 0)
         .ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "qwen3.embedding_length is required",
             )
@@ -187,7 +187,7 @@ pub fn resolve(
         .get_u64("qwen3.feed_forward_length")
         .filter(|v| *v > 0)
         .ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "qwen3.feed_forward_length is required",
             )
@@ -208,7 +208,7 @@ pub fn resolve(
         .find(|t| t.name == "token_embd.weight")
         .ok_or_else(|| missing("token_embd.weight"))?;
     if token_embd.dims.len() != 2 || token_embd.dims[0] != hidden {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "token_embd.weight has dims {:?} but embedding_length is {hidden}",
@@ -239,15 +239,15 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn inspection() -> GgufInspection {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen3());
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        tuckmill_manifest::gguf::inspect_reader(
+        chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap()
@@ -278,10 +278,10 @@ mod tests {
     fn moe_artifacts_are_refused_honestly() {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen3moe());
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        let insp = tuckmill_manifest::gguf::inspect_reader(
+        let insp = chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap();
@@ -297,10 +297,10 @@ mod tests {
     fn qwen35_artifacts_are_refused_with_the_gate_reference() {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen35());
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        let insp = tuckmill_manifest::gguf::inspect_reader(
+        let insp = chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap();

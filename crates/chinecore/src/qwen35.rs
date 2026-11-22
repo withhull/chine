@@ -13,9 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use tuckmill_manifest::adapter::AdapterRegistry;
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::{GgufInspection, GgufValue};
+use chine_manifest::adapter::AdapterRegistry;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::{GgufInspection, GgufValue};
 
 /// Attention kind of one served layer, from the pinned interval rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +140,7 @@ impl Qwen35StateLayout {
         kv_element_bytes: u32,
     ) -> Result<u64> {
         let overflow = || {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "qwen35 state layout overflows u64",
             )
@@ -313,13 +313,13 @@ pub fn resolve(
     registry: &AdapterRegistry,
 ) -> Result<(Qwen35Config, Qwen35Layout)> {
     let arch = inspection.arch_id().ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             "artifact declares no architecture",
         )
     })?;
     if arch != "qwen35" {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!("the typed Qwen35 contract resolves only qwen35 artifacts; this artifact is {arch:?}"),
         ));
@@ -327,14 +327,14 @@ pub fn resolve(
     let adapter = registry
         .find(&arch)
         .ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "no adapter is registered for architecture \"qwen35\"",
             )
         })?
         .clone();
     if !adapter.traits.hybrid_linear_attention {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "adapter {} does not declare a hybrid linear-attention stack",
@@ -348,7 +348,7 @@ pub fn resolve(
     let req = |key: &str| -> Result<u64> {
         let full = format!("qwen35.{key}");
         inspection.get_u64(&full).filter(|v| *v > 0).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!("{full} is required and must be positive"),
             )
@@ -360,7 +360,7 @@ pub fn resolve(
         .get_u64("qwen35.nextn_predict_layers")
         .unwrap_or(0);
     let layers = block_count.checked_sub(excluded).filter(|v| *v > 0).ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "qwen35: block_count {block_count} minus nextn_predict_layers {excluded} leaves no served stack"
@@ -373,7 +373,7 @@ pub fn resolve(
     let embd_dims = &inspection.tensors[token_embd_entry].dims;
     let hidden = req("embedding_length")?;
     if embd_dims.len() != 2 || embd_dims[0] != hidden {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!("token_embd.weight has dims {embd_dims:?} but embedding_length is {hidden}"),
         ));
@@ -391,13 +391,13 @@ pub fn resolve(
     let kinds = match inspection.get("qwen35.attention.recurrent_layers") {
         None => {
             let Some(interval) = interval else {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     "qwen35: either full_attention_interval or attention.recurrent_layers must be declared",
                 ));
             };
             if layers / interval == 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!(
                         "qwen35: full-attention interval {interval} exceeds the {layers}-layer served stack"
@@ -416,7 +416,7 @@ pub fn resolve(
         }
         Some(GgufValue::Array(items)) => {
             if (items.len() as u64) < layers {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!(
                         "qwen35: recurrent layer array has {} entries for {layers} served layers",
@@ -430,7 +430,7 @@ pub fn resolve(
                     GgufValue::Bool(true) => kinds.push(Qwen35LayerKind::LinearAttention),
                     GgufValue::Bool(false) => kinds.push(Qwen35LayerKind::FullAttention),
                     other => {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::UnsupportedArchitecture,
                             format!(
                                 "qwen35: recurrent layer array entry {i} is {} but a boolean is required",
@@ -443,7 +443,7 @@ pub fn resolve(
             kinds
         }
         Some(other) => {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "qwen35: recurrent layer key is present but not an array ({})",
@@ -464,7 +464,7 @@ pub fn resolve(
                 GgufValue::I16(x) if *x >= 0 => Ok(*x as u64),
                 GgufValue::I32(x) if *x >= 0 => Ok(*x as u64),
                 GgufValue::I64(x) if *x >= 0 => Ok(*x as u64),
-                other => Err(TuckmillError::new(
+                other => Err(ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!(
                         "qwen35.rope.dimension_sections entry has type {} (want a non-negative integer)",
@@ -474,7 +474,7 @@ pub fn resolve(
             })
             .collect::<Result<Vec<u64>>>()?,
         Some(other) => {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "qwen35.rope.dimension_sections has type {} (want an array)",
@@ -488,7 +488,7 @@ pub fn resolve(
     let inner = req("ssm.inner_size")?;
     let dt_rank = req("ssm.time_step_rank")?;
     if !inner.is_multiple_of(dt_rank) {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!("qwen35: ssm inner size {inner} is not divisible by time_step_rank {dt_rank}"),
         ));
@@ -531,7 +531,7 @@ pub fn resolve(
     let attention_layers = state.attention_layers;
     let recurrent_layers = state.recurrent_layers;
     if attention_layers == 0 || recurrent_layers == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "qwen35: the resolved layer map splits {layers} served layers into {attention_layers} attention and {recurrent_layers} recurrent layers; a hybrid stack needs both"
@@ -542,7 +542,7 @@ pub fn resolve(
     // The adapter's priced geometry and this layout are two independent
     // derivations of the same fact; disagreement is a contract bug.
     if kv.layers != cfg.layers || kv.attention_layers != attention_layers {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "qwen35: adapter geometry ({} served, {} attention) disagrees with the typed layout ({}, {})",
@@ -552,7 +552,7 @@ pub fn resolve(
     }
     let constant_state = state.bytes_for(&cfg, 0, 0)?;
     if kv.state_bytes != constant_state {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "qwen35: adapter state pricing {constant_state} B disagrees with the typed layout {kv_state} B",
@@ -690,7 +690,7 @@ impl<'a> Index<'a> {
 
     fn lookup(&self, name: &str) -> Result<usize> {
         self.by_name.get(name).copied().ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!("artifact is missing required qwen35 tensor {name:?}"),
             )
@@ -705,7 +705,7 @@ impl<'a> Index<'a> {
         let index = self.lookup(name)?;
         let t = &self.inspection.tensors[index];
         if t.dims != dims {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "tensor {name:?} ({what}) has dims {:?} but the resolved contract requires {dims:?}",
@@ -735,7 +735,7 @@ impl<'a> Index<'a> {
                 .and_then(|(n, _)| n.parse::<u64>().ok())
                 .is_some_and(|n| n >= layers);
             if !in_trailing {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!(
                         "tensor {:?} is not part of the resolved qwen35 served contract",
@@ -751,15 +751,15 @@ impl<'a> Index<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn fixture(cfg: &SyntheticConfig) -> GgufInspection {
         let bytes = synthetic_qwen3_bytes(cfg);
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        tuckmill_manifest::gguf::inspect_reader(
+        chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap()
@@ -895,7 +895,7 @@ mod tests {
     fn malformed_array_is_refused() {
         let mut cfg = SyntheticConfig::tiny_qwen35();
         cfg.hybrid.as_mut().unwrap().recurrent_layers_array =
-            Some(tuckmill_manifest::testing::RecurrentLayerFlags::U32s(vec![
+            Some(chine_manifest::testing::RecurrentLayerFlags::U32s(vec![
                 1, 1, 1, 1,
             ]));
         let insp = fixture(&cfg);
@@ -909,7 +909,7 @@ mod tests {
     }
 
     fn real_artifact_path() -> Option<std::path::PathBuf> {
-        let p = std::env::var("TUCKMILL_QWEN35_GGUF").ok()?;
+        let p = std::env::var("CHINE_QWEN35_GGUF").ok()?;
         let p = std::path::PathBuf::from(p);
         p.exists().then_some(p)
     }
@@ -920,12 +920,11 @@ mod tests {
     #[test]
     fn real_artifact_layout_when_available() {
         let Some(path) = real_artifact_path() else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
             return;
         };
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let (cfg, layout) = resolve(&insp, &registry()).unwrap();
         assert_eq!(cfg.layers, 24);
         assert_eq!(cfg.block_count, 25);

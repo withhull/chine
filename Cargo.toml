@@ -5,7 +5,7 @@ members = [
     "crates/backend",
     "crates/planner",
     "crates/store",
-    "crates/tuckcore",
+    "crates/chinecore",
     "crates/llamaref",
     "crates/metal",
     "crates/supervisor",
@@ -19,18 +19,18 @@ rust-version = "1.96"
 # Provisional: open-source core is recommended by the PRD (S17); final licensing
 # decision (ADR) is still pending. Do not publish artifacts before clearance.
 license = "Apache-2.0"
-repository = "https://example.invalid/tuckmill"
-description = "Tuckmill: local-first model inference framework for Apple Silicon Macs"
+repository = "https://example.invalid/chine"
+description = "Chine: local-first model inference framework for Apple Silicon Macs"
 
 [workspace.dependencies]
-tuckmill-manifest = { path = "crates/manifest", version = "0.2.0" }
-tuckmill-backend = { path = "crates/backend", version = "0.2.0" }
-tuckmill-tuckcore = { path = "crates/tuckcore", version = "0.2.0" }
-tuckmill-llamaref = { path = "crates/llamaref", version = "0.2.0" }
-tuckmill-planner = { path = "crates/planner", version = "0.2.0" }
-tuckmill-metal = { path = "crates/metal", version = "0.2.0" }
-tuckmill-store = { path = "crates/store", version = "0.2.0" }
-tuckmill-supervisor = { path = "crates/supervisor", version = "0.2.0" }
+chine-manifest = { path = "crates/manifest", version = "0.2.0" }
+chine-backend = { path = "crates/backend", version = "0.2.0" }
+chine-chinecore = { path = "crates/chinecore", version = "0.2.0" }
+chine-llamaref = { path = "crates/llamaref", version = "0.2.0" }
+chine-planner = { path = "crates/planner", version = "0.2.0" }
+chine-metal = { path = "crates/metal", version = "0.2.0" }
+chine-store = { path = "crates/store", version = "0.2.0" }
+chine-supervisor = { path = "crates/supervisor", version = "0.2.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"

@@ -1,12 +1,12 @@
-//! Tensor element formats: decoding for the type set TuckCore executes.
+//! Tensor element formats: decoding for the type set ChineCore executes.
 //!
 //! Supported in Stage 0: F32, F16, BF16, Q8_0, Q4_0, Q4_1. Everything else
 //! is refused with `UNSUPPORTED_QUANTIZATION` listing what is supported —
 //! never substituted. Block sizes come from the pinned GGML table in
-//! `tuckmill-manifest`.
+//! `chine-manifest`.
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ggml;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ggml;
 
 /// Conversion from IEEE 754 binary16 bits.
 pub fn f16_to_f32(bits: u16) -> f32 {
@@ -55,7 +55,7 @@ pub fn dequant_into(type_id: u32, bytes: &[u8], out: &mut Vec<f32>) -> Result<us
         return Err(unsupported(type_id));
     }
     if !(bytes.len() as u64).is_multiple_of(info.block_bytes) {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             format!(
                 "packed {} data is {} bytes, not a multiple of the {}-byte block size",
@@ -205,11 +205,11 @@ pub fn quantize_row_q8_0(x: &[f32], blocks_qs: &mut Vec<[i8; 32]>, blocks_d: &mu
     }
 }
 
-fn unsupported(type_id: u32) -> TuckmillError {
-    TuckmillError::new(
+fn unsupported(type_id: u32) -> ChineError {
+    ChineError::new(
         ErrorCode::UnsupportedQuantization,
         format!(
-            "tuckcore does not execute tensor type {} in this build (supported: {})",
+            "chinecore does not execute tensor type {} in this build (supported: {})",
             ggml::type_name(type_id),
             supported_type_names()
         ),

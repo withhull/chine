@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::records::ReserveClass;
-use tuckmill_manifest::units::Bytes;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::records::ReserveClass;
+use chine_manifest::units::Bytes;
 
 #[derive(Debug)]
 struct Reservation {
@@ -77,7 +77,7 @@ impl LiveLedger {
             .saturating_add(self.overhead_estimate)
             .saturating_add(self.safety_reserve);
         if admitted > self.budget {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 format!(
                     "reservation '{}' of {} would need {} (R {} + U {} + H {}) against budget {}",

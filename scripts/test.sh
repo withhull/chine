@@ -11,10 +11,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 # the built binary) are mandatory here and in CI — a missing prerequisite
 # fails the gate; real-weight reference tests are machine-local and skip
 # without the pinned llama.cpp library and artifacts.
-cargo build -p tuckmill-cli
-TUCKMILL_TEST_WORKER_BIN="$PWD/target/debug/tuckmill" \
-TUCKMILL_REQUIRE_ISOLATED_WORKER=1 \
-TUCKMILL_REQUIRE_METAL=1 \
+cargo build -p chine-cli
+CHINE_TEST_WORKER_BIN="$PWD/target/debug/chine" \
+CHINE_REQUIRE_ISOLATED_WORKER=1 \
+CHINE_REQUIRE_METAL=1 \
 cargo test --workspace
 
 echo "all checks passed"

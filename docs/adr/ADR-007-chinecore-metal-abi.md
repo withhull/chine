@@ -1,4 +1,4 @@
-# ADR-007: TuckCore Metal path and the TuckCore–Metal ABI
+# ADR-007: ChineCore Metal path and the ChineCore–Metal ABI
 
 Status: accepted (Gate C, C0/C1)
 
@@ -6,19 +6,19 @@ Status: accepted (Gate C, C0/C1)
 
 Gate B is accepted: the request, worker, and CPU foundation is verified on the
 unchanged Qwen3-0.6B Q8_0 artifact (sha256 `9465e63a…bb031`). The next
-milestone is real Qwen inference executed end-to-end by TuckCore on the Apple
+milestone is real Qwen inference executed end-to-end by ChineCore on the Apple
 GPU, without delegating execution to llama.cpp. The existing
-`native/executor/tuckmill_worker_abi.h` is a *worker-level* scaffold; forcing
+`native/executor/chine_worker_abi.h` is a *worker-level* scaffold; forcing
 Metal operator calls through it would couple the supervisor protocol to GPU
 resource management.
 
 ## Decision
 
-1. **Dedicated TuckCore–Metal ABI.** `native/metal/tm_metal.h` is a narrow C
+1. **Dedicated ChineCore–Metal ABI.** `native/metal/ch_metal.h` is a narrow C
    ABI for resource handles (buffers), compiled pipelines, dispatch,
    synchronization, and measurement. The supervisor/worker protocol
-   (PROTOCOL.md v7) is untouched; only TuckCore executes Metal calls.
-2. **One owner.** A `tm_metal_ctx` owns exactly one `MTLDevice`, one
+   (PROTOCOL.md v7) is untouched; only ChineCore executes Metal calls.
+2. **One owner.** A `ch_metal_ctx` owns exactly one `MTLDevice`, one
    `MTLCommandQueue`, and the compiled pipeline states. All Metal objects are
    created, used, and released through it.
 3. **Shaders ship in-repo and compile at runtime.** MSL lives in
@@ -40,17 +40,17 @@ resource management.
    beyond that are added per the C3/C4 plan only when profiling shows the
    gap; the registry keeps reference fallbacks for every selection.
 6. **Test gating.** GPU tests run whenever a Metal device is present and are
-   skipped with a loud note otherwise; `TUCKMILL_REQUIRE_METAL=1` (the
+   skipped with a loud note otherwise; `CHINE_REQUIRE_METAL=1` (the
    repository gate on owned hardware) turns a missing device into a
    failure. Numerical assertions are tolerance-registered, never exact-bit,
    because GPU reduction order differs from the CPU sequence.
 
 ## Consequences
 
-- `crates/metal` (`tuckmill-metal`) wraps the ABI into typed Rust handles
+- `crates/metal` (`chine-metal`) wraps the ABI into typed Rust handles
   (`MetalContext`, `MetalBuffer`) with `Result` errors; no `unsafe` outside
   the wrapper, each block carrying a SAFETY note.
-- The C2 stage plugs these buffers and ops into the TuckCore executor behind
+- The C2 stage plugs these buffers and ops into the ChineCore executor behind
   the existing `InferenceBackend` interface; planner admission gains a Metal
   reservation class before any resident weights move to the GPU.
 - The llama.cpp Metal baseline remains the comparator, not the execution

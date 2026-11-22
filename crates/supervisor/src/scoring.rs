@@ -8,7 +8,7 @@
 //! length, finiteness) is validated by the caller that knows the expected
 //! vocabulary.
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 /// Bound on logits buffered for one scored position; exceeds any legal
 /// vocabulary (1,048,576) with headroom, and rejects oversize rows before
@@ -34,7 +34,7 @@ impl ScoreAccumulator {
         match self.rows.last_mut() {
             Some((last_position, buffer)) if *last_position == position => {
                 if offset as usize != buffer.len() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!(
                             "score chunk integrity failure for position {position}: offset {offset} does not continue after {} values (duplicate, reordered, or lost chunk)",
@@ -43,7 +43,7 @@ impl ScoreAccumulator {
                     ));
                 }
                 if buffer.len() + logits.len() > MAX_SCORE_VALUES_PER_POSITION {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!(
                             "score row for position {position} exceeds {MAX_SCORE_VALUES_PER_POSITION} values"
@@ -54,7 +54,7 @@ impl ScoreAccumulator {
             }
             _ => {
                 if offset != 0 {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!(
                             "score chunks for position {position} start at offset {offset}, not 0"
@@ -62,7 +62,7 @@ impl ScoreAccumulator {
                     ));
                 }
                 if logits.len() > MAX_SCORE_VALUES_PER_POSITION {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!(
                             "score row for position {position} is {} values, over the {MAX_SCORE_VALUES_PER_POSITION} bound",
@@ -75,7 +75,7 @@ impl ScoreAccumulator {
         }
         self.total_values = self.total_values.saturating_add(logits.len());
         if self.total_values > MAX_SCORE_VALUES_TOTAL {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!(
                     "scoring request accumulated {} values, over the {MAX_SCORE_VALUES_TOTAL} bound",
@@ -97,7 +97,7 @@ impl ScoreAccumulator {
                 .map(|(p, _)| *p)
                 .eq(positions.iter().copied());
         if !matches {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!(
                     "worker scored {scored} positions but delivered {} rows {:?} (expected {:?})",

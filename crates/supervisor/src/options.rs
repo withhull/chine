@@ -8,9 +8,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use tuckmill_backend::{BackendStats, EngineKind};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_tuckcore::{KernelSelection, StorageSelection};
+use chine_backend::{BackendStats, EngineKind};
+use chine_chinecore::{KernelSelection, StorageSelection};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 /// Requested execution options for one backend worker. `None` means "engine
 /// default"; `Auto` means "engine default resolution, recorded afterwards".
@@ -38,12 +38,12 @@ pub struct ExecutionOptions {
     /// governor commands mid-run). Refused for real engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_token_delay_ms: Option<u64>,
-    /// TuckCore engine prefix cache (ADR-012 step 2; engine default on).
+    /// ChineCore engine prefix cache (ADR-012 step 2; engine default on).
     /// Benchmarks turn it off so repeated prompts never become hidden
     /// cache hits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_cache: Option<bool>,
-    /// TuckCore speculative greedy decoding with the artifact's MTP head
+    /// ChineCore speculative greedy decoding with the artifact's MTP head
     /// (ADR-012 step 3; engine default off). Greedy output is
     /// token-identical to plain decoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,15 +55,15 @@ impl ExecutionOptions {
     /// silently drop them.
     pub fn validate(&self, kind: EngineKind) -> Result<()> {
         match kind {
-            EngineKind::TuckCore => {
+            EngineKind::ChineCore => {
                 if self.gpu_layers.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
                         "--gpu-layers applies only to --engine llama (the Metal performance baseline); arithmetic diagnostics stay CPU",
                     ));
                 }
                 if self.per_token_delay_ms.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
                         "per-token delay is a reference-test-engine test aid; real engines never simulate slowness",
                     ));
@@ -72,38 +72,38 @@ impl ExecutionOptions {
             }
             EngineKind::LlamaCpp => {
                 if self.kernels.is_some() || self.storage.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
-                        "--kernels/--storage apply to the tuckcore engine; llama.cpp selects its own kernels",
+                        "--kernels/--storage apply to the chinecore engine; llama.cpp selects its own kernels",
                     ));
                 }
                 if self.numerical_profile.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
-                        "--tuckcore-profile applies to the tuckcore engine",
+                        "--chinecore-profile applies to the chinecore engine",
                     ));
                 }
                 if self.profile.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
-                        "phase profile counters apply to the tuckcore engine",
+                        "phase profile counters apply to the chinecore engine",
                     ));
                 }
                 if self.prefix_cache.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
-                        "the prefix cache option applies to the tuckcore engine",
+                        "the prefix cache option applies to the chinecore engine",
                     ));
                 }
                 if self.speculative.is_some() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
-                        "--speculative applies to the tuckcore engine (MTP speculative decoding)",
+                        "--speculative applies to the chinecore engine (MTP speculative decoding)",
                     ));
                 }
                 if let Some(n) = self.gpu_layers {
                     if n < 0 {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::InvalidRequest,
                             "--gpu-layers must be >= 0",
                         ));
@@ -115,7 +115,7 @@ impl ExecutionOptions {
                 let mut without_test_aid = self.clone();
                 without_test_aid.per_token_delay_ms = None;
                 if without_test_aid != Self::default() {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
                         "the reference test engine executes synthetic work and accepts no execution options",
                     ));
@@ -131,7 +131,7 @@ impl ExecutionOptions {
     pub fn load_json(&self, kind: EngineKind) -> Option<Value> {
         let mut obj = Map::new();
         match kind {
-            EngineKind::TuckCore => {
+            EngineKind::ChineCore => {
                 if let Some(v) = self.weight_cache_bytes {
                     obj.insert("weight_cache_bytes".into(), Value::from(v));
                 }
@@ -185,9 +185,9 @@ impl ExecutionOptions {
     /// This is the number the planner must price; a nominal precision is
     /// never used. The width is resolved by backend AND model family:
     ///
-    /// - TuckCore + dense attention keeps f32 values even in its f16-rounded
+    /// - ChineCore + dense attention keeps f32 values even in its f16-rounded
     ///   mode, so it is always 4 bytes;
-    /// - TuckCore + hybrid linear attention (qwen35) stores packed KV at the
+    /// - ChineCore + hybrid linear attention (qwen35) stores packed KV at the
     ///   declared precision — f16 by default, f32 when selected — so the
     ///   planner prices 2 or 4 exactly as the executor allocates;
     /// - llama.cpp honors its configured cache type (f16 default);
@@ -200,7 +200,7 @@ impl ExecutionOptions {
         fallback: u32,
     ) -> u32 {
         match kind {
-            EngineKind::TuckCore => {
+            EngineKind::ChineCore => {
                 if hybrid_linear_attention {
                     match self.kv_precision.as_deref() {
                         Some("f32") => 4,
@@ -260,7 +260,7 @@ impl ExecutionOptions {
             kv_precision: stats.kv_precision.clone(),
         };
         let mismatch = |what: &str, requested: &str, resolved: Option<&str>| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!(
                     "requested {what} {requested:?} but the worker resolved {}; refusing to record this run as the requested configuration",
@@ -355,17 +355,17 @@ mod kv_width_tests {
 
     #[test]
     fn kv_width_resolves_by_backend_and_model_family() {
-        // Dense TuckCore keeps f32 values regardless of the nominal profile.
+        // Dense ChineCore keeps f32 values regardless of the nominal profile.
         let dense = ExecutionOptions::default();
         assert_eq!(
-            dense.kv_bytes_per_element(EngineKind::TuckCore, false, 2),
+            dense.kv_bytes_per_element(EngineKind::ChineCore, false, 2),
             4
         );
 
         // Hybrid (qwen35) packed KV prices the declared precision.
         let default_hybrid = ExecutionOptions::default();
         assert_eq!(
-            default_hybrid.kv_bytes_per_element(EngineKind::TuckCore, true, 2),
+            default_hybrid.kv_bytes_per_element(EngineKind::ChineCore, true, 2),
             2,
             "packed f16 is the default"
         );
@@ -374,7 +374,7 @@ mod kv_width_tests {
             ..Default::default()
         };
         assert_eq!(
-            f32_kv.kv_bytes_per_element(EngineKind::TuckCore, true, 2),
+            f32_kv.kv_bytes_per_element(EngineKind::ChineCore, true, 2),
             4
         );
         assert_eq!(

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
-use tuckmill_manifest::error::Result;
+use chine_manifest::error::Result;
 
 use crate::aliases;
 use crate::layout::StoreLayout;
@@ -43,7 +43,7 @@ pub struct Inventory {
 pub fn inventory(layout: &StoreLayout) -> Result<Inventory> {
     let manifests = aliases::list_manifests(layout)?;
     let alias_registry = aliases::AliasRegistry::load(layout).unwrap_or_default();
-    let reverse_alias: std::collections::BTreeMap<&tuckmill_manifest::Id, &String> = alias_registry
+    let reverse_alias: std::collections::BTreeMap<&chine_manifest::Id, &String> = alias_registry
         .aliases
         .iter()
         .map(|(alias, id)| (id, alias))
@@ -241,8 +241,8 @@ pub fn prune(layout: &StoreLayout, dry_run: bool, min_age: Duration) -> Result<P
 mod tests {
     use super::*;
     use crate::import::{import_local, ImportOptions};
-    use tuckmill_manifest::adapter::AdapterRegistry;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::adapter::AdapterRegistry;
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     #[test]
     fn inventory_lists_artifacts_and_packs() {

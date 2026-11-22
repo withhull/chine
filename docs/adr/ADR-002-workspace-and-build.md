@@ -19,7 +19,7 @@ layer behind a narrow ABI, and custom Metal kernels.
     controlled downloads, bounded packer, cache/GC.
   - `crates/supervisor` — queue, admission ledger, governor, worker protocol
     and process lifecycle, local HTTP API, benchmark harness, privacy logs.
-  - `crates/cli` — the `tuckmill` binary; `serve` and `run` use the isolated
+  - `crates/cli` — the `chine` binary; `serve` and `run` use the isolated
     worker process by default.
 - Dependencies are pinned to exact minor lines in `Cargo.toml`
   (`[workspace.dependencies]`) and locked by `Cargo.lock`, which is committed.
@@ -31,8 +31,8 @@ layer behind a narrow ABI, and custom Metal kernels.
   points. CI on Linux may validate portable logic only; Metal correctness and
   laptop usability require physical-Mac qualification and are *not* established
   by any automated test here.
-- Data lives under `~/Library/Application Support/Tuckmill` (override with
-  `TUCKMILL_DATA_DIR`). Installation is atomic: temporary work never appears
+- Data lives under `~/Library/Application Support/Chine` (override with
+  `CHINE_DATA_DIR`). Installation is atomic: temporary work never appears
   as a valid artifact; the source file is never deleted automatically.
 
 ## Consequences

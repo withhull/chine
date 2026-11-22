@@ -7,17 +7,17 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-BIN="$PWD/target/debug/tuckmill"
+BIN="$PWD/target/debug/chine"
 if [ ! -x "$BIN" ]; then
     cargo build --workspace
 fi
 
 WORK="$(mktemp -d)"
-export TUCKMILL_DATA_DIR="$WORK/store"
+export CHINE_DATA_DIR="$WORK/store"
 FIXTURE="$WORK/tiny-qwen3.gguf"
 
 echo "### generate a tiny fixture (fixture proves code paths, not model behavior)"
-cargo run -q -p tuckmill-manifest --example gen_fixture -- "$FIXTURE"
+cargo run -q -p chine-manifest --example gen_fixture -- "$FIXTURE"
 
 echo
 echo "### doctor"
@@ -44,8 +44,8 @@ echo "### run with --allow-test-engine (synthetic output, isolated worker)"
 "$BIN" run local-model --prompt "hello" --max-output 6 --allow-test-engine
 
 echo
-echo "### run with --engine tuckcore (experimental executor: real weights, scalar kernels)"
-"$BIN" run local-model --prompt "hello core" --max-output 6 --engine tuckcore
+echo "### run with --engine chinecore (experimental executor: real weights, scalar kernels)"
+"$BIN" run local-model --prompt "hello core" --max-output 6 --engine chinecore
 
 echo
 echo "### verify: resident vs forced-streaming equivalence (bit-exact logits, evictions proven)"
@@ -55,7 +55,7 @@ echo
 echo "### pack, bench, cache"
 "$BIN" pack local-model
 "$BIN" bench local-model --input 64 --output 32 --repetitions 1 --allow-test-engine
-"$BIN" bench local-model --input 32 --output 16 --repetitions 1 --engine tuckcore
+"$BIN" bench local-model --input 32 --output 16 --repetitions 1 --engine chinecore
 "$BIN" cache list
 "$BIN" cache prune --dry-run
 

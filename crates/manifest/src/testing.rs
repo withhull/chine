@@ -64,7 +64,7 @@ impl SyntheticConfig {
     pub fn tiny_qwen3() -> Self {
         Self {
             arch: "qwen3".into(),
-            name: "tuckmill-fixture-qwen3-tiny".into(),
+            name: "chine-fixture-qwen3-tiny".into(),
             layers: 2,
             hidden: 128,
             heads: 4,
@@ -88,7 +88,7 @@ impl SyntheticConfig {
     pub fn tiny_gemma3() -> Self {
         Self {
             arch: "gemma3".into(),
-            name: "tuckmill-fixture-gemma3-tiny".into(),
+            name: "chine-fixture-gemma3-tiny".into(),
             layers: 6,
             hidden: 36,
             heads: 4,
@@ -107,7 +107,7 @@ impl SyntheticConfig {
     pub fn tiny_qwen3moe() -> Self {
         Self {
             arch: "qwen3moe".into(),
-            name: "tuckmill-fixture-qwen3moe-tiny".into(),
+            name: "chine-fixture-qwen3moe-tiny".into(),
             layers: 2,
             hidden: 128,
             heads: 4,
@@ -128,7 +128,7 @@ impl SyntheticConfig {
     pub fn tiny_qwen35() -> Self {
         Self {
             arch: "qwen35".into(),
-            name: "tuckmill-fixture-qwen35-tiny".into(),
+            name: "chine-fixture-qwen35-tiny".into(),
             layers: 4,
             hidden: 64,
             heads: 4,
@@ -170,7 +170,7 @@ impl SyntheticConfig {
     /// last layer of a full group). The array is authoritative.
     pub fn tiny_qwen35_nonperiodic_array() -> Self {
         let mut cfg = Self::tiny_qwen35();
-        cfg.name = "tuckmill-fixture-qwen35-nonperiodic".into();
+        cfg.name = "chine-fixture-qwen35-nonperiodic".into();
         if let Some(h) = cfg.hybrid.as_mut() {
             h.recurrent_layers_array =
                 Some(RecurrentLayerFlags::Bools(vec![false, true, true, true]));
@@ -181,7 +181,7 @@ impl SyntheticConfig {
     /// Array-only artifact: no `full_attention_interval` key at all.
     pub fn tiny_qwen35_array_only() -> Self {
         let mut cfg = Self::tiny_qwen35_nonperiodic_array();
-        cfg.name = "tuckmill-fixture-qwen35-array-only".into();
+        cfg.name = "chine-fixture-qwen35-array-only".into();
         if let Some(h) = cfg.hybrid.as_mut() {
             h.omit_interval_key = true;
         }
@@ -195,7 +195,7 @@ impl SyntheticConfig {
     pub fn tiny_qwen35_non_divisible() -> Self {
         let mut cfg = Self::tiny_qwen35();
         cfg.layers = 5;
-        cfg.name = "tuckmill-fixture-qwen35-nondiv".into();
+        cfg.name = "chine-fixture-qwen35-nondiv".into();
         cfg
     }
 }
@@ -230,7 +230,7 @@ pub fn synthetic_qwen3_bytes(cfg: &SyntheticConfig) -> Vec<u8> {
 /// Write a synthetic GGUF to a path; returns the file length.
 pub fn write_synthetic(path: &Path, cfg: &SyntheticConfig) -> Result<u64> {
     let bytes = build(cfg)?;
-    std::fs::write(path, &bytes).map_err(crate::error::TuckmillError::from)?;
+    std::fs::write(path, &bytes).map_err(crate::error::ChineError::from)?;
     Ok(bytes.len() as u64)
 }
 

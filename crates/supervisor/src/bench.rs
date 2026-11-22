@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{hash_of, now_unix_ms, Id};
-use tuckmill_manifest::plan::ExecutionPlan;
-use tuckmill_manifest::records::{
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{hash_of, now_unix_ms, Id};
+use chine_manifest::plan::ExecutionPlan;
+use chine_manifest::records::{
     BenchmarkRun, CacheState, Confidence, LatencyClass, PromptSample, SummaryStats, WorkloadSpec,
 };
-use tuckmill_planner::calibration::CalibrationEntry;
+use chine_planner::calibration::CalibrationEntry;
 
 use crate::runtime::{RunEvent, Runtime};
 
@@ -48,7 +48,7 @@ pub struct SuiteDefinition {
 pub fn load_suite() -> Result<SuiteDefinition> {
     let src = include_str!("../../../benchmarks/standard-v1.json");
     serde_json::from_str(src).map_err(|e| {
-        tuckmill_manifest::error::json_error(
+        chine_manifest::error::json_error(
             e,
             ErrorCode::InvalidConfiguration,
             "standard-v1 suite definition",
@@ -88,7 +88,7 @@ impl Default for BenchOptions {
 /// bounded into the artifact's vocabulary so the same frozen prompts are
 /// valid for every backend.
 fn prompt_tokens_for(prompt_id: &str, input_tokens: u32, vocab: Option<u64>) -> Vec<u32> {
-    let seed = tuckmill_manifest::ids::sha256_hex(prompt_id.as_bytes());
+    let seed = chine_manifest::ids::sha256_hex(prompt_id.as_bytes());
     let mut out = Vec::with_capacity(input_tokens as usize);
     let mut acc: u64 = u64::from_str_radix(&seed[..16], 16).unwrap_or(0x9e37);
     for _ in 0..input_tokens {
@@ -107,10 +107,10 @@ fn prompt_tokens_for(prompt_id: &str, input_tokens: u32, vocab: Option<u64>) -> 
 
 /// Vocabulary length of the artifact, when it exposes one (bounded header
 /// read; used to keep frozen prompts valid for every backend).
-fn artifact_vocab(artifact: &tuckmill_backend::ArtifactRef) -> Option<u64> {
-    let insp = tuckmill_manifest::gguf::inspect(
+fn artifact_vocab(artifact: &chine_backend::ArtifactRef) -> Option<u64> {
+    let insp = chine_manifest::gguf::inspect(
         std::path::Path::new(&artifact.path),
-        &tuckmill_manifest::gguf::Limits::default(),
+        &chine_manifest::gguf::Limits::default(),
     )
     .ok()?;
     insp.vocabulary_len()
@@ -130,7 +130,7 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
 pub fn run_standard_bench(
     runtime: &Arc<Runtime>,
     plan: &ExecutionPlan,
-    artifact: &tuckmill_backend::ArtifactRef,
+    artifact: &chine_backend::ArtifactRef,
     options: &BenchOptions,
 ) -> Result<(BenchmarkRun, CalibrationEntry)> {
     runtime.check_plan_fresh(plan)?;
@@ -145,7 +145,7 @@ pub fn run_standard_bench(
     let mut decode_values: Vec<f64> = Vec::new();
     let mut all_gap_p95: Vec<f64> = Vec::new();
     let mut footprint_peak: u64 = 0;
-    let mut resolved_identity: Option<tuckmill_manifest::records::EngineIdentity> = None;
+    let mut resolved_identity: Option<chine_manifest::records::EngineIdentity> = None;
     let mut resolved_batch: Option<u32> = None;
 
     for rep in 0..options.repetitions.max(1) {
@@ -175,7 +175,7 @@ pub fn run_standard_bench(
                 max_output_tokens: options.output_tokens as u64,
                 stop: Vec::new(),
                 seed: rep as u64,
-                sampling: tuckmill_backend::SamplingPolicy::default(),
+                sampling: chine_backend::SamplingPolicy::default(),
                 ignore_eos: options.ignore_eos,
                 keep_alive: None,
             },
@@ -191,7 +191,7 @@ pub fn run_standard_bench(
         let mut committed: u64 = 0;
         let mut generated: u64 = 0;
         let mut failure: Option<String> = None;
-        let mut worker_timing: Option<tuckmill_backend::RequestTiming> = None;
+        let mut worker_timing: Option<chine_backend::RequestTiming> = None;
 
         // Footprint sampling alongside event consumption.
         let sample_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -379,7 +379,7 @@ pub fn run_standard_bench(
         prompt_set: "frozen-synthetic-ids".into(),
         ignore_eos: options.ignore_eos,
     };
-    let synthetic = tuckmill_backend::is_synthetic_engine(&engine.engine);
+    let synthetic = chine_backend::is_synthetic_engine(&engine.engine);
     let mut caveats = vec![
         format!("suite {} frozen: {}", suite.suite, suite.notes.join("; ")),
         "all throughput figures count model tokens from the worker's Done frame: throughput_median_tps is end-to-end (generated tokens / total request time, including TTFT) and throughput_decode_median_tps is (generated - 1) over the worker's first-to-last sampled-token span; ttft_ms, visible_chunks, and the gap percentiles describe the visible stream (user experience), not token production".into(),
@@ -410,13 +410,13 @@ pub fn run_standard_bench(
     }
     if runtime.execution_options().prefix_cache == Some(false) {
         caveats.push(
-            "TuckCore prefix cache disabled: every repetition prefills its full prompt (no cross-request reuse), comparable with engines that do not cache"
+            "ChineCore prefix cache disabled: every repetition prefills its full prompt (no cross-request reuse), comparable with engines that do not cache"
                 .into(),
         );
     }
     if runtime.execution_options().speculative == Some(true) {
         caveats.push(
-            "TuckCore speculative greedy decoding (MTP head, ADR-012 step 3): output tokens are identical to plain greedy decoding; decode throughput depends on the draft acceptance rate of this workload"
+            "ChineCore speculative greedy decoding (MTP head, ADR-012 step 3): output tokens are identical to plain greedy decoding; decode throughput depends on the draft acceptance rate of this workload"
                 .into(),
         );
     }
@@ -469,12 +469,12 @@ pub fn run_standard_bench(
 
     // Persist the record.
     let dir = runtime.layout.bench_dir();
-    std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+    std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
     let path = dir.join(format!("{}.json", run.run_id.as_str()));
     let bytes = serde_json::to_vec_pretty(&run).map_err(|e| {
-        tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "benchmark record")
+        chine_manifest::error::json_error(e, ErrorCode::Internal, "benchmark record")
     })?;
-    std::fs::write(&path, bytes).map_err(TuckmillError::from)?;
+    std::fs::write(&path, bytes).map_err(ChineError::from)?;
 
     let entry = CalibrationEntry {
         device_id: plan.device_id.clone(),
@@ -485,8 +485,8 @@ pub fn run_standard_bench(
         } else {
             run.engine.engine.clone()
         },
-        backend_abi_version: tuckmill_manifest::BACKEND_ABI_VERSION,
-        worker_protocol_version: tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+        backend_abi_version: chine_manifest::BACKEND_ABI_VERSION,
+        worker_protocol_version: chine_manifest::WORKER_PROTOCOL_VERSION,
         workload_suite: options.suite.clone(),
         context_total: plan.context.total_context,
         max_output_tokens: plan.context.max_output_tokens,
@@ -512,7 +512,7 @@ pub fn run_standard_bench(
 pub fn run_and_record(
     runtime: &Arc<Runtime>,
     plan: &ExecutionPlan,
-    artifact: &tuckmill_backend::ArtifactRef,
+    artifact: &chine_backend::ArtifactRef,
     options: &BenchOptions,
 ) -> Result<BenchmarkRun> {
     let (run, entry) = run_standard_bench(runtime, plan, artifact, options)?;
@@ -554,7 +554,7 @@ pub fn format_summary(run: &BenchmarkRun) -> String {
     lines.push(format!(
         "completion rate: {:.0}% | footprint peak: {}",
         run.summary.completion_rate * 100.0,
-        tuckmill_manifest::units::Bytes(run.summary.footprint_peak_bytes)
+        chine_manifest::units::Bytes(run.summary.footprint_peak_bytes)
     ));
     lines.push(format!(
         "class: {} ({}), slow-mode accepted: {}",
@@ -571,7 +571,7 @@ pub fn format_summary(run: &BenchmarkRun) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::units::Bytes;
+    use chine_manifest::units::Bytes;
 
     #[test]
     fn suite_definition_is_consistent() {
@@ -605,20 +605,20 @@ mod tests {
 
     fn bench_setup() -> (tempfile::TempDir, Arc<Runtime>) {
         use crate::runtime::{EngineMode, Runtime, RuntimeOptions};
-        use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
-        use tuckmill_manifest::units::Bytes;
-        use tuckmill_store::StoreLayout;
+        use chine_manifest::testing::{write_synthetic, SyntheticConfig};
+        use chine_manifest::units::Bytes;
+        use chine_store::StoreLayout;
 
         let dir = tempfile::tempdir().unwrap();
         let layout = StoreLayout::open(dir.path().join("store"));
         let src = dir.path().join("m.gguf");
         write_synthetic(&src, &SyntheticConfig::tiny_qwen3()).unwrap();
-        let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
-        tuckmill_store::import::import_local(
+        let registry = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
+        chine_store::import::import_local(
             &layout,
             &registry,
             &src,
-            &tuckmill_store::import::ImportOptions {
+            &chine_store::import::ImportOptions {
                 alias: Some("local".into()),
                 ..Default::default()
             },
@@ -628,14 +628,14 @@ mod tests {
         let runtime = Runtime::open(RuntimeOptions {
             data_dir: Some(layout.root().to_path_buf()),
             engine_mode: EngineMode::InProcess,
-            engine_kind: tuckmill_backend::EngineKind::ReferenceTest,
+            engine_kind: chine_backend::EngineKind::ReferenceTest,
             worker_exe: None,
             queue_capacity: 2,
             execution: crate::options::ExecutionOptions::default(),
             default_budget: Some(Bytes::parse("2GiB").unwrap()),
             default_context: 2048,
             default_max_output: 256,
-            policy: tuckmill_planner::PlannerPolicy::default(),
+            policy: chine_planner::PlannerPolicy::default(),
             signal_source: Some(signals),
             governor_poll: Duration::from_millis(30),
             governor_config: crate::governor::GovernorConfig {
@@ -664,7 +664,7 @@ mod tests {
         let plan = runtime
             .plan_for(&artifact, &adapter, Bytes::parse("2GiB").unwrap(), 2048, 64)
             .unwrap();
-        let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+        let artifact_ref = chine_backend::ArtifactRef::from_record(
             &artifact,
             &runtime.layout.artifact_payload_path(&artifact.artifact_id),
         );
@@ -725,7 +725,7 @@ mod tests {
                 600,
             )
             .unwrap();
-        let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+        let artifact_ref = chine_backend::ArtifactRef::from_record(
             &artifact,
             &runtime.layout.artifact_payload_path(&artifact.artifact_id),
         );

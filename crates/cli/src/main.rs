@@ -1,4 +1,4 @@
-//! Tuckmill command line interface.
+//! Chine command line interface.
 //!
 //! Exit codes: 0 success, 1 typed failure (printed to stderr with a safe next
 //! action), 2 usage error (clap), 130 interrupted.
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
 
-use tuckmill_manifest::error::TuckmillError;
+use chine_manifest::error::ChineError;
 
 /// Set by the SIGINT handler.
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -34,7 +34,7 @@ pub fn install_sigint_handler() {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "tuckmill",
+    name = "chine",
     version,
     about = "Big models. Small footprint. High-performance local inference for Apple Silicon Macs (uncertified engineering build).",
     propagate_version = true
@@ -44,8 +44,8 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Data directory (defaults to ~/Library/Application Support/Tuckmill).
-    #[arg(long, global = true, env = "TUCKMILL_DATA_DIR", hide_env_values = true)]
+    /// Data directory (defaults to ~/Library/Application Support/Chine).
+    #[arg(long, global = true, env = "CHINE_DATA_DIR", hide_env_values = true)]
     data_dir: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -124,7 +124,7 @@ enum Cmd {
         /// refused.
         #[arg(long)]
         allow_test_engine: bool,
-        /// Backend: reference-test (default; also 'isolated'), tuckcore, or
+        /// Backend: reference-test (default; also 'isolated'), chinecore, or
         /// llama (pinned llama.cpp reference). 'in-process' is a debugging
         /// placement for the reference test engine.
         #[arg(long, default_value = "isolated")]
@@ -136,16 +136,16 @@ enum Cmd {
         /// never for arithmetic diagnostics). Requires --engine llama.
         #[arg(long)]
         gpu_layers: Option<i32>,
-        /// Kernel implementation for tuckcore: auto (default; NEON where
+        /// Kernel implementation for chinecore: auto (default; NEON where
         /// available), scalar (force the reference kernels), neon, metal.
         #[arg(long)]
         kernels: Option<String>,
-        /// Weight-block storage for tuckcore: auto (default; map when
+        /// Weight-block storage for chinecore: auto (default; map when
         /// possible), mapped (require zero-copy views), owned (copied
         /// bounded buffers).
         #[arg(long)]
         storage: Option<String>,
-        /// TuckCore speculative greedy decoding with the artifact's MTP
+        /// ChineCore speculative greedy decoding with the artifact's MTP
         /// head (ADR-012 step 3): greedy output is token-identical to plain
         /// decoding; refused for artifacts without an MTP block.
         #[arg(long)]
@@ -154,7 +154,7 @@ enum Cmd {
 
     /// Serve the local API on loopback.
     Serve {
-        #[arg(long, default_value_t = tuckmill_supervisor::api::DEFAULT_PORT)]
+        #[arg(long, default_value_t = chine_supervisor::api::DEFAULT_PORT)]
         port: u16,
         /// Accept the reference test engine for incoming requests.
         #[arg(long)]
@@ -181,16 +181,16 @@ enum Cmd {
         /// never for arithmetic diagnostics). Requires --engine llama.
         #[arg(long)]
         gpu_layers: Option<i32>,
-        /// Kernel implementation for tuckcore: auto (default; NEON where
+        /// Kernel implementation for chinecore: auto (default; NEON where
         /// available), scalar (force the reference kernels), neon, metal.
         #[arg(long)]
         kernels: Option<String>,
-        /// Weight-block storage for tuckcore: auto (default; map when
+        /// Weight-block storage for chinecore: auto (default; map when
         /// possible), mapped (require zero-copy views), owned (copied
         /// bounded buffers).
         #[arg(long)]
         storage: Option<String>,
-        /// TuckCore speculative greedy decoding with the artifact's MTP
+        /// ChineCore speculative greedy decoding with the artifact's MTP
         /// head (ADR-012 step 3): greedy output is token-identical to plain
         /// decoding; refused for artifacts without an MTP block.
         #[arg(long)]
@@ -198,7 +198,7 @@ enum Cmd {
     },
 
     /// Verify equivalence: identical token IDs through resident and
-    /// forced-streaming tuckcore configurations, comparing teacher-forced
+    /// forced-streaming chinecore configurations, comparing teacher-forced
     /// logits and generated text (ADR-005).
     Verify {
         /// Alias or artifact id.
@@ -217,7 +217,7 @@ enum Cmd {
         generate: u64,
         /// Compare against the pinned llama.cpp reference backend instead of
         /// the resident/streamed scheduling comparison (requires
-        /// TUCKMILL_LLAMA_LIB; see scripts/fetch-llama.sh).
+        /// CHINE_LLAMA_LIB; see scripts/fetch-llama.sh).
         #[arg(long)]
         reference: bool,
         /// Override the registered logit tolerance for --reference
@@ -225,14 +225,14 @@ enum Cmd {
         /// 5e-2 for F16/F32, 5e-1 for Q8_0).
         #[arg(long, default_value_t = 0.0)]
         tolerance: f64,
-        /// TuckCore numerical profile for --reference comparisons:
+        /// ChineCore numerical profile for --reference comparisons:
         /// "llama-cpu" (mirrors pinned llama.cpp CPU kernels; default) or
         /// "oracle-f32" (scalar FP32 reference, no activation
         /// quantization). With --kernels metal, "metal-f16-act" (batched
         /// prefill GEMMs stage operands as half, llama.cpp kernel_mul_mm
         /// numerics; the engine's default) or "oracle-f32" apply.
         #[arg(long, default_value = "llama-cpu")]
-        tuckcore_profile: String,
+        chinecore_profile: String,
         /// KV cache precision for both sides in --reference comparisons:
         /// "f16" (matches llama.cpp's default) or "f32".
         #[arg(long, default_value = "f16")]
@@ -270,18 +270,18 @@ enum Cmd {
         context: u64,
         #[arg(long)]
         allow_test_engine: bool,
-        /// Backend selection: reference-test (default) or tuckcore.
+        /// Backend selection: reference-test (default) or chinecore.
         #[arg(long, default_value = "isolated")]
         engine: String,
         /// llama.cpp GPU offload layers (Metal performance baseline ONLY;
         /// never for arithmetic diagnostics). Requires --engine llama.
         #[arg(long)]
         gpu_layers: Option<i32>,
-        /// Kernel implementation for tuckcore: auto (default; NEON where
+        /// Kernel implementation for chinecore: auto (default; NEON where
         /// available), scalar (force the reference kernels), neon, metal.
         #[arg(long)]
         kernels: Option<String>,
-        /// Weight-block storage for tuckcore: auto (default; map when
+        /// Weight-block storage for chinecore: auto (default; map when
         /// possible), mapped (require zero-copy views), owned (copied
         /// bounded buffers).
         #[arg(long)]
@@ -297,7 +297,7 @@ enum Cmd {
         /// is not meaningful).
         #[arg(long)]
         ignore_eos: bool,
-        /// TuckCore speculative greedy decoding with the artifact's MTP
+        /// ChineCore speculative greedy decoding with the artifact's MTP
         /// head (ADR-012 step 3): greedy output is token-identical to plain
         /// decoding; refused for artifacts without an MTP block.
         #[arg(long)]
@@ -308,8 +308,8 @@ enum Cmd {
     Stats {
         /// Alias or artifact id.
         model: String,
-        /// Backend: tuckcore (default) or llama.
-        #[arg(long, default_value = "tuckcore")]
+        /// Backend: chinecore (default) or llama.
+        #[arg(long, default_value = "chinecore")]
         engine: String,
         /// Probe tokens to process before reporting.
         #[arg(long, default_value_t = 3)]
@@ -334,7 +334,7 @@ enum Cmd {
     WorkerReference {
         #[arg(long)]
         socket: PathBuf,
-        /// Backend: reference-test or tuckcore.
+        /// Backend: reference-test or chinecore.
         #[arg(long, default_value = "reference-test")]
         engine: String,
     },
@@ -363,7 +363,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_error(e: &TuckmillError, json: bool) {
+fn print_error(e: &ChineError, json: bool) {
     if json {
         eprintln!(
             "{}",

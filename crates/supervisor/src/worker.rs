@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tuckmill_backend::{ArtifactRef, BackendStats, EngineKind};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::ExecutionPlan;
+use chine_backend::{ArtifactRef, BackendStats, EngineKind};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::ExecutionPlan;
 
 use crate::engine::{FinishReason, GenOutcome, RunState};
 use crate::proto::{hello, validate_handshake, WorkerFrame};
@@ -58,14 +58,14 @@ pub struct IsolatedWorker {
 
 impl IsolatedWorker {
     /// Spawn a worker process and complete the handshake. `exe` is the
-    /// tuckmill binary (its hidden `__worker-reference` subcommand, which
+    /// chine binary (its hidden `__worker-reference` subcommand, which
     /// selects the backend via `--engine`); child stdio is discarded so
     /// nothing leaks to the user's terminal.
     pub fn spawn(exe: &Path, work_dir: &Path, kind: EngineKind) -> Result<Self> {
-        std::fs::create_dir_all(work_dir).map_err(TuckmillError::from)?;
+        std::fs::create_dir_all(work_dir).map_err(ChineError::from)?;
         let socket_path = work_dir.join(format!(
             "worker-{}.sock",
-            &tuckmill_manifest::ids::secure_random_hex(6)?
+            &chine_manifest::ids::secure_random_hex(6)?
         ));
         let child = Command::new(exe)
             .arg("__worker-reference")
@@ -78,7 +78,7 @@ impl IsolatedWorker {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::WorkerFailed,
                     format!("cannot spawn worker {}: {e}", exe.display()),
                 )
@@ -96,7 +96,7 @@ impl IsolatedWorker {
                     let mut child = child;
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("worker socket never became connectable: {e}"),
                     ));
@@ -105,7 +105,7 @@ impl IsolatedWorker {
         };
         stream
             .set_read_timeout(Some(FRAME_TIMEOUT))
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
 
         let mut worker = Self {
             child,
@@ -139,11 +139,11 @@ impl IsolatedWorker {
                 self.certified = certified;
                 Ok(())
             }
-            Some(other) => Err(TuckmillError::new(
+            Some(other) => Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("expected HelloAck, got {other:?}"),
             )),
-            None => Err(TuckmillError::new(
+            None => Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "worker closed during handshake",
             )),
@@ -176,11 +176,11 @@ impl IsolatedWorker {
                 message,
                 action,
             }) => Err(map_worker_error(&code, &message, &action)),
-            Some(other) => Err(TuckmillError::new(
+            Some(other) => Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("expected Loaded, got {other:?}"),
             )),
-            None => Err(TuckmillError::new(
+            None => Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "worker closed during load",
             )),
@@ -283,7 +283,7 @@ impl IsolatedWorker {
                         "cancelled" => FinishReason::Cancelled,
                         "eos" => FinishReason::Eos,
                         other => {
-                            return Err(TuckmillError::new(
+                            return Err(ChineError::new(
                                 ErrorCode::WorkerFailed,
                                 format!("worker reported unknown finish reason {other:?}"),
                             ))
@@ -303,7 +303,7 @@ impl IsolatedWorker {
                     return Err(map_worker_error(&code, &message, &action));
                 }
                 Some(other) => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("unexpected frame during generation: {other:?}"),
                     ));
@@ -311,7 +311,7 @@ impl IsolatedWorker {
                 None => {
                     // EOF: worker crashed. The supervisor keeps the last
                     // acknowledged committed position and reports failure.
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!(
                             "worker exited mid-generation after {committed} committed tokens; restart from the last acknowledged position"
@@ -327,7 +327,7 @@ impl IsolatedWorker {
                 // supervisor escalates by killing the process rather than
                 // pretending the request was cleanly cancelled.
                 let _ = self.child.kill();
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "worker did not honor cancellation within its grace period and was terminated",
                 ));
@@ -351,13 +351,13 @@ impl IsolatedWorker {
                 // it is expected traffic, never a protocol violation.
                 Some(WorkerFrame::ControlAck { .. }) => continue,
                 Some(other) => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("expected StatsAck, got {other:?}"),
                     ))
                 }
                 None => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         "worker closed during stats query",
                     ))
@@ -405,7 +405,7 @@ impl IsolatedWorker {
                 // Grace: accept a clean acknowledgement, never a partial row.
                 match self.read_frame_timed(CANCEL_GRACE)? {
                     Some(WorkerFrame::Error { code, .. }) if code == "CANCELLED" => {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::WorkerFailed,
                             "scoring exceeded its deadline and was cancelled at a position boundary",
                         ));
@@ -420,7 +420,7 @@ impl IsolatedWorker {
                     Some(_) => {}
                     None => {
                         let _ = self.child.kill();
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::WorkerFailed,
                             "scoring exceeded its deadline; the worker did not acknowledge cancellation and was terminated",
                         ));
@@ -447,13 +447,13 @@ impl IsolatedWorker {
                     action,
                 }) => return Err(map_worker_error(&code, &message, &action)),
                 Some(other) => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("unexpected frame during scoring: {other:?}"),
                     ))
                 }
                 None => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         "worker exited during scoring",
                     ))
@@ -490,9 +490,10 @@ impl IsolatedWorker {
     /// request are dropped and counted, never sent late.
     fn flush_controls(&mut self, scope: &str) -> Result<()> {
         let (actions, stale): (Vec<String>, usize) = {
-            let mut queue = self.pending_controls.lock().map_err(|_| {
-                TuckmillError::new(ErrorCode::WorkerFailed, "control queue poisoned")
-            })?;
+            let mut queue = self
+                .pending_controls
+                .lock()
+                .map_err(|_| ChineError::new(ErrorCode::WorkerFailed, "control queue poisoned"))?;
             let drained: Vec<ControlCommand> = queue.drain(..).collect();
             let mut actions = Vec::new();
             let mut stale = 0usize;
@@ -519,7 +520,7 @@ impl IsolatedWorker {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "worker produced no meaningful frame within the timeout",
                 ));
@@ -537,7 +538,7 @@ impl IsolatedWorker {
         loop {
             let now = Instant::now();
             if now >= deadline {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     format!(
                         "worker produced no frame for {:?} (last frame {:?} ago)",
@@ -559,7 +560,7 @@ impl IsolatedWorker {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     format!("worker socket poll failed: {err}"),
                 ));
@@ -613,20 +614,20 @@ impl Drop for IsolatedWorker {
     }
 }
 
-fn map_worker_error(code: &str, message: &str, action: &str) -> TuckmillError {
-    let parsed = serde_json::from_value::<tuckmill_manifest::ErrorCode>(serde_json::Value::String(
+fn map_worker_error(code: &str, message: &str, action: &str) -> ChineError {
+    let parsed = serde_json::from_value::<chine_manifest::ErrorCode>(serde_json::Value::String(
         code.to_string(),
     ))
-    .unwrap_or(tuckmill_manifest::ErrorCode::WorkerFailed);
-    TuckmillError::new(parsed, message.to_string()).with_action(action.to_string())
+    .unwrap_or(chine_manifest::ErrorCode::WorkerFailed);
+    ChineError::new(parsed, message.to_string()).with_action(action.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Full isolated-worker round trip. Requires a tuckmill binary path in
-    /// TUCKMILL_TEST_WORKER_BIN (the CLI e2e suite sets it); without it the
+    /// Full isolated-worker round trip. Requires a chine binary path in
+    /// CHINE_TEST_WORKER_BIN (the CLI e2e suite sets it); without it the
     /// test is skipped rather than simulated.
     #[test]
     fn isolated_worker_round_trip_when_binary_available() {
@@ -641,12 +642,12 @@ mod tests {
         assert!(worker.is_alive());
 
         let mut plan = ExecutionPlan::new_skeleton(
-            tuckmill_manifest::Id::new("a".repeat(64)).unwrap(),
-            tuckmill_manifest::Id::new("b".repeat(64)).unwrap(),
+            chine_manifest::Id::new("a".repeat(64)).unwrap(),
+            chine_manifest::Id::new("b".repeat(64)).unwrap(),
             "qwen3".into(),
         );
-        plan.mode = tuckmill_manifest::plan::ExecutionMode::Resident;
-        plan.context = tuckmill_manifest::plan::PlanContext::new(128, 16);
+        plan.mode = chine_manifest::plan::ExecutionMode::Resident;
+        plan.context = chine_manifest::plan::PlanContext::new(128, 16);
         plan.plan_id = plan.compute_id().unwrap();
         let artifact = ArtifactRef {
             path: dir.path().join("fixture.bin").display().to_string(),
@@ -685,7 +686,7 @@ mod tests {
                     max_output_tokens: 12,
                     stop: vec![],
                     seed: 7,
-                    sampling: tuckmill_backend::SamplingPolicy::default(),
+                    sampling: chine_backend::SamplingPolicy::default(),
                     ignore_eos: false,
                 },
                 &cancel,
@@ -727,7 +728,7 @@ mod tests {
                     max_output_tokens: 100,
                     stop: vec![],
                     seed: 7,
-                    sampling: tuckmill_backend::SamplingPolicy::default(),
+                    sampling: chine_backend::SamplingPolicy::default(),
                     ignore_eos: false,
                 },
                 &cancel,
@@ -762,12 +763,12 @@ mod tests {
             IsolatedWorker::spawn(Path::new(&bin), dir.path(), EngineKind::ReferenceTest).unwrap();
 
         let mut plan = ExecutionPlan::new_skeleton(
-            tuckmill_manifest::Id::new("a".repeat(64)).unwrap(),
-            tuckmill_manifest::Id::new("b".repeat(64)).unwrap(),
+            chine_manifest::Id::new("a".repeat(64)).unwrap(),
+            chine_manifest::Id::new("b".repeat(64)).unwrap(),
             "qwen3".into(),
         );
-        plan.mode = tuckmill_manifest::plan::ExecutionMode::Resident;
-        plan.context = tuckmill_manifest::plan::PlanContext::new(128, 16);
+        plan.mode = chine_manifest::plan::ExecutionMode::Resident;
+        plan.context = chine_manifest::plan::PlanContext::new(128, 16);
         plan.plan_id = plan.compute_id().unwrap();
         let artifact = ArtifactRef {
             path: dir.path().join("fixture.bin").display().to_string(),
@@ -795,7 +796,7 @@ mod tests {
                     max_output_tokens: 12,
                     stop: vec![],
                     seed: 7,
-                    sampling: tuckmill_backend::SamplingPolicy::default(),
+                    sampling: chine_backend::SamplingPolicy::default(),
                     ignore_eos: false,
                 },
                 &cancel,
@@ -837,12 +838,12 @@ mod tests {
         let mut worker =
             IsolatedWorker::spawn(&bin, dir.path(), EngineKind::ReferenceTest).unwrap();
         let mut plan = ExecutionPlan::new_skeleton(
-            tuckmill_manifest::Id::new("a".repeat(64)).unwrap(),
-            tuckmill_manifest::Id::new("b".repeat(64)).unwrap(),
+            chine_manifest::Id::new("a".repeat(64)).unwrap(),
+            chine_manifest::Id::new("b".repeat(64)).unwrap(),
             "qwen3".into(),
         );
-        plan.mode = tuckmill_manifest::plan::ExecutionMode::Resident;
-        plan.context = tuckmill_manifest::plan::PlanContext::new(128, 16);
+        plan.mode = chine_manifest::plan::ExecutionMode::Resident;
+        plan.context = chine_manifest::plan::PlanContext::new(128, 16);
         plan.plan_id = plan.compute_id().unwrap();
         let artifact = ArtifactRef {
             path: dir.path().join("fixture.bin").display().to_string(),
@@ -881,7 +882,7 @@ mod tests {
                         max_output_tokens: 4,
                         stop: vec![],
                         seed: 0,
-                        sampling: tuckmill_backend::SamplingPolicy::default(),
+                        sampling: chine_backend::SamplingPolicy::default(),
                         ignore_eos: false,
                     },
                     &cancel,

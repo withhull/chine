@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 #[derive(Debug)]
 pub struct QueueTicket {
@@ -52,13 +52,13 @@ impl RequestQueue {
     pub fn submit(&self) -> Result<QueueTicket> {
         let mut inner = self.inner.lock().expect("queue lock");
         if inner.closed {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Cancelled,
                 "the request queue is closed; the service is shutting down",
             ));
         }
         if inner.queue.len() >= self.capacity {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::QueueFull,
                 format!(
                     "queue depth {} has reached its limit of {}",
@@ -88,7 +88,7 @@ impl RequestQueue {
             }
             if !inner.queue.contains(&ticket.id) {
                 // Someone else removed us (close/abandon path).
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Cancelled,
                     "the request left the queue before its turn",
                 ));
@@ -100,7 +100,7 @@ impl RequestQueue {
             if now >= deadline {
                 // Remove ourselves from the queue: the client gave up.
                 inner.queue.retain(|id| *id != ticket.id);
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Cancelled,
                     "gave up waiting for a turn in the request queue",
                 ));

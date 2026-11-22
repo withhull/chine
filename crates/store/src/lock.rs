@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 pub struct FileLock {
     _file: File,
@@ -28,26 +28,26 @@ impl FileLock {
 
     fn with_flags(path: &Path, flags: libc::c_int) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(TuckmillError::from)?;
+            std::fs::create_dir_all(parent).map_err(ChineError::from)?;
         }
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(path)
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
         // SAFETY: valid fd owned by `file`; flock is advisory and released on
         // close or process exit.
         let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::QueueFull,
                     format!("lock {} is held by another process", path.display()),
                 ));
             }
-            return Err(TuckmillError::from(err));
+            return Err(ChineError::from(err));
         }
         Ok(Self { _file: file })
     }

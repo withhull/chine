@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 use crate::ids::{now_unix_ms, sha256_hex};
 use crate::records::TensorStats;
 
@@ -75,7 +75,7 @@ pub fn dtype_size(dtype: &str) -> Option<u64> {
 
 pub fn inspect(path: &std::path::Path) -> Result<SafetensorsInspection> {
     let bytes = std::fs::read(path).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidArtifact,
             format!("cannot read {}: {e}", path.display()),
         )
@@ -223,15 +223,15 @@ pub fn inspect_bytes(file: &[u8]) -> Result<SafetensorsInspection> {
     })
 }
 
-fn bad(msg: impl Into<String>) -> TuckmillError {
-    TuckmillError::new(ErrorCode::InvalidArtifact, msg)
+fn bad(msg: impl Into<String>) -> ChineError {
+    ChineError::new(ErrorCode::InvalidArtifact, msg)
 }
 
 /// Build a tiny, valid safetensors file for tests.
 pub fn synthetic_safetensors_bytes() -> Vec<u8> {
     let payload: Vec<u8> = (0..64u8).collect();
     let header = serde_json::json!({
-        "__metadata__": { "format": "tuckmill-test", "architecture": "qwen3" },
+        "__metadata__": { "format": "chine-test", "architecture": "qwen3" },
         "model.embed_tokens.weight": { "dtype": "F16", "shape": [4, 4], "data_offsets": [0, 32] },
         "model.norm.weight": { "dtype": "F32", "shape": [4], "data_offsets": [32, 48] },
         "model.layers.0.self_attn.q_proj.weight": { "dtype": "F16", "shape": [4, 2], "data_offsets": [48, 64] }
@@ -255,7 +255,7 @@ mod tests {
         let bytes = synthetic_safetensors_bytes();
         let insp = inspect_bytes(&bytes).unwrap();
         assert_eq!(insp.tensors.len(), 3);
-        assert_eq!(insp.metadata["format"], "tuckmill-test");
+        assert_eq!(insp.metadata["format"], "chine-test");
         assert_eq!(insp.arch_id().as_deref(), Some("qwen3"));
         // Contiguous: 0..32, 32..48, 48..64
         let starts: Vec<u64> = insp.tensors.iter().map(|t| t.start).collect();

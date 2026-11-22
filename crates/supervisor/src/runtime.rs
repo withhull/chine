@@ -13,18 +13,18 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use tuckmill_backend::{ArtifactRef, BackendStats, EngineKind};
-use tuckmill_manifest::adapter::{AdapterRegistry, AdapterSpec};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{now_unix_ms, secure_random_hex, Id};
-use tuckmill_manifest::plan::{ExecutionMode, ExecutionPlan};
-use tuckmill_manifest::records::{DeviceProfile, ModelArtifact, SessionRecord};
-use tuckmill_manifest::units::Bytes;
-use tuckmill_planner::calibration::CalibrationStore;
-use tuckmill_planner::kernel_registry::KernelRegistry;
-use tuckmill_planner::{build_plan, PlanRequest, PlannerPolicy};
-use tuckmill_store::aliases;
-use tuckmill_store::layout::StoreLayout;
+use chine_backend::{ArtifactRef, BackendStats, EngineKind};
+use chine_manifest::adapter::{AdapterRegistry, AdapterSpec};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{now_unix_ms, secure_random_hex, Id};
+use chine_manifest::plan::{ExecutionMode, ExecutionPlan};
+use chine_manifest::records::{DeviceProfile, ModelArtifact, SessionRecord};
+use chine_manifest::units::Bytes;
+use chine_planner::calibration::CalibrationStore;
+use chine_planner::kernel_registry::KernelRegistry;
+use chine_planner::{build_plan, PlanRequest, PlannerPolicy};
+use chine_store::aliases;
+use chine_store::layout::StoreLayout;
 
 use crate::admission::{LedgerStats, LiveLedger};
 
@@ -52,7 +52,7 @@ pub struct RuntimeOptions {
     pub engine_mode: EngineMode,
     /// Which backend executes requests (ADR-005).
     pub engine_kind: EngineKind,
-    /// Path to the tuckmill binary for worker spawns (defaults to the
+    /// Path to the chine binary for worker spawns (defaults to the
     /// current executable).
     pub worker_exe: Option<PathBuf>,
     pub queue_capacity: usize,
@@ -139,7 +139,7 @@ pub enum RunEvent {
         /// Raw sampled tokens, including stop/EOS-trimmed tokens.
         generated: u64,
         /// Worker-side timing of the request, when the backend reports it.
-        timing: Option<tuckmill_backend::RequestTiming>,
+        timing: Option<chine_backend::RequestTiming>,
     },
     Error {
         code: String,
@@ -172,7 +172,7 @@ pub struct ActiveRun {
     /// they must never query the worker directly (it is busy generating
     /// and holding its lock — querying it from the event consumer is the
     /// Gate B review's SSE deadlock).
-    pub identity: Arc<std::sync::OnceLock<tuckmill_manifest::records::EngineIdentity>>,
+    pub identity: Arc<std::sync::OnceLock<chine_manifest::records::EngineIdentity>>,
 }
 
 impl ActiveRun {
@@ -192,7 +192,7 @@ pub struct RunRequest {
     pub max_output_tokens: u64,
     pub stop: Vec<String>,
     pub seed: u64,
-    pub sampling: tuckmill_backend::SamplingPolicy,
+    pub sampling: chine_backend::SamplingPolicy,
     /// Benchmark workloads only (see `GenerateRequest::ignore_eos`).
     pub ignore_eos: bool,
     /// The serving model's keep-alive from this request on (ADR-012 step
@@ -210,7 +210,7 @@ impl RunRequest {
             max_output_tokens,
             stop: Vec::new(),
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
             keep_alive: None,
         }
@@ -225,7 +225,7 @@ pub const MAX_KEEP_ALIVE: Duration = Duration::from_secs(30 * 24 * 3600);
 /// `m` or `h` suffix. `None` is forever.
 pub fn parse_keep_alive(value: &str) -> Result<Option<Duration>> {
     let bad = || {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidRequest,
             format!("invalid keep-alive {value:?}; use e.g. 30s, 5m, 1h, 300, 0, -1 or forever"),
         )
@@ -259,7 +259,7 @@ pub fn parse_keep_alive(value: &str) -> Result<Option<Duration>> {
     }
     let d = Duration::from_secs(secs);
     if d > MAX_KEEP_ALIVE {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!("keep-alive {value:?} exceeds 30 days; use forever to keep a model loaded"),
         ));
@@ -274,20 +274,20 @@ pub fn keep_alive_from_json(value: &serde_json::Value) -> Result<Option<Duration
         serde_json::Value::String(s) => parse_keep_alive(s),
         serde_json::Value::Number(n) => {
             let secs = n.as_f64().filter(|x| x.is_finite()).ok_or_else(|| {
-                TuckmillError::new(ErrorCode::InvalidRequest, "keep_alive must be finite")
+                ChineError::new(ErrorCode::InvalidRequest, "keep_alive must be finite")
             })?;
             if secs < 0.0 {
                 return Ok(None);
             }
             if secs > MAX_KEEP_ALIVE.as_secs_f64() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     "keep_alive exceeds 30 days; use -1 to keep a model loaded",
                 ));
             }
             Ok(Some(Duration::from_secs_f64(secs)))
         }
-        _ => Err(TuckmillError::new(
+        _ => Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "keep_alive must be a duration string or a number of seconds",
         )),
@@ -396,19 +396,19 @@ pub struct Runtime {
 fn validate_request_against_plan(plan: &ExecutionPlan, request: &RunRequest) -> Result<()> {
     let prompt = request.prompt_tokens.len() as u64;
     if prompt == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "prompt must contain at least one token",
         ));
     }
     if request.max_output_tokens == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "max_output_tokens must be positive",
         ));
     }
     if request.max_output_tokens > plan.context.max_output_tokens {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::ContextExceedsBudget,
             format!(
                 "max_output_tokens {} exceeds the plan's admitted output allowance of {}",
@@ -420,13 +420,13 @@ fn validate_request_against_plan(plan: &ExecutionPlan, request: &RunRequest) -> 
     let total = prompt
         .checked_add(request.max_output_tokens)
         .ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 "prompt length plus max_output_tokens overflows; refusing to dispatch",
             )
         })?;
     if total > plan.context.total_context {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::ContextExceedsBudget,
             format!(
                 "prompt {prompt} + max output {} exceeds the plan's admitted context {}",
@@ -472,7 +472,7 @@ fn reuse_fits_retained(
 
 /// Resolved identity of a loaded worker (caller holds the worker lock or is
 /// inside the executor thread after load).
-fn worker_identity(worker: &IsolatedWorker) -> tuckmill_manifest::records::EngineIdentity {
+fn worker_identity(worker: &IsolatedWorker) -> chine_manifest::records::EngineIdentity {
     let mut id = crate::engine::reference_test_identity();
     id.engine = worker.engine.clone();
     id.certified = worker.certified;
@@ -570,7 +570,7 @@ impl Runtime {
         if options.engine_kind != EngineKind::ReferenceTest
             && options.engine_mode == EngineMode::InProcess
         {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidConfiguration,
                 format!(
                     "{} runs in the isolated worker process; in-process placement is reserved for the reference test engine",
@@ -580,7 +580,7 @@ impl Runtime {
         }
         options.execution.validate(options.engine_kind)?;
         if options.max_loaded_models == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidConfiguration,
                 "max_loaded_models must be at least 1",
             ));
@@ -594,8 +594,8 @@ impl Runtime {
             .signal_source
             .clone()
             .unwrap_or_else(|| Arc::new(MacSignalSource));
-        let device = tuckmill_planner::device::detect(layout.root())?;
-        let registry = match std::env::var("TUCKMILL_ADAPTERS_DIR") {
+        let device = chine_planner::device::detect(layout.root())?;
+        let registry = match std::env::var("CHINE_ADAPTERS_DIR") {
             Ok(dir) if !dir.trim().is_empty() => {
                 AdapterRegistry::load_dir(std::path::Path::new(&dir))?
             }
@@ -606,7 +606,7 @@ impl Runtime {
         let calibration = CalibrationStore::load(&layout.calibration_path())?;
 
         let default_budget = options.default_budget.unwrap_or_else(|| {
-            tuckmill_planner::budget::suggested_process_budget(device.memory_bytes)
+            chine_planner::budget::suggested_process_budget(device.memory_bytes)
         });
         let runtime = Arc::new(Self {
             layout,
@@ -627,7 +627,7 @@ impl Runtime {
             engine_mode: options.engine_mode,
             engine_kind: options.engine_kind,
             worker_exe: options.worker_exe.unwrap_or_else(|| {
-                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tuckmill"))
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("chine"))
             }),
             in_process: Mutex::new(ReferenceTestEngine::new()),
             worker: Mutex::new(Vec::new()),
@@ -655,9 +655,9 @@ impl Runtime {
             let stop = runtime.monitor_stop.clone();
             let poll = options.governor_poll;
             let handle = std::thread::Builder::new()
-                .name("tuckmill-governor".into())
+                .name("chine-governor".into())
                 .spawn(move || rt.monitor_loop(stop, poll))
-                .map_err(TuckmillError::from)?;
+                .map_err(ChineError::from)?;
             *runtime.monitor_thread.lock().expect("monitor lock") = Some(handle);
         }
         Ok(runtime)
@@ -669,7 +669,7 @@ impl Runtime {
         let id = aliases::resolve_reference(&self.layout, reference)?;
         let artifact = aliases::load_manifest(&self.layout, &id)?;
         let arch = artifact.arch_id.as_deref().ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "artifact has no resolved architecture",
             )
@@ -678,7 +678,7 @@ impl Runtime {
             .registry
             .find(arch)
             .ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!("no adapter is registered for architecture {arch:?}"),
                 )
@@ -702,7 +702,7 @@ impl Runtime {
             adapter,
             &self.device,
             &PlanRequest {
-                context: tuckmill_manifest::plan::PlanContext::new(context_total, max_output),
+                context: chine_manifest::plan::PlanContext::new(context_total, max_output),
                 requested_budget: budget,
                 policy: self.policy.clone(),
                 kv_bytes_per_element: self.execution.kv_bytes_per_element(
@@ -728,7 +728,7 @@ impl Runtime {
                         .ok()
                     })
                     .unwrap_or(ErrorCode::InvalidPlan);
-                Err(TuckmillError::new(
+                Err(ChineError::new(
                     code,
                     rejection
                         .map(|r| r.message.clone())
@@ -742,7 +742,7 @@ impl Runtime {
     pub fn check_plan_fresh(&self, plan: &ExecutionPlan) -> Result<()> {
         plan.validate()?;
         if plan.device_id != self.device.device_id {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::PlanStale,
                 "plan was built for a different device profile (OS, memory, or storage changed)",
             ));
@@ -1008,13 +1008,13 @@ impl Runtime {
                 .unwrap_or(0);
             let kv_reserved = plan.budget.reservation_breakdown.kv_state.bytes();
             if kv_prepared > kv_reserved {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidPlan,
                     format!(
                         "the worker prepared {} of KV state for context {} but the plan reserved only {}; refusing to run on an understated plan",
-                        tuckmill_manifest::units::Bytes(kv_prepared),
+                        chine_manifest::units::Bytes(kv_prepared),
                         plan.context.total_context,
-                        tuckmill_manifest::units::Bytes(kv_reserved)
+                        chine_manifest::units::Bytes(kv_reserved)
                     ),
                 )
                 .with_action(
@@ -1099,7 +1099,7 @@ impl Runtime {
         keep_alive: Option<Option<Duration>>,
     ) -> Result<()> {
         if self.engine_mode != EngineMode::Isolated {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "preloading applies to isolated workers; the in-process test engine loads per request",
             ));
@@ -1107,7 +1107,7 @@ impl Runtime {
         self.check_plan_fresh(plan)?;
         self.plan_admitted(plan)?;
         if self.governor_state() == GovState::Failed {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "governor is in the failed state; restart the service",
             ));
@@ -1198,20 +1198,20 @@ impl Runtime {
     /// Gate execution per selected backend:
     /// - reference-test requires explicit `--allow-test-engine` because its
     ///   output is synthetic;
-    /// - tuckcore is a real executor (weights are executed) and the explicit
-    ///   `--engine tuckcore` selection is the acceptance for its
+    /// - chinecore is a real executor (weights are executed) and the explicit
+    ///   `--engine chinecore` selection is the acceptance for its
     ///   uncertified, experimental kernels; every response labels it;
     /// - a certified engine needs no gate.
     pub fn admit_engine(&self, plan: &ExecutionPlan) -> Result<()> {
-        use tuckmill_manifest::plan::EngineAvailability;
+        use chine_manifest::plan::EngineAvailability;
         match self.engine_kind {
-            EngineKind::TuckCore | EngineKind::LlamaCpp => Ok(()),
+            EngineKind::ChineCore | EngineKind::LlamaCpp => Ok(()),
             EngineKind::ReferenceTest => match plan.engine.availability {
                 EngineAvailability::Certified if self.engine_kind == EngineKind::ReferenceTest => {
                     Ok(())
                 }
                 _ if self.allow_test_engine => Ok(()),
-                _ => Err(TuckmillError::new(
+                _ => Err(ChineError::new(
                     ErrorCode::Unavailable,
                     format!(
                         "no certified execution engine exists for this profile in this build (engine would be {:?}); refusing to present synthetic output as model output",
@@ -1219,7 +1219,7 @@ impl Runtime {
                     ),
                 )
                 .with_action(
-                    "Re-run with --allow-test-engine for pipeline validation, or --engine tuckcore to execute the artifact with the experimental scalar executor.",
+                    "Re-run with --allow-test-engine for pipeline validation, or --engine chinecore to execute the artifact with the experimental scalar executor.",
                 )),
             },
         }
@@ -1251,7 +1251,7 @@ impl Runtime {
     /// to the selected backend's declared identity before any worker exists.
     /// May wait for the worker lock: streaming paths must use the run-scoped
     /// snapshot (`ActiveRun::identity`) instead, never this.
-    pub fn engine_identity(&self) -> tuckmill_manifest::records::EngineIdentity {
+    pub fn engine_identity(&self) -> chine_manifest::records::EngineIdentity {
         if let Ok(slots) = self.worker.lock() {
             if let Some(s) = slots.last() {
                 return worker_identity(&s.worker);
@@ -1263,16 +1263,16 @@ impl Runtime {
     /// Declared identity of the selected backend, lock-free. Used as the
     /// explicit fallback for a request whose worker has not finished
     /// loading (never a substitute for a resolved worker identity).
-    pub fn declared_identity(&self) -> tuckmill_manifest::records::EngineIdentity {
+    pub fn declared_identity(&self) -> chine_manifest::records::EngineIdentity {
         match self.engine_kind {
             EngineKind::ReferenceTest => crate::engine::reference_test_identity(),
-            EngineKind::TuckCore => tuckmill_tuckcore::TuckCore::new().identity(),
-            EngineKind::LlamaCpp => tuckmill_llamaref::identity(),
+            EngineKind::ChineCore => chine_chinecore::ChineCore::new().identity(),
+            EngineKind::LlamaCpp => chine_llamaref::identity(),
         }
     }
 
     /// The selected backend id (pre-spawn safe).
-    pub fn selected_backend(&self) -> tuckmill_backend::BackendId {
+    pub fn selected_backend(&self) -> chine_backend::BackendId {
         self.engine_kind.backend_id()
     }
 
@@ -1341,7 +1341,7 @@ impl Runtime {
             return Err(e);
         }
         if self.governor_state() == GovState::Failed {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "governor is in the failed state; restart the service",
             ));
@@ -1354,14 +1354,14 @@ impl Runtime {
             .queue
             .wait_until_front(ticket, Duration::from_secs(120))?
         {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Cancelled,
                 "service is shutting down",
             ));
         }
 
         let request_id = format!("req_{}", secure_random_hex(6)?);
-        let session_id = Id::new(tuckmill_manifest::ids::sha256_hex(request_id.as_bytes()))?;
+        let session_id = Id::new(chine_manifest::ids::sha256_hex(request_id.as_bytes()))?;
 
         // Ledger: reserve the plan's categories. Strict R+U+H<=B.
         let ledger = Arc::new(LiveLedger::new(
@@ -1373,23 +1373,23 @@ impl Runtime {
         let mut handles = Vec::new();
         for (class, bytes) in [
             (
-                tuckmill_manifest::records::ReserveClass::Weights,
+                chine_manifest::records::ReserveClass::Weights,
                 rb.weights.bytes(),
             ),
             (
-                tuckmill_manifest::records::ReserveClass::KvState,
+                chine_manifest::records::ReserveClass::KvState,
                 rb.kv_state.bytes(),
             ),
             (
-                tuckmill_manifest::records::ReserveClass::Workspaces,
+                chine_manifest::records::ReserveClass::Workspaces,
                 rb.workspaces.bytes(),
             ),
             (
-                tuckmill_manifest::records::ReserveClass::IoBuffers,
+                chine_manifest::records::ReserveClass::IoBuffers,
                 rb.io_buffers.bytes(),
             ),
             (
-                tuckmill_manifest::records::ReserveClass::ExpertCache,
+                chine_manifest::records::ReserveClass::ExpertCache,
                 rb.expert_cache.bytes(),
             ),
         ] {
@@ -1440,7 +1440,7 @@ impl Runtime {
                 }
                 if std::time::Instant::now() >= claim_deadline {
                     self.queue.abandon(ticket);
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::QueueFull,
                         "timed out waiting for the active generation slot",
                     ));
@@ -1465,7 +1465,7 @@ impl Runtime {
         let artifact_evt = artifact;
         let controls_evt = controls.clone();
         let identity_evt = identity.clone();
-        let thread_name = format!("tuckmill-run-{request_id}");
+        let thread_name = format!("chine-run-{request_id}");
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
@@ -1504,7 +1504,7 @@ impl Runtime {
                 }
                 runtime.queue.notify_waiters();
             })
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
 
         Ok(ActiveRun {
             request_id,
@@ -1526,7 +1526,7 @@ impl Runtime {
         request_id: &str,
         session_id: &Id,
         controls: &ControlQueue,
-        identity: &Arc<std::sync::OnceLock<tuckmill_manifest::records::EngineIdentity>>,
+        identity: &Arc<std::sync::OnceLock<chine_manifest::records::EngineIdentity>>,
         request: RunRequest,
         cancel: &Arc<AtomicBool>,
         pause: &Arc<AtomicBool>,
@@ -1732,14 +1732,14 @@ impl Runtime {
 
     fn save_session(&self, session: &SessionRecord) -> Result<()> {
         let dir = self.layout.sessions_dir();
-        std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+        std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
         let path = dir.join(format!("{}.json", session.session_id.as_str()));
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(session).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "session serialization")
+            chine_manifest::error::json_error(e, ErrorCode::Internal, "session serialization")
         })?;
-        std::fs::write(&tmp, bytes).map_err(TuckmillError::from)?;
-        std::fs::rename(&tmp, &path).map_err(TuckmillError::from)?;
+        std::fs::write(&tmp, bytes).map_err(ChineError::from)?;
+        std::fs::rename(&tmp, &path).map_err(ChineError::from)?;
         Ok(())
     }
 
@@ -1943,7 +1943,7 @@ pub fn collect_run(run: &ActiveRun, mut on_token: impl FnMut(u64, &str)) -> (Fin
 mod tests {
     use super::*;
     use crate::pressure::{MockSignalSource, PressureLevel};
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn test_runtime(mode: EngineMode) -> (tempfile::TempDir, Arc<Runtime>, Arc<MockSignalSource>) {
         test_runtime_with(mode, None)
@@ -1966,11 +1966,11 @@ mod tests {
         let src = dir.path().join("m.gguf");
         write_synthetic(&src, &SyntheticConfig::tiny_qwen3()).unwrap();
         let registry = AdapterRegistry::builtin().unwrap();
-        let import = tuckmill_store::import::import_local(
+        let import = chine_store::import::import_local(
             &layout,
             &registry,
             &src,
-            &tuckmill_store::import::ImportOptions {
+            &chine_store::import::ImportOptions {
                 alias: Some("local".into()),
                 ..Default::default()
             },
@@ -2009,10 +2009,10 @@ mod tests {
 
     /// Tests read the artifact record back from the store each time; keeping
     /// it out of the Runtime avoids widening the production API for tests.
-    fn artifact_ref_for(runtime: &Runtime) -> tuckmill_backend::ArtifactRef {
+    fn artifact_ref_for(runtime: &Runtime) -> chine_backend::ArtifactRef {
         let id = aliases::resolve_reference(&runtime.layout, "local").unwrap();
         let artifact = aliases::load_manifest(&runtime.layout, &id).unwrap();
-        tuckmill_backend::ArtifactRef::from_record(
+        chine_backend::ArtifactRef::from_record(
             &artifact,
             &runtime.layout.artifact_payload_path(&artifact.artifact_id),
         )
@@ -2046,7 +2046,7 @@ mod tests {
                     max_output_tokens: max_out,
                     stop: vec![],
                     seed: 42,
-                    sampling: tuckmill_backend::SamplingPolicy::default(),
+                    sampling: chine_backend::SamplingPolicy::default(),
                     ignore_eos: false,
                     keep_alive: None,
                 },
@@ -2121,12 +2121,12 @@ mod tests {
                 "qwen3".into(),
             );
             p.mode = ExecutionMode::Resident;
-            p.context = tuckmill_manifest::plan::PlanContext::new(context, 64);
+            p.context = chine_manifest::plan::PlanContext::new(context, 64);
             p.created_unix_ms = created;
             p.plan_id = p.compute_id().unwrap();
             p
         };
-        let artifact = tuckmill_backend::ArtifactRef {
+        let artifact = chine_backend::ArtifactRef {
             path: "/tmp/m.gguf".into(),
             file_bytes: 11,
             metadata_hash: "1".repeat(64),
@@ -2137,13 +2137,13 @@ mod tests {
         };
         let opts = Some(serde_json::json!({"kv_precision": "f16"}));
         let earlier = LoadedModelKey::new(
-            EngineKind::TuckCore,
+            EngineKind::ChineCore,
             &plan(2048, 1),
             &artifact,
             opts.as_ref(),
         );
         let later = LoadedModelKey::new(
-            EngineKind::TuckCore,
+            EngineKind::ChineCore,
             &plan(2048, 9_999),
             &artifact,
             opts.as_ref(),
@@ -2155,7 +2155,7 @@ mod tests {
         assert!(earlier.satisfies(&later));
 
         let smaller = LoadedModelKey::new(
-            EngineKind::TuckCore,
+            EngineKind::ChineCore,
             &plan(1024, 2),
             &artifact,
             opts.as_ref(),
@@ -2171,7 +2171,7 @@ mod tests {
 
         let other_opts = Some(serde_json::json!({"kv_precision": "f32"}));
         let reloaded = LoadedModelKey::new(
-            EngineKind::TuckCore,
+            EngineKind::ChineCore,
             &plan(2048, 1),
             &artifact,
             other_opts.as_ref(),
@@ -2183,8 +2183,12 @@ mod tests {
 
         let mut edited = artifact.clone();
         edited.content_hash = Some("4".repeat(64));
-        let tampered =
-            LoadedModelKey::new(EngineKind::TuckCore, &plan(2048, 1), &edited, opts.as_ref());
+        let tampered = LoadedModelKey::new(
+            EngineKind::ChineCore,
+            &plan(2048, 1),
+            &edited,
+            opts.as_ref(),
+        );
         assert!(
             !earlier.satisfies(&tampered),
             "artifact identity change must force a reload"
@@ -2225,11 +2229,11 @@ mod tests {
             let mut cfg = SyntheticConfig::tiny_qwen3();
             cfg.name = format!("lifecycle-{alias}");
             write_synthetic(&src, &cfg).unwrap();
-            tuckmill_store::import::import_local(
+            chine_store::import::import_local(
                 &layout,
                 &registry,
                 &src,
-                &tuckmill_store::import::ImportOptions {
+                &chine_store::import::ImportOptions {
                     alias: Some(alias.into()),
                     ..Default::default()
                 },
@@ -2264,14 +2268,14 @@ mod tests {
     fn lifecycle_plan(
         runtime: &Runtime,
         alias: &str,
-    ) -> (ExecutionPlan, tuckmill_backend::ArtifactRef) {
+    ) -> (ExecutionPlan, chine_backend::ArtifactRef) {
         let (artifact, adapter) = runtime.resolve_artifact(alias).unwrap();
         let plan = runtime
             .plan_for(&artifact, &adapter, runtime.default_budget, 2048, 64)
             .unwrap();
         let id = aliases::resolve_reference(&runtime.layout, alias).unwrap();
         let record = aliases::load_manifest(&runtime.layout, &id).unwrap();
-        let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+        let artifact_ref = chine_backend::ArtifactRef::from_record(
             &record,
             &runtime.layout.artifact_payload_path(&record.artifact_id),
         );
@@ -2615,14 +2619,17 @@ mod tests {
     fn warm_reuse_allocates_kv_for_the_current_request_need() {
         // Gate B review finding 2: reusing a worker prepared for a larger
         // context must not allocate the old capacity against the current,
-        // smaller admitted plan. TuckCore allocates per-request KV for the
+        // smaller admitted plan. ChineCore allocates per-request KV for the
         // request's own prompt+output need; assert the actual bytes the
         // worker reports, not just that it did not reload.
         let Some(worker_exe) = crate::test_worker_bin() else {
             return;
         };
-        let (_dir, runtime, _signals) =
-            test_runtime_kind(EngineMode::Isolated, Some(worker_exe), EngineKind::TuckCore);
+        let (_dir, runtime, _signals) = test_runtime_kind(
+            EngineMode::Isolated,
+            Some(worker_exe),
+            EngineKind::ChineCore,
+        );
         let (artifact, adapter) = runtime.resolve_artifact("local").unwrap();
         let run_once = |context: u64| -> (u64, u64) {
             let plan = runtime
@@ -2696,21 +2703,19 @@ mod tests {
             device_id.clone(),
             "qwen3".into(),
         );
-        p.mode = tuckmill_manifest::plan::ExecutionMode::Resident;
-        p.context = tuckmill_manifest::plan::PlanContext::new(context, max_out);
+        p.mode = chine_manifest::plan::ExecutionMode::Resident;
+        p.context = chine_manifest::plan::PlanContext::new(context, max_out);
         p.budget.requested_budget = Bytes::parse(budget).unwrap();
         p.budget.add_reservation(
-            tuckmill_manifest::records::ReserveClass::Weights,
+            chine_manifest::records::ReserveClass::Weights,
             Bytes(weights),
         );
         if kv > 0 {
             p.budget
-                .add_reservation(tuckmill_manifest::records::ReserveClass::KvState, Bytes(kv));
+                .add_reservation(chine_manifest::records::ReserveClass::KvState, Bytes(kv));
         }
-        p.budget.add_reservation(
-            tuckmill_manifest::records::ReserveClass::IoBuffers,
-            Bytes(io),
-        );
+        p.budget
+            .add_reservation(chine_manifest::records::ReserveClass::IoBuffers, Bytes(io));
         p.budget.reservation = p.budget.reservation_breakdown.total();
         p.plan_id = p.compute_id().unwrap();
         p
@@ -2728,7 +2733,7 @@ mod tests {
             max_output_tokens: max,
             stop: vec![],
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
             keep_alive: None,
         };
@@ -2810,8 +2815,11 @@ mod tests {
         let Some(worker_exe) = crate::test_worker_bin() else {
             return;
         };
-        let (_dir, runtime, _signals) =
-            test_runtime_kind(EngineMode::Isolated, Some(worker_exe), EngineKind::TuckCore);
+        let (_dir, runtime, _signals) = test_runtime_kind(
+            EngineMode::Isolated,
+            Some(worker_exe),
+            EngineKind::ChineCore,
+        );
         let (artifact, adapter) = runtime.resolve_artifact("local").unwrap();
         let plan = runtime
             .plan_for(&artifact, &adapter, Bytes::parse("2GiB").unwrap(), 2048, 64)
@@ -2866,8 +2874,11 @@ mod tests {
         let Some(worker_exe) = crate::test_worker_bin() else {
             return;
         };
-        let (_dir, runtime, _signals) =
-            test_runtime_kind(EngineMode::Isolated, Some(worker_exe), EngineKind::TuckCore);
+        let (_dir, runtime, _signals) = test_runtime_kind(
+            EngineMode::Isolated,
+            Some(worker_exe),
+            EngineKind::ChineCore,
+        );
         let (artifact, adapter) = runtime.resolve_artifact("local").unwrap();
 
         // Warm worker under a generous plan.
@@ -2891,7 +2902,7 @@ mod tests {
         let retained = runtime
             .backend_stats()
             .and_then(|s| s.retained_weight_bytes)
-            .expect("tuckcore reports retained weight bytes");
+            .expect("chinecore reports retained weight bytes");
         assert!(retained > 0);
 
         // A tiny plan whose weights + I/O reservations cannot cover the
@@ -2988,25 +2999,25 @@ mod tests {
         let layout = StoreLayout::open(dir.path().join("store"));
         let src = dir.path().join("m.gguf");
         write_synthetic(&src, &SyntheticConfig::tiny_qwen3()).unwrap();
-        let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
-        tuckmill_store::import::import_local(
+        let registry = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
+        chine_store::import::import_local(
             &layout,
             &registry,
             &src,
-            &tuckmill_store::import::ImportOptions {
+            &chine_store::import::ImportOptions {
                 alias: Some("local".into()),
                 ..Default::default()
             },
         )
         .unwrap();
         let execution = crate::options::ExecutionOptions {
-            kernels: Some(tuckmill_tuckcore::KernelSelection::Metal),
+            kernels: Some(chine_chinecore::KernelSelection::Metal),
             ..Default::default()
         };
         let runtime = Runtime::open(RuntimeOptions {
             data_dir: Some(layout.root().to_path_buf()),
             engine_mode: EngineMode::Isolated,
-            engine_kind: EngineKind::TuckCore,
+            engine_kind: EngineKind::ChineCore,
             worker_exe: Some(worker_exe),
             queue_capacity: 4,
             execution,
@@ -3025,29 +3036,28 @@ mod tests {
         let payload =
             layout.artifact_payload_path(&runtime.resolve_artifact("local").unwrap().0.artifact_id);
         let insp =
-            tuckmill_manifest::gguf::inspect(&payload, &tuckmill_manifest::gguf::Limits::default())
+            chine_manifest::gguf::inspect(&payload, &chine_manifest::gguf::Limits::default())
                 .unwrap();
-        let reg = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
-        let (cfg, _) = tuckmill_tuckcore::model::resolve(&insp, &reg).unwrap();
-        let mut names = tuckmill_tuckcore::model::TensorNames::for_layers(cfg.layers);
+        let reg = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
+        let (cfg, _) = chine_chinecore::model::resolve(&insp, &reg).unwrap();
+        let mut names = chine_chinecore::model::TensorNames::for_layers(cfg.layers);
         names.resolve(&insp).unwrap();
-        let graph = tuckmill_tuckcore::engine::adapters::qwen3(&cfg, &names, &insp).unwrap();
+        let graph = chine_chinecore::engine::adapters::qwen3(&cfg, &names, &insp).unwrap();
         let file = std::fs::File::open(&payload).unwrap();
-        let weights =
-            tuckmill_tuckcore::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
-        let engine_plan = tuckmill_tuckcore::engine::metal::alloc_plan_with(
+        let weights = chine_chinecore::engine::GgufWeights::with_inspection(&file, &insp).unwrap();
+        let engine_plan = chine_chinecore::engine::metal::alloc_plan_with(
             &graph,
             &weights,
             512,
-            tuckmill_tuckcore::engine::metal::EngineOptions {
-                kv: tuckmill_tuckcore::engine::metal::KvCache::F32,
+            chine_chinecore::engine::metal::EngineOptions {
+                kv: chine_chinecore::engine::metal::KvCache::F32,
                 prefix_cache: true,
                 mtp: false,
                 gemm_f16_operands: true,
             },
         )
         .unwrap();
-        let kv_req = tuckmill_tuckcore::forward::KvState::bytes_for(&cfg, 512);
+        let kv_req = chine_chinecore::forward::KvState::bytes_for(&cfg, 512);
         assert_eq!(
             engine_plan.state, kv_req,
             "f32 KV planes == the dense KV bound"
@@ -3065,11 +3075,11 @@ mod tests {
                 1 << 20,
             );
             p.budget.add_reservation(
-                tuckmill_manifest::records::ReserveClass::KvState,
+                chine_manifest::records::ReserveClass::KvState,
                 Bytes(kv_req + (1 << 20)),
             );
             p.budget.add_reservation(
-                tuckmill_manifest::records::ReserveClass::Workspaces,
+                chine_manifest::records::ReserveClass::Workspaces,
                 Bytes(ws_reservation),
             );
             p.budget.reservation = p.budget.reservation_breakdown.total();
@@ -3100,7 +3110,7 @@ mod tests {
         let stats_a = runtime.backend_stats().expect("stats");
         assert_eq!(
             stats_a.prefill_batch,
-            Some(tuckmill_tuckcore::engine::metal::PREFILL_BATCH as u32)
+            Some(chine_chinecore::engine::metal::PREFILL_BATCH as u32)
         );
         assert_eq!(stats_a.retained_workspace_bytes, Some(engine_plan.scratch));
 
@@ -3135,8 +3145,11 @@ mod tests {
         let Some(worker_exe) = crate::test_worker_bin() else {
             return;
         };
-        let (_dir, runtime, signals) =
-            test_runtime_kind(EngineMode::Isolated, Some(worker_exe), EngineKind::TuckCore);
+        let (_dir, runtime, signals) = test_runtime_kind(
+            EngineMode::Isolated,
+            Some(worker_exe),
+            EngineKind::ChineCore,
+        );
         let (artifact, adapter) = runtime.resolve_artifact("local").unwrap();
         let run_once = |tokens: u64| {
             let plan = runtime

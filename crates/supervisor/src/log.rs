@@ -58,7 +58,7 @@ impl Logger {
     }
 
     fn log_path(&self) -> PathBuf {
-        self.dir.join("tuckmill.log")
+        self.dir.join("chine.log")
     }
 
     fn rotate_and_cleanup(&self) {
@@ -112,7 +112,7 @@ impl Logger {
             }
         }
         let mut obj = serde_json::Map::new();
-        obj.insert("ts_ms".into(), json!(tuckmill_manifest::ids::now_unix_ms()));
+        obj.insert("ts_ms".into(), json!(chine_manifest::ids::now_unix_ms()));
         obj.insert("level".into(), json!(level.as_str()));
         obj.insert("code".into(), json!(code));
         for (k, v) in fields {
@@ -125,10 +125,9 @@ impl Logger {
         if inner.current_bytes + line.len() as u64 + 1 > MAX_TOTAL_BYTES {
             // Rotate: rename current, start fresh.
             drop(inner.file.take());
-            let rotated = self.dir.join(format!(
-                "tuckmill-{}.log",
-                tuckmill_manifest::ids::now_unix_ms()
-            ));
+            let rotated = self
+                .dir
+                .join(format!("chine-{}.log", chine_manifest::ids::now_unix_ms()));
             let _ = std::fs::rename(self.log_path(), rotated);
             if let Ok(f) = OpenOptions::new()
                 .create(true)
@@ -171,7 +170,7 @@ mod tests {
         fields.insert("plan_id".into(), json!("abc"));
         fields.insert("committed".into(), json!(12));
         logger.info("REQUEST_DONE", fields);
-        let content = std::fs::read_to_string(dir.path().join("tuckmill.log")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("chine.log")).unwrap();
         assert!(content.contains("\"code\":\"REQUEST_DONE\""));
         assert!(content.contains("\"level\":\"info\""));
         assert!(!content.contains("prompt"));
@@ -180,7 +179,7 @@ mod tests {
     #[test]
     fn retention_removes_old_files() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("tuckmill-old.log");
+        let old = dir.path().join("chine-old.log");
         std::fs::write(&old, b"old").unwrap();
         // Backdate beyond retention.
         let backdate = SystemTime::now() - Duration::from_secs(8 * 24 * 3600);

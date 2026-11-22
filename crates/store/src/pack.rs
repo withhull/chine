@@ -18,9 +18,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{now_unix_ms, Id};
-use tuckmill_manifest::records::{ModelArtifact, PackedInfo};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{now_unix_ms, Id};
+use chine_manifest::records::{ModelArtifact, PackedInfo};
 
 use crate::aliases;
 use crate::layout::StoreLayout;
@@ -117,16 +117,14 @@ pub fn pack_artifact(
     let id = &artifact.artifact_id;
     let payload = layout.artifact_payload_path(id);
     if !payload.exists() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::StorageLost,
             format!("artifact payload for {id} is missing"),
         ));
     }
-    let nbytes = std::fs::metadata(&payload)
-        .map_err(TuckmillError::from)?
-        .len();
+    let nbytes = std::fs::metadata(&payload).map_err(ChineError::from)?.len();
     layout.ensure_space_for(
-        tuckmill_manifest::units::Bytes(nbytes.saturating_add(16 * 1024 * 1024)),
+        chine_manifest::units::Bytes(nbytes.saturating_add(16 * 1024 * 1024)),
         &layout.artifacts_dir(),
     )?;
 
@@ -151,7 +149,7 @@ pub fn pack_artifact(
             }
             Err(_) => {
                 // A failed prior pack is derived data; replace it.
-                std::fs::remove_dir_all(&pack_dir).map_err(TuckmillError::from)?;
+                std::fs::remove_dir_all(&pack_dir).map_err(ChineError::from)?;
             }
         }
     }
@@ -159,21 +157,21 @@ pub fn pack_artifact(
     let tmp_dir = layout
         .tmp_dir()
         .join(format!("pack-{}-partial", &id.as_str()[..16]));
-    std::fs::create_dir_all(&tmp_dir).map_err(TuckmillError::from)?;
+    std::fs::create_dir_all(&tmp_dir).map_err(ChineError::from)?;
 
     // Validate the source again: packing must not operate on a drifted file.
-    let mut file = std::fs::File::open(&payload).map_err(TuckmillError::from)?;
-    let inspection = tuckmill_manifest::gguf::inspect_reader(
+    let mut file = std::fs::File::open(&payload).map_err(ChineError::from)?;
+    let inspection = chine_manifest::gguf::inspect_reader(
         &mut std::io::BufReader::with_capacity(1 << 20, &mut file),
         nbytes,
-        &tuckmill_manifest::gguf::Limits::default(),
+        &chine_manifest::gguf::Limits::default(),
         None,
     )?;
     // The artifact's metadata/tensor hashes must match the payload on disk.
     if inspection.metadata_hash()? != artifact.metadata_hash
         || inspection.tensor_index_hash()? != artifact.tensor_index_hash
     {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::IntegrityFailure,
             "artifact payload does not match its manifest hashes; refusing to pack",
         ));
@@ -185,7 +183,7 @@ pub fn pack_artifact(
         _ => {
             // Fresh start: reset the partial directory.
             for entry in std::fs::read_dir(&tmp_dir)
-                .map_err(TuckmillError::from)?
+                .map_err(ChineError::from)?
                 .flatten()
             {
                 let _ = std::fs::remove_file(entry.path());
@@ -206,9 +204,9 @@ pub fn pack_artifact(
     // ---- header region ----
     if !journal.header_written {
         let mut header = vec![0u8; inspection.data_start as usize];
-        file.seek(SeekFrom::Start(0)).map_err(TuckmillError::from)?;
-        file.read_exact(&mut header).map_err(TuckmillError::from)?;
-        std::fs::write(tmp_dir.join("header.bin"), &header).map_err(TuckmillError::from)?;
+        file.seek(SeekFrom::Start(0)).map_err(ChineError::from)?;
+        file.read_exact(&mut header).map_err(ChineError::from)?;
+        std::fs::write(tmp_dir.join("header.bin"), &header).map_err(ChineError::from)?;
         journal.header_written = true;
         journal.save(&journal_path)?;
     }
@@ -216,7 +214,7 @@ pub fn pack_artifact(
     // ---- deduplicate aliased extents ----
     // (source_offset, byte_size) -> owner tile index
     let mut extents: BTreeMap<(u64, u64), usize> = BTreeMap::new();
-    let mut ordered: Vec<(usize, &tuckmill_manifest::gguf::GgufTensor, Option<usize>)> = Vec::new();
+    let mut ordered: Vec<(usize, &chine_manifest::gguf::GgufTensor, Option<usize>)> = Vec::new();
     for (idx, t) in inspection.tensors.iter().enumerate() {
         let owner = if t.byte_size == 0 {
             None
@@ -247,7 +245,7 @@ pub fn pack_artifact(
         if let Some(limit) = options.fault_inject_stop_after_tiles {
             if done >= limit {
                 journal.save(&journal_path)?;
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "fault injection: packing interrupted after requested tiles",
                 ));
@@ -259,31 +257,29 @@ pub fn pack_artifact(
         let mut writer = std::io::BufWriter::with_capacity(COPY_BUFFER, segment_file);
         if align_pad > 0 {
             let pad = vec![0u8; align_pad as usize];
-            writer.write_all(&pad).map_err(TuckmillError::from)?;
+            writer.write_all(&pad).map_err(ChineError::from)?;
         }
         file.seek(SeekFrom::Start(inspection.data_start + t.offset))
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
         let mut hasher = sha2::Sha256::new();
         let mut remaining = t.byte_size;
         let mut buf = vec![0u8; COPY_BUFFER];
         while remaining > 0 {
             let take = remaining.min(buf.len() as u64) as usize;
             file.read_exact(&mut buf[..take])
-                .map_err(TuckmillError::from)?;
+                .map_err(ChineError::from)?;
             {
                 use sha2::Digest;
                 hasher.update(&buf[..take]);
             }
-            writer
-                .write_all(&buf[..take])
-                .map_err(TuckmillError::from)?;
+            writer.write_all(&buf[..take]).map_err(ChineError::from)?;
             remaining -= take as u64;
         }
-        writer.flush().map_err(TuckmillError::from)?;
+        writer.flush().map_err(ChineError::from)?;
         let segment_meta = writer
             .into_inner()
-            .map_err(|e| TuckmillError::new(ErrorCode::Io, format!("segment flush failed: {e}")))?;
-        segment_meta.sync_all().map_err(TuckmillError::from)?;
+            .map_err(|e| ChineError::new(ErrorCode::Io, format!("segment flush failed: {e}")))?;
+        segment_meta.sync_all().map_err(ChineError::from)?;
 
         // Logical offset of this tile across the concatenated segments.
         let segment_base: u64 = journal
@@ -301,7 +297,7 @@ pub fn pack_artifact(
             byte_size: t.byte_size,
             sha256: {
                 use sha2::Digest;
-                tuckmill_manifest::ids::hex(&hasher.finalize())
+                chine_manifest::ids::hex(&hasher.finalize())
             },
             decoding_kernel: decoding_kernel_for(t.type_id),
             shared_with: None,
@@ -331,7 +327,7 @@ pub fn pack_artifact(
                 .iter()
                 .position(|pt| &pt.name == owner_name)
                 .ok_or_else(|| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::Internal,
                         format!("aliased tile {tname:?} has no owner", tname = t.name),
                     )
@@ -359,7 +355,7 @@ pub fn pack_artifact(
     for seg in &journal.segments {
         let path = tmp_dir.join(&seg.name);
         let (hash, len) = crate::digester::digest_file(&path, 64 * 1024 * 1024).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::Io,
                 format!("cannot re-read segment {}: {}", seg.name, e.message()),
             )
@@ -371,17 +367,17 @@ pub fn pack_artifact(
         });
     }
     let header_path = tmp_dir.join("header.bin");
-    let header_sha = tuckmill_manifest::ids::sha256_of_reader(&mut std::io::BufReader::new(
-        std::fs::File::open(&header_path).map_err(TuckmillError::from)?,
+    let header_sha = chine_manifest::ids::sha256_of_reader(&mut std::io::BufReader::new(
+        std::fs::File::open(&header_path).map_err(ChineError::from)?,
     ))
-    .map_err(TuckmillError::from)?;
+    .map_err(ChineError::from)?;
     let header_bytes = std::fs::metadata(&header_path)
-        .map_err(TuckmillError::from)?
+        .map_err(ChineError::from)?
         .len();
 
     let manifest = PackManifest {
         schema_version: PACK_FORMAT_VERSION,
-        format: "tuckmill-packed-v1".into(),
+        format: "chine-packed-v1".into(),
         artifact_id: id.clone(),
         source_content_hash: artifact.content_hash.clone(),
         source_file_bytes: nbytes,
@@ -393,13 +389,12 @@ pub fn pack_artifact(
         segments: segments.clone(),
         created_unix_ms: now_unix_ms(),
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| {
-        tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "pack manifest")
-    })?;
-    std::fs::write(tmp_dir.join("pack.json"), &manifest_bytes).map_err(TuckmillError::from)?;
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| chine_manifest::error::json_error(e, ErrorCode::Internal, "pack manifest"))?;
+    std::fs::write(tmp_dir.join("pack.json"), &manifest_bytes).map_err(ChineError::from)?;
 
     // ---- publish atomically ----
-    std::fs::rename(&tmp_dir, &pack_dir).map_err(TuckmillError::from)?;
+    std::fs::rename(&tmp_dir, &pack_dir).map_err(ChineError::from)?;
     crate::layout::fsync_dir(&layout.artifact_dir(id));
 
     // ---- verify the published pack before recording it ----
@@ -422,19 +417,19 @@ pub fn pack_artifact(
 
 impl PackJournal {
     fn load(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).map_err(TuckmillError::from)?;
+        let bytes = std::fs::read(path).map_err(ChineError::from)?;
         serde_json::from_slice(&bytes).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "pack journal")
+            chine_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "pack journal")
         })
     }
 
     fn save(&self, path: &Path) -> Result<()> {
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec(self).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "pack journal write")
+            chine_manifest::error::json_error(e, ErrorCode::Internal, "pack journal write")
         })?;
-        std::fs::write(&tmp, bytes).map_err(TuckmillError::from)?;
-        std::fs::rename(&tmp, path).map_err(TuckmillError::from)?;
+        std::fs::write(&tmp, bytes).map_err(ChineError::from)?;
+        std::fs::rename(&tmp, path).map_err(ChineError::from)?;
         Ok(())
     }
 }
@@ -459,15 +454,15 @@ fn segment_for_tile(
         .write(true)
         .truncate(false)
         .open(&path)
-        .map_err(TuckmillError::from)?;
+        .map_err(ChineError::from)?;
     if fresh {
-        file.set_len(0).map_err(TuckmillError::from)?;
+        file.set_len(0).map_err(ChineError::from)?;
     } else {
         // Resume: drop any bytes past the recorded append point.
-        file.set_len(offset).map_err(TuckmillError::from)?;
+        file.set_len(offset).map_err(ChineError::from)?;
     }
     file.seek(SeekFrom::Start(offset))
-        .map_err(TuckmillError::from)?;
+        .map_err(ChineError::from)?;
     Ok((name, file, offset))
 }
 
@@ -482,9 +477,9 @@ fn decoding_kernel_for(type_id: u32) -> Option<String> {
 }
 
 fn read_manifest(pack_dir: &Path) -> Result<PackManifest> {
-    let bytes = std::fs::read(pack_dir.join("pack.json")).map_err(TuckmillError::from)?;
+    let bytes = std::fs::read(pack_dir.join("pack.json")).map_err(ChineError::from)?;
     serde_json::from_slice(&bytes).map_err(|e| {
-        tuckmill_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "pack manifest")
+        chine_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "pack manifest")
     })
 }
 
@@ -507,7 +502,7 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
     let pack_dir = layout.artifact_pack_dir(id);
     let manifest = read_manifest(&pack_dir)?;
     if manifest.schema_version != PACK_FORMAT_VERSION {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::IntegrityFailure,
             format!("unsupported pack schema {}", manifest.schema_version),
         ));
@@ -515,20 +510,20 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
     // Header.
     let header_path = pack_dir.join("header.bin");
     let header_len = std::fs::metadata(&header_path)
-        .map_err(|_| TuckmillError::new(ErrorCode::IntegrityFailure, "pack header.bin is missing"))?
+        .map_err(|_| ChineError::new(ErrorCode::IntegrityFailure, "pack header.bin is missing"))?
         .len();
     if header_len != manifest.header_bytes {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::IntegrityFailure,
             "pack header length does not match the manifest",
         ));
     }
-    let header_sha = tuckmill_manifest::ids::sha256_of_reader(&mut std::io::BufReader::new(
-        std::fs::File::open(&header_path).map_err(TuckmillError::from)?,
+    let header_sha = chine_manifest::ids::sha256_of_reader(&mut std::io::BufReader::new(
+        std::fs::File::open(&header_path).map_err(ChineError::from)?,
     ))
-    .map_err(TuckmillError::from)?;
+    .map_err(ChineError::from)?;
     if header_sha != manifest.header_sha256 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::IntegrityFailure,
             "pack header checksum mismatch",
         ));
@@ -538,13 +533,13 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
     for seg in &manifest.segments {
         let path = pack_dir.join(&seg.name);
         let meta = std::fs::metadata(&path).map_err(|_| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!("pack segment {} is missing", seg.name),
             )
         })?;
         if meta.len() != seg.bytes {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "pack segment {} is {} bytes but the manifest records {}",
@@ -554,7 +549,7 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
                 ),
             ));
         }
-        let file = std::fs::File::open(&path).map_err(TuckmillError::from)?;
+        let file = std::fs::File::open(&path).map_err(ChineError::from)?;
         segment_files.insert(seg.name.as_str(), (seg.bytes, file));
     }
     // Build logical offset -> (segment, offset) map.
@@ -577,21 +572,20 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
             continue;
         }
         let (name, off) = locate(tile.offset).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!("tile {} points outside all segments", tile.name),
             )
         })?;
         let (_, file) = segment_files.get_mut(name).expect("segment exists");
-        file.seek(SeekFrom::Start(off))
-            .map_err(TuckmillError::from)?;
+        file.seek(SeekFrom::Start(off)).map_err(ChineError::from)?;
         let mut hasher = sha2::Sha256::new();
         let mut remaining = tile.byte_size;
         let mut buf = vec![0u8; COPY_BUFFER];
         while remaining > 0 {
             let take = remaining.min(buf.len() as u64) as usize;
             file.read_exact(&mut buf[..take]).map_err(|_| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::IntegrityFailure,
                     format!("tile {} extends beyond its segment", tile.name),
                 )
@@ -603,9 +597,9 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
             remaining -= take as u64;
         }
         use sha2::Digest;
-        let digest = tuckmill_manifest::ids::hex(&hasher.finalize());
+        let digest = chine_manifest::ids::hex(&hasher.finalize());
         if digest != tile.sha256 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!("tile {} checksum mismatch", tile.name),
             ));
@@ -618,8 +612,8 @@ pub fn verify_pack(layout: &StoreLayout, id: &Id) -> Result<()> {
 mod tests {
     use super::*;
     use crate::import::{import_local, ImportOptions};
-    use tuckmill_manifest::adapter::AdapterRegistry;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::adapter::AdapterRegistry;
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn setup() -> (
         tempfile::TempDir,
@@ -650,11 +644,9 @@ mod tests {
         // Every source tensor is represented exactly once as an owner or alias.
         let manifest = read_manifest(&pack_dir).unwrap();
         let insp_path = layout.artifact_payload_path(&artifact.artifact_id);
-        let insp = tuckmill_manifest::gguf::inspect(
-            &insp_path,
-            &tuckmill_manifest::gguf::Limits::default(),
-        )
-        .unwrap();
+        let insp =
+            chine_manifest::gguf::inspect(&insp_path, &chine_manifest::gguf::Limits::default())
+                .unwrap();
         assert_eq!(manifest.tiles.len(), insp.tensors.len());
         // Lossless: tile bytes sum to the source tensor byte total.
         let owners: u64 = manifest

@@ -28,7 +28,7 @@
 //! installs publish atomically (write to temp, rename), replacement unlinks
 //! or renames rather than writing in place, and delete-while-open keeps the
 //! inode alive for an open handle — so a loaded artifact cannot be mutated
-//! from under execution by Tuckmill's own components. External in-place
+//! from under execution by Chine's own components. External in-place
 //! modification of the payload is outside the contract: the content-digest
 //! verification in the executor detects it before execution begins.
 
@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 use crate::tensor::{self, RowGeometry};
 
@@ -111,7 +111,7 @@ impl BlockPolicy {
     pub fn validate(&self) -> Result<()> {
         let bounds = |v: u64, lo: u64, hi: u64, what: &str| -> Result<()> {
             if v < lo || v > hi {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("{what} {v} is outside {lo}..={hi} bytes"),
                 ));
@@ -381,7 +381,7 @@ impl BlockLoader {
         storage: StorageSelection,
     ) -> Result<Self> {
         let file = File::open(path).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::StorageLost,
                 format!("cannot open artifact {}: {e}", path.display()),
             )
@@ -413,16 +413,16 @@ impl BlockLoader {
         expected_len: Option<u64>,
     ) -> Result<Self> {
         policy.validate()?;
-        let len = file.metadata().map_err(TuckmillError::from)?.len();
+        let len = file.metadata().map_err(ChineError::from)?.len();
         if len == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::StorageLost,
                 "artifact file is empty",
             ));
         }
         if let Some(expected) = expected_len {
             if len != expected {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::IntegrityFailure,
                     format!(
                         "artifact file is {len} bytes but the recorded identity says {expected}; refusing to map or execute"
@@ -441,7 +441,7 @@ impl BlockLoader {
             StorageSelection::Mapped => match MappedFile::from_file(&file) {
                 Ok(map) => (Some(map), ResolvedStorage::Mapped),
                 Err(e) => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::StorageLost,
                         format!("mapped weight storage was requested but mmap failed: {e}"),
                     )
@@ -506,14 +506,14 @@ impl BlockLoader {
     /// through [`Self::pin`]; the cache itself may evict at any time.
     pub fn block(&self, tensor: usize, chunk: u32) -> Result<Arc<WeightBlock>> {
         if tensor >= self.tensors.len() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("tensor index {tensor} out of range"),
             ));
         }
         let entry = &self.tensors[tensor];
         if chunk as u64 >= entry.chunks {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("chunk {chunk} out of range for tensor {:?}", entry.name),
             ));
@@ -538,7 +538,7 @@ impl BlockLoader {
             Some(map) => BlockStorage::Mapped {
                 map: map.clone(),
                 offset: usize::try_from(file_offset).map_err(|_| {
-                    TuckmillError::new(ErrorCode::Internal, "block offset does not fit memory")
+                    ChineError::new(ErrorCode::Internal, "block offset does not fit memory")
                 })?,
                 len,
             },
@@ -547,7 +547,7 @@ impl BlockLoader {
                 self.file
                     .read_exact_at(&mut bytes, file_offset)
                     .map_err(|e| {
-                        TuckmillError::new(
+                        ChineError::new(
                             ErrorCode::StorageLost,
                             format!("artifact read failed for tensor {:?}: {e}", entry.name),
                         )
@@ -591,7 +591,7 @@ impl BlockLoader {
     ) -> Result<Vec<u8>> {
         let entry = &self.tensors[tensor];
         let row = entry.row.as_ref().ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedQuantization,
                 format!(
                     "tensor {:?} has no splittable row geometry; cannot random-access rows",
@@ -600,7 +600,7 @@ impl BlockLoader {
             )
         })?;
         if first_row + row_count > row.rows {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("row range outside tensor {:?}", entry.name),
             ));
@@ -611,7 +611,7 @@ impl BlockLoader {
         self.file
             .read_exact_at(&mut bytes, self.data_start + entry.rel_offset + start)
             .map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::StorageLost,
                     format!("artifact read failed for tensor {:?}: {e}", entry.name),
                 )
@@ -791,7 +791,7 @@ impl BlockLoader {
     /// memory ceiling holds even for large 1D weights.
     pub fn dequant_tensor(&self, name: &str) -> Result<Vec<f32>> {
         let index = self.tensor_index(name).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!("artifact is missing required tensor {name:?}"),
             )
@@ -804,7 +804,7 @@ impl BlockLoader {
             tensor::dequant_into(entry.type_id, block.bytes(), &mut out)?;
         }
         if out.len() as u64 != elems {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "tensor {name:?} decoded {} elements but its index declares {elems}",
@@ -865,15 +865,14 @@ fn mincore_resident_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn open_fixture(policy: BlockPolicy) -> (tempfile::TempDir, BlockLoader) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let tensors: Vec<TensorEntry> = insp
             .tensors
             .iter()
@@ -988,16 +987,16 @@ mod tests {
         // decode matches the F16 twin row-for-row (within f16 rounding),
         // our interpretation of real Q8_0 blocks is correct.
         let (Ok(q8_path), Ok(f16_path)) = (
-            std::env::var("TUCKMILL_Q8_GGUF"),
-            std::env::var("TUCKMILL_F16_GGUF"),
+            std::env::var("CHINE_Q8_GGUF"),
+            std::env::var("CHINE_F16_GGUF"),
         ) else {
-            eprintln!("skipping: set TUCKMILL_Q8_GGUF and TUCKMILL_F16_GGUF");
+            eprintln!("skipping: set CHINE_Q8_GGUF and CHINE_F16_GGUF");
             return;
         };
         let open = |path: &str| -> BlockLoader {
-            let insp = tuckmill_manifest::gguf::inspect(
+            let insp = chine_manifest::gguf::inspect(
                 std::path::Path::new(path),
-                &tuckmill_manifest::gguf::Limits::default(),
+                &chine_manifest::gguf::Limits::default(),
             )
             .unwrap();
             let policy = BlockPolicy::default();
@@ -1056,8 +1055,7 @@ mod tests {
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let raw = std::fs::read(&path).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy {
             block_bytes: 64 * 1024,
             cache_bytes: 256 * 1024,
@@ -1114,7 +1112,7 @@ mod tests {
     }
 
     fn entries_for(
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
         block_bytes: u64,
     ) -> Vec<TensorEntry> {
         insp.tensors
@@ -1145,8 +1143,7 @@ mod tests {
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let raw = std::fs::read(&path).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy {
             block_bytes: 64 * 1024,
             cache_bytes: 256 * 1024,
@@ -1189,8 +1186,7 @@ mod tests {
         let path = dir.path().join("f.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy {
             block_bytes: 64 * 1024,
             cache_bytes: 256 * 1024,
@@ -1262,8 +1258,7 @@ mod tests {
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let raw_before = std::fs::read(&path).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy {
             block_bytes: 64 * 1024,
             cache_bytes: 256 * 1024,
@@ -1306,8 +1301,7 @@ mod tests {
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let original_len = std::fs::metadata(&path).unwrap().len();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy::default();
         let tensors = entries_for(&insp, policy.block_bytes);
 
@@ -1354,8 +1348,7 @@ mod tests {
         let path = dir.path().join("f.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy {
             block_bytes: 64 * 1024,
             cache_bytes: 256 * 1024,

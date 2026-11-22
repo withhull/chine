@@ -1,4 +1,4 @@
-//! TuckCore Metal path: typed Rust handles over the narrow TuckCore–Metal C
+//! ChineCore Metal path: typed Rust handles over the narrow ChineCore–Metal C
 //! ABI (ADR-007).
 //!
 //! One `MetalContext` owns one device, one command queue, and the compiled
@@ -17,13 +17,13 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::{Arc, Mutex};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 /// The MSL source shipped with this revision, compiled at context creation.
 pub const KERNELS_MSL: &str = include_str!("../../../native/metal/kernels.metal");
 
 /// Largest batch [`MetalContext::q8_0_gemm_mma`] accepts
-/// (`TM_METAL_GEMM_MMA_MAX_BATCH`); the other GEMMs accept up to
+/// (`CH_METAL_GEMM_MMA_MAX_BATCH`); the other GEMMs accept up to
 /// [`GEMM_MAX_BATCH`].
 pub const GEMM_MMA_MAX_BATCH: u32 = 512;
 /// Largest batch of the per-row GEMMs (`q8_0_gemm`, `f16_gemm`).
@@ -52,7 +52,7 @@ mod imp {
         _private: [u8; 0],
     }
 
-    /// `tm_metal_qwen35_kv_store_{f16,f32}_chunk`.
+    /// `ch_metal_qwen35_kv_store_{f16,f32}_chunk`.
     pub type KvChunkFn = unsafe extern "C" fn(
         *mut TmMetalCtx,
         *mut TmMetalBuffer,
@@ -67,7 +67,7 @@ mod imp {
         *mut c_char,
         usize,
     ) -> c_int;
-    /// `tm_metal_qwen35_attention_{f16,f32}_chunk`.
+    /// `ch_metal_qwen35_attention_{f16,f32}_chunk`.
     pub type AttnChunkFn = unsafe extern "C" fn(
         *mut TmMetalCtx,
         *mut TmMetalBuffer,
@@ -87,32 +87,32 @@ mod imp {
         usize,
     ) -> c_int;
 
-    pub const TM_METAL_ERR_NO_DEVICE: c_int = -1;
-    pub const TM_METAL_ERR_SOURCE: c_int = -2;
-    pub const TM_METAL_ERR_ALLOC: c_int = -3;
-    pub const TM_METAL_ERR_BOUNDS: c_int = -4;
-    pub const TM_METAL_ERR_UNSUPPORTED: c_int = -5;
-    pub const TM_METAL_ERR_INTERNAL: c_int = -6;
+    pub const CH_METAL_ERR_NO_DEVICE: c_int = -1;
+    pub const CH_METAL_ERR_SOURCE: c_int = -2;
+    pub const CH_METAL_ERR_ALLOC: c_int = -3;
+    pub const CH_METAL_ERR_BOUNDS: c_int = -4;
+    pub const CH_METAL_ERR_UNSUPPORTED: c_int = -5;
+    pub const CH_METAL_ERR_INTERNAL: c_int = -6;
 
     extern "C" {
-        pub fn tm_metal_available() -> c_int;
-        pub fn tm_metal_runtime_info() -> *const c_char;
-        pub fn tm_metal_create(
+        pub fn ch_metal_available() -> c_int;
+        pub fn ch_metal_runtime_info() -> *const c_char;
+        pub fn ch_metal_create(
             msl_source: *const c_char,
             err: *mut c_char,
             err_cap: usize,
         ) -> *mut TmMetalCtx;
-        pub fn tm_metal_destroy(ctx: *mut TmMetalCtx);
-        pub fn tm_metal_buffer_new(
+        pub fn ch_metal_destroy(ctx: *mut TmMetalCtx);
+        pub fn ch_metal_buffer_new(
             ctx: *mut TmMetalCtx,
             bytes: usize,
             shared: c_int,
             err: *mut c_char,
             err_cap: usize,
         ) -> *mut TmMetalBuffer;
-        pub fn tm_metal_buffer_free(ctx: *mut TmMetalCtx, buffer: *mut TmMetalBuffer);
-        pub fn tm_metal_buffer_len(ctx: *const TmMetalCtx, buffer: *const TmMetalBuffer) -> usize;
-        pub fn tm_metal_upload(
+        pub fn ch_metal_buffer_free(ctx: *mut TmMetalCtx, buffer: *mut TmMetalBuffer);
+        pub fn ch_metal_buffer_len(ctx: *const TmMetalCtx, buffer: *const TmMetalBuffer) -> usize;
+        pub fn ch_metal_upload(
             ctx: *mut TmMetalCtx,
             dst: *mut TmMetalBuffer,
             off: usize,
@@ -121,7 +121,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_buffer_zero(
+        pub fn ch_metal_buffer_zero(
             ctx: *mut TmMetalCtx,
             buffer: *mut TmMetalBuffer,
             off: usize,
@@ -129,7 +129,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_download(
+        pub fn ch_metal_download(
             ctx: *mut TmMetalCtx,
             src: *mut TmMetalBuffer,
             off: usize,
@@ -138,7 +138,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_download_after(
+        pub fn ch_metal_download_after(
             ctx: *mut TmMetalCtx,
             src: *mut TmMetalBuffer,
             off: usize,
@@ -148,7 +148,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_f32_scale(
+        pub fn ch_metal_f32_scale(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             y: *mut TmMetalBuffer,
@@ -157,7 +157,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_f32_axpy(
+        pub fn ch_metal_f32_axpy(
             ctx: *mut TmMetalCtx,
             a: *mut TmMetalBuffer,
             y: *mut TmMetalBuffer,
@@ -166,7 +166,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_cast_f16_f32(
+        pub fn ch_metal_cast_f16_f32(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             y: *mut TmMetalBuffer,
@@ -174,7 +174,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_cast_f32_f16(
+        pub fn ch_metal_cast_f32_f16(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             y: *mut TmMetalBuffer,
@@ -182,7 +182,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_q8_0_gemv(
+        pub fn ch_metal_q8_0_gemv(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -192,19 +192,19 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_fence(ctx: *mut TmMetalCtx, err: *mut c_char, err_cap: usize) -> c_int;
-        pub fn tm_metal_begin_group(
+        pub fn ch_metal_fence(ctx: *mut TmMetalCtx, err: *mut c_char, err_cap: usize) -> c_int;
+        pub fn ch_metal_begin_group(
             ctx: *mut TmMetalCtx,
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_end_group(ctx: *mut TmMetalCtx, err: *mut c_char, err_cap: usize) -> c_int;
-        pub fn tm_metal_abort_group(
+        pub fn ch_metal_end_group(ctx: *mut TmMetalCtx, err: *mut c_char, err_cap: usize) -> c_int;
+        pub fn ch_metal_abort_group(
             ctx: *mut TmMetalCtx,
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_q8_0_row_f32(
+        pub fn ch_metal_q8_0_row_f32(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             out: *mut TmMetalBuffer,
@@ -214,7 +214,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_f16_gemv(
+        pub fn ch_metal_f16_gemv(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -224,7 +224,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_rmsnorm_f32(
+        pub fn ch_metal_rmsnorm_f32(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             weight: *mut TmMetalBuffer,
@@ -235,7 +235,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_norm_add_f32(
+        pub fn ch_metal_norm_add_f32(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             weight: *mut TmMetalBuffer,
@@ -247,7 +247,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qk_norm_f32(
+        pub fn ch_metal_qk_norm_f32(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             q_weight: *mut TmMetalBuffer,
@@ -262,7 +262,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_f16_row_f32(
+        pub fn ch_metal_f16_row_f32(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             out: *mut TmMetalBuffer,
@@ -272,7 +272,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_silu_mul_f32(
+        pub fn ch_metal_silu_mul_f32(
             ctx: *mut TmMetalCtx,
             gate: *mut TmMetalBuffer,
             up: *mut TmMetalBuffer,
@@ -281,7 +281,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_gelu_tanh_mul_f32(
+        pub fn ch_metal_gelu_tanh_mul_f32(
             ctx: *mut TmMetalCtx,
             gate: *mut TmMetalBuffer,
             up: *mut TmMetalBuffer,
@@ -290,7 +290,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_q8_0_gemm(
+        pub fn ch_metal_q8_0_gemm(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -303,7 +303,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_q8_0_gemm_mma(
+        pub fn ch_metal_q8_0_gemm_mma(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -316,7 +316,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_q8_0_gemm_mma_f16op(
+        pub fn ch_metal_q8_0_gemm_mma_f16op(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -329,7 +329,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_f16_gemm(
+        pub fn ch_metal_f16_gemm(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -342,7 +342,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_conv_step(
+        pub fn ch_metal_qwen35_conv_step(
             ctx: *mut TmMetalCtx,
             hist: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -353,7 +353,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_conv_shift(
+        pub fn ch_metal_qwen35_conv_shift(
             ctx: *mut TmMetalCtx,
             hist: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -362,7 +362,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_l2norm_heads(
+        pub fn ch_metal_qwen35_l2norm_heads(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             y: *mut TmMetalBuffer,
@@ -373,7 +373,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_beta_decay(
+        pub fn ch_metal_qwen35_beta_decay(
             ctx: *mut TmMetalCtx,
             raw_beta: *mut TmMetalBuffer,
             alpha: *mut TmMetalBuffer,
@@ -386,7 +386,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_gdn_step(
+        pub fn ch_metal_qwen35_gdn_step(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k: *mut TmMetalBuffer,
@@ -403,7 +403,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_gated_norm(
+        pub fn ch_metal_qwen35_gated_norm(
             ctx: *mut TmMetalCtx,
             o: *mut TmMetalBuffer,
             z: *mut TmMetalBuffer,
@@ -416,7 +416,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_q_gate_split(
+        pub fn ch_metal_qwen35_q_gate_split(
             ctx: *mut TmMetalCtx,
             qg: *mut TmMetalBuffer,
             q_out: *mut TmMetalBuffer,
@@ -427,7 +427,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_rope_partial(
+        pub fn ch_metal_qwen35_rope_partial(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k: *mut TmMetalBuffer,
@@ -441,7 +441,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_kv_store_f16(
+        pub fn ch_metal_qwen35_kv_store_f16(
             ctx: *mut TmMetalCtx,
             k_src: *mut TmMetalBuffer,
             v_src: *mut TmMetalBuffer,
@@ -455,7 +455,7 @@ mod imp {
             err_cap: usize,
         ) -> c_int;
         #[allow(clippy::too_many_arguments)]
-        pub fn tm_metal_qwen35_attention_f16(
+        pub fn ch_metal_qwen35_attention_f16(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k_cache: *mut TmMetalBuffer,
@@ -471,7 +471,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_attn_gate(
+        pub fn ch_metal_qwen35_attn_gate(
             ctx: *mut TmMetalCtx,
             attn: *mut TmMetalBuffer,
             gate: *mut TmMetalBuffer,
@@ -479,14 +479,14 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_silu(
+        pub fn ch_metal_qwen35_silu(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             n: u32,
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_split_qkv(
+        pub fn ch_metal_qwen35_split_qkv(
             ctx: *mut TmMetalCtx,
             y: *mut TmMetalBuffer,
             q: *mut TmMetalBuffer,
@@ -496,10 +496,10 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_committed_dispatches(ctx: *const TmMetalCtx) -> u64;
-        pub fn tm_metal_completed_dispatches(ctx: *const TmMetalCtx) -> u64;
-        pub fn tm_metal_last_gpu_ms(ctx: *const TmMetalCtx) -> f64;
-        pub fn tm_metal_argmax_f32(
+        pub fn ch_metal_committed_dispatches(ctx: *const TmMetalCtx) -> u64;
+        pub fn ch_metal_completed_dispatches(ctx: *const TmMetalCtx) -> u64;
+        pub fn ch_metal_last_gpu_ms(ctx: *const TmMetalCtx) -> f64;
+        pub fn ch_metal_argmax_f32(
             ctx: *mut TmMetalCtx,
             x: *mut TmMetalBuffer,
             n: u32,
@@ -509,7 +509,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_conv_chunk(
+        pub fn ch_metal_qwen35_conv_chunk(
             ctx: *mut TmMetalCtx,
             hist: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -521,7 +521,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_split_qkv_chunk(
+        pub fn ch_metal_qwen35_split_qkv_chunk(
             ctx: *mut TmMetalCtx,
             y: *mut TmMetalBuffer,
             q: *mut TmMetalBuffer,
@@ -532,7 +532,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_beta_decay_chunk(
+        pub fn ch_metal_qwen35_beta_decay_chunk(
             ctx: *mut TmMetalCtx,
             raw_beta: *mut TmMetalBuffer,
             alpha: *mut TmMetalBuffer,
@@ -545,7 +545,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_gdn_chunk(
+        pub fn ch_metal_qwen35_gdn_chunk(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k: *mut TmMetalBuffer,
@@ -565,7 +565,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_gdn_chunk_snap(
+        pub fn ch_metal_qwen35_gdn_chunk_snap(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k: *mut TmMetalBuffer,
@@ -587,7 +587,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_conv_chunk_shift(
+        pub fn ch_metal_qwen35_conv_chunk_shift(
             ctx: *mut TmMetalCtx,
             hist: *mut TmMetalBuffer,
             x: *mut TmMetalBuffer,
@@ -597,8 +597,8 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_set_gdn_chunk_generic(ctx: *mut TmMetalCtx, generic: c_int) -> c_int;
-        pub fn tm_metal_qwen35_rope_partial_chunk(
+        pub fn ch_metal_set_gdn_chunk_generic(ctx: *mut TmMetalCtx, generic: c_int) -> c_int;
+        pub fn ch_metal_qwen35_rope_partial_chunk(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k: *mut TmMetalBuffer,
@@ -612,7 +612,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_kv_store_f16_chunk(
+        pub fn ch_metal_qwen35_kv_store_f16_chunk(
             ctx: *mut TmMetalCtx,
             k_src: *mut TmMetalBuffer,
             v_src: *mut TmMetalBuffer,
@@ -626,7 +626,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_kv_store_f32_chunk(
+        pub fn ch_metal_qwen35_kv_store_f32_chunk(
             ctx: *mut TmMetalCtx,
             k_src: *mut TmMetalBuffer,
             v_src: *mut TmMetalBuffer,
@@ -640,7 +640,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_attention_f32_chunk(
+        pub fn ch_metal_qwen35_attention_f32_chunk(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k_cache: *mut TmMetalBuffer,
@@ -658,7 +658,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_qwen35_attention_f16_chunk(
+        pub fn ch_metal_qwen35_attention_f16_chunk(
             ctx: *mut TmMetalCtx,
             q: *mut TmMetalBuffer,
             k_cache: *mut TmMetalBuffer,
@@ -676,7 +676,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_row_indirect_f32(
+        pub fn ch_metal_row_indirect_f32(
             ctx: *mut TmMetalCtx,
             w: *mut TmMetalBuffer,
             type_id: u32,
@@ -688,7 +688,7 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_copy_f32(
+        pub fn ch_metal_copy_f32(
             ctx: *mut TmMetalCtx,
             src: *mut TmMetalBuffer,
             src_off: u32,
@@ -698,10 +698,10 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
-        pub fn tm_metal_gpu_nanos_total(ctx: *const TmMetalCtx) -> u64;
-        pub fn tm_metal_profile_set(ctx: *mut TmMetalCtx, enabled: c_int) -> c_int;
-        pub fn tm_metal_counter_sampling_supported(ctx: *mut TmMetalCtx) -> c_int;
-        pub fn tm_metal_profile_read(
+        pub fn ch_metal_gpu_nanos_total(ctx: *const TmMetalCtx) -> u64;
+        pub fn ch_metal_profile_set(ctx: *mut TmMetalCtx, enabled: c_int) -> c_int;
+        pub fn ch_metal_counter_sampling_supported(ctx: *mut TmMetalCtx) -> c_int;
+        pub fn ch_metal_profile_read(
             ctx: *mut TmMetalCtx,
             index: u32,
             name: *mut c_char,
@@ -709,8 +709,8 @@ mod imp {
             nanos: *mut u64,
             count: *mut u64,
         ) -> c_int;
-        pub fn tm_metal_allocated_bytes(ctx: *const TmMetalCtx) -> u64;
-        pub fn tm_metal_in_flight_bytes(ctx: *const TmMetalCtx) -> u64;
+        pub fn ch_metal_allocated_bytes(ctx: *const TmMetalCtx) -> u64;
+        pub fn ch_metal_in_flight_bytes(ctx: *const TmMetalCtx) -> u64;
     }
 }
 
@@ -720,8 +720,8 @@ pub fn probe() -> Probe {
     {
         // SAFETY: both calls are side-effect free; the info pointer is a
         // static string owned by the C layer.
-        let available = unsafe { imp::tm_metal_available() } == 1;
-        let info = unsafe { CStr::from_ptr(imp::tm_metal_runtime_info()) }
+        let available = unsafe { imp::ch_metal_available() } == 1;
+        let info = unsafe { CStr::from_ptr(imp::ch_metal_runtime_info()) }
             .to_string_lossy()
             .into_owned();
         Probe { available, info }
@@ -760,9 +760,9 @@ impl Drop for ContextInner {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
         unsafe {
-            // SAFETY: created by tm_metal_create; all buffers hold an Arc to
+            // SAFETY: created by ch_metal_create; all buffers hold an Arc to
             // this inner and have been dropped before the last reference.
-            imp::tm_metal_destroy(self.raw);
+            imp::ch_metal_destroy(self.raw);
         }
     }
 }
@@ -778,19 +778,19 @@ fn err_text(buf: &[c_char]) -> String {
     }
 }
 
-fn metal_error(code: c_int, text: String, context: &str) -> TuckmillError {
+fn metal_error(code: c_int, text: String, context: &str) -> ChineError {
     #[cfg(target_os = "macos")]
     let mapped = match code {
-        imp::TM_METAL_ERR_NO_DEVICE => ErrorCode::Unavailable,
-        imp::TM_METAL_ERR_ALLOC => ErrorCode::Unavailable,
-        imp::TM_METAL_ERR_BOUNDS | imp::TM_METAL_ERR_UNSUPPORTED => ErrorCode::InvalidRequest,
-        imp::TM_METAL_ERR_SOURCE => ErrorCode::Internal,
-        imp::TM_METAL_ERR_INTERNAL => ErrorCode::Internal,
+        imp::CH_METAL_ERR_NO_DEVICE => ErrorCode::Unavailable,
+        imp::CH_METAL_ERR_ALLOC => ErrorCode::Unavailable,
+        imp::CH_METAL_ERR_BOUNDS | imp::CH_METAL_ERR_UNSUPPORTED => ErrorCode::InvalidRequest,
+        imp::CH_METAL_ERR_SOURCE => ErrorCode::Internal,
+        imp::CH_METAL_ERR_INTERNAL => ErrorCode::Internal,
         _ => ErrorCode::Internal,
     };
     #[cfg(not(target_os = "macos"))]
     let (mapped, _) = (ErrorCode::Unavailable, code);
-    TuckmillError::new(mapped, format!("Metal {context}: {text}"))
+    ChineError::new(mapped, format!("Metal {context}: {text}"))
 }
 
 /// Bytes of scratch [`MetalContext::argmax_f32`] needs (64 value/index
@@ -817,7 +817,7 @@ impl MetalContext {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = msl_source;
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 "Metal contexts are only available on macOS",
             ));
@@ -825,19 +825,19 @@ impl MetalContext {
         #[cfg(target_os = "macos")]
         {
             let source = CString::new(msl_source).map_err(|_| {
-                TuckmillError::new(ErrorCode::InvalidRequest, "MSL source contains a NUL byte")
+                ChineError::new(ErrorCode::InvalidRequest, "MSL source contains a NUL byte")
             })?;
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: source is a valid NUL-terminated string; err points to
             // a writable buffer of ERR_CAP bytes.
-            let raw = unsafe { imp::tm_metal_create(source.as_ptr(), err.as_mut_ptr(), ERR_CAP) };
+            let raw = unsafe { imp::ch_metal_create(source.as_ptr(), err.as_mut_ptr(), ERR_CAP) };
             if raw.is_null() {
                 let mut text = err_text(&err);
                 if !probe().available {
                     text = format!("no Metal device available ({text})");
                 }
                 return Err(
-                    metal_error(imp::TM_METAL_ERR_NO_DEVICE, text, "create").with_action(
+                    metal_error(imp::CH_METAL_ERR_NO_DEVICE, text, "create").with_action(
                         "Ensure the machine has a Metal-capable GPU and the process may use it.",
                     ),
                 );
@@ -860,7 +860,7 @@ impl MetalContext {
         #[cfg(target_os = "macos")]
         unsafe {
             // SAFETY: raw is valid while the inner lives.
-            imp::tm_metal_allocated_bytes(self.inner.raw)
+            imp::ch_metal_allocated_bytes(self.inner.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -871,7 +871,7 @@ impl MetalContext {
     pub fn committed_dispatches(&self) -> u64 {
         #[cfg(target_os = "macos")]
         unsafe {
-            imp::tm_metal_committed_dispatches(self.inner.raw)
+            imp::ch_metal_committed_dispatches(self.inner.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -882,7 +882,7 @@ impl MetalContext {
     pub fn completed_dispatches(&self) -> u64 {
         #[cfg(target_os = "macos")]
         unsafe {
-            imp::tm_metal_completed_dispatches(self.inner.raw)
+            imp::ch_metal_completed_dispatches(self.inner.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -896,7 +896,7 @@ impl MetalContext {
         #[cfg(target_os = "macos")]
         unsafe {
             // SAFETY: raw is valid while the inner lives.
-            imp::tm_metal_in_flight_bytes(self.inner.raw)
+            imp::ch_metal_in_flight_bytes(self.inner.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -916,7 +916,7 @@ impl MetalContext {
     pub fn last_gpu_ms(&self) -> f64 {
         #[cfg(target_os = "macos")]
         unsafe {
-            imp::tm_metal_last_gpu_ms(self.inner.raw)
+            imp::ch_metal_last_gpu_ms(self.inner.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -930,7 +930,7 @@ impl MetalContext {
         #[cfg(target_os = "macos")]
         unsafe {
             // SAFETY: raw is valid while the inner lives.
-            imp::tm_metal_gpu_nanos_total(self.inner.raw)
+            imp::ch_metal_gpu_nanos_total(self.inner.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -951,7 +951,7 @@ impl MetalContext {
         unsafe {
             // SAFETY: raw is valid while the inner lives; the call only
             // touches the context's lock-protected profile table.
-            imp::tm_metal_profile_set(self.inner.raw, enabled as c_int);
+            imp::ch_metal_profile_set(self.inner.raw, enabled as c_int);
         }
         #[cfg(not(target_os = "macos"))]
         let _ = enabled;
@@ -967,7 +967,7 @@ impl MetalContext {
         {
             // SAFETY: raw is valid while the inner lives; the call only
             // reads a capability flag.
-            unsafe { imp::tm_metal_counter_sampling_supported(self.inner.raw) != 0 }
+            unsafe { imp::ch_metal_counter_sampling_supported(self.inner.raw) != 0 }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -986,7 +986,7 @@ impl MetalContext {
             // SAFETY: raw is valid; the name buffer and out-pointers are
             // valid for the declared capacities.
             let found = unsafe {
-                imp::tm_metal_profile_read(
+                imp::ch_metal_profile_read(
                     self.inner.raw,
                     index,
                     name.as_mut_ptr(),
@@ -1013,7 +1013,7 @@ impl MetalContext {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (bytes, shared);
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 "Metal buffers are only available on macOS",
             ));
@@ -1021,7 +1021,7 @@ impl MetalContext {
         #[cfg(target_os = "macos")]
         {
             if bytes == 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     "zero-length Metal buffers are refused (allocation must be explicit)",
                 ));
@@ -1030,7 +1030,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw is valid under the lock; err is a writable buffer.
             let raw = unsafe {
-                imp::tm_metal_buffer_new(
+                imp::ch_metal_buffer_new(
                     self.inner.raw,
                     bytes,
                     if shared { 1 } else { 0 },
@@ -1040,7 +1040,7 @@ impl MetalContext {
             };
             if raw.is_null() {
                 return Err(metal_error(
-                    imp::TM_METAL_ERR_ALLOC,
+                    imp::CH_METAL_ERR_ALLOC,
                     err_text(&err),
                     "buffer",
                 ));
@@ -1060,7 +1060,7 @@ impl MetalContext {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = op;
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 format!("Metal {name} is only available on macOS"),
             ));
@@ -1085,7 +1085,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_f32_scale(ctx, xc, yc, factor, n, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_f32_scale(ctx, xc, yc, factor, n, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -1112,7 +1112,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_argmax_f32(ctx, xc, n, pc, oc, out_index, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_argmax_f32(ctx, xc, n, pc, oc, out_index, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -1140,7 +1140,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_conv_chunk(
+                imp::ch_metal_qwen35_conv_chunk(
                     ctx,
                     hc,
                     xc,
@@ -1176,7 +1176,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_split_qkv_chunk(
+                imp::ch_metal_qwen35_split_qkv_chunk(
                     ctx,
                     yc,
                     qc,
@@ -1228,7 +1228,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_beta_decay_chunk(
+                imp::ch_metal_qwen35_beta_decay_chunk(
                     ctx,
                     r.0,
                     r.1,
@@ -1281,7 +1281,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_gdn_chunk(
+                imp::ch_metal_qwen35_gdn_chunk(
                     ctx,
                     r.0,
                     r.1,
@@ -1346,7 +1346,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_gdn_chunk_snap(
+                imp::ch_metal_qwen35_gdn_chunk_snap(
                     ctx,
                     r.0,
                     r.1,
@@ -1390,7 +1390,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_conv_chunk_shift(
+                imp::ch_metal_qwen35_conv_chunk_shift(
                     ctx,
                     hc,
                     xc,
@@ -1412,7 +1412,7 @@ impl MetalContext {
         unsafe {
             // SAFETY: raw is valid while the inner lives; the call only sets
             // a dispatch-selection flag.
-            imp::tm_metal_set_gdn_chunk_generic(self.inner.raw, generic as c_int);
+            imp::ch_metal_set_gdn_chunk_generic(self.inner.raw, generic as c_int);
         }
         #[cfg(not(target_os = "macos"))]
         let _ = generic;
@@ -1440,7 +1440,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_rope_partial_chunk(
+                imp::ch_metal_qwen35_rope_partial_chunk(
                     ctx,
                     qc,
                     kc,
@@ -1506,12 +1506,12 @@ impl MetalContext {
         let (label, f) = if f32_cache {
             (
                 "qwen35_kv_store_f32_chunk",
-                imp::tm_metal_qwen35_kv_store_f32_chunk as imp::KvChunkFn,
+                imp::ch_metal_qwen35_kv_store_f32_chunk as imp::KvChunkFn,
             )
         } else {
             (
                 "qwen35_kv_store_f16_chunk",
-                imp::tm_metal_qwen35_kv_store_f16_chunk as imp::KvChunkFn,
+                imp::ch_metal_qwen35_kv_store_f16_chunk as imp::KvChunkFn,
             )
         };
         self.operate(label, move |ctx| {
@@ -1595,12 +1595,12 @@ impl MetalContext {
         let (label, f) = if f32_cache {
             (
                 "qwen35_attention_f32_chunk",
-                imp::tm_metal_qwen35_attention_f32_chunk as imp::AttnChunkFn,
+                imp::ch_metal_qwen35_attention_f32_chunk as imp::AttnChunkFn,
             )
         } else {
             (
                 "qwen35_attention_f16_chunk",
-                imp::tm_metal_qwen35_attention_f16_chunk as imp::AttnChunkFn,
+                imp::ch_metal_qwen35_attention_f16_chunk as imp::AttnChunkFn,
             )
         };
         self.operate(label, move |ctx| {
@@ -1652,7 +1652,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_row_indirect_f32(
+                imp::ch_metal_row_indirect_f32(
                     ctx,
                     wc,
                     type_id,
@@ -1686,7 +1686,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_copy_f32(ctx, sc, src_off, dc, dst_off, n, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_copy_f32(ctx, sc, src_off, dc, dst_off, n, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -1700,7 +1700,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code =
-                unsafe { imp::tm_metal_f32_axpy(ctx, ac, yc, alpha, n, err.as_mut_ptr(), ERR_CAP) };
+                unsafe { imp::ch_metal_f32_axpy(ctx, ac, yc, alpha, n, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -1714,7 +1714,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code =
-                unsafe { imp::tm_metal_cast_f16_f32(ctx, xc, yc, n, err.as_mut_ptr(), ERR_CAP) };
+                unsafe { imp::ch_metal_cast_f16_f32(ctx, xc, yc, n, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -1728,7 +1728,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code =
-                unsafe { imp::tm_metal_cast_f32_f16(ctx, xc, yc, n, err.as_mut_ptr(), ERR_CAP) };
+                unsafe { imp::ch_metal_cast_f32_f16(ctx, xc, yc, n, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -1752,7 +1752,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_q8_0_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_q8_0_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -1765,7 +1765,7 @@ impl MetalContext {
         self.operate("begin_group", |ctx| {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: caller holds the lock; ctx is valid.
-            let code = unsafe { imp::tm_metal_begin_group(ctx, err.as_mut_ptr(), ERR_CAP) };
+            let code = unsafe { imp::ch_metal_begin_group(ctx, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -1775,7 +1775,7 @@ impl MetalContext {
         self.operate("end_group", |ctx| {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: caller holds the lock; ctx is valid.
-            let code = unsafe { imp::tm_metal_end_group(ctx, err.as_mut_ptr(), ERR_CAP) };
+            let code = unsafe { imp::ch_metal_end_group(ctx, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -1786,7 +1786,7 @@ impl MetalContext {
         self.operate("abort_group", |ctx| {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: caller holds the lock; ctx is valid.
-            let code = unsafe { imp::tm_metal_abort_group(ctx, err.as_mut_ptr(), ERR_CAP) };
+            let code = unsafe { imp::ch_metal_abort_group(ctx, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -1811,7 +1811,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_conv_step(
+                imp::ch_metal_qwen35_conv_step(
                     ctx,
                     hc,
                     xc,
@@ -1843,7 +1843,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_conv_shift(
+                imp::ch_metal_qwen35_conv_shift(
                     ctx,
                     hc,
                     xc,
@@ -1872,7 +1872,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_l2norm_heads(
+                imp::ch_metal_qwen35_l2norm_heads(
                     ctx,
                     xc,
                     yc,
@@ -1914,7 +1914,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_beta_decay(
+                imp::ch_metal_qwen35_beta_decay(
                     ctx,
                     bc,
                     ac,
@@ -1957,7 +1957,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_gdn_step(
+                imp::ch_metal_qwen35_gdn_step(
                     ctx,
                     qc,
                     kc,
@@ -1998,7 +1998,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_gated_norm(
+                imp::ch_metal_qwen35_gated_norm(
                     ctx,
                     oc,
                     zc,
@@ -2033,7 +2033,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_q_gate_split(
+                imp::ch_metal_qwen35_q_gate_split(
                     ctx,
                     gc,
                     qc,
@@ -2069,7 +2069,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_rope_partial(
+                imp::ch_metal_qwen35_rope_partial(
                     ctx,
                     qc,
                     kc,
@@ -2108,7 +2108,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_kv_store_f16(
+                imp::ch_metal_qwen35_kv_store_f16(
                     ctx,
                     ks,
                     vs,
@@ -2150,7 +2150,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_attention_f16(
+                imp::ch_metal_qwen35_attention_f16(
                     ctx,
                     qc,
                     kc,
@@ -2179,7 +2179,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_attn_gate(ctx, ac, gc, n, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_qwen35_attn_gate(ctx, ac, gc, n, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -2192,7 +2192,7 @@ impl MetalContext {
         self.operate("qwen35_silu", move |ctx| {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handle was validated against this context.
-            let code = unsafe { imp::tm_metal_qwen35_silu(ctx, xc, n, err.as_mut_ptr(), ERR_CAP) };
+            let code = unsafe { imp::ch_metal_qwen35_silu(ctx, xc, n, err.as_mut_ptr(), ERR_CAP) };
             (code, err)
         })
     }
@@ -2214,7 +2214,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qwen35_split_qkv(
+                imp::ch_metal_qwen35_split_qkv(
                     ctx,
                     yc,
                     qc,
@@ -2244,7 +2244,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_q8_0_row_f32(
+                imp::ch_metal_q8_0_row_f32(
                     ctx,
                     wc,
                     oc,
@@ -2276,7 +2276,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_f16_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_f16_gemv(ctx, wc, xc, yc, rows, cols, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -2297,7 +2297,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_f16_row_f32(
+                imp::ch_metal_f16_row_f32(
                     ctx,
                     wc,
                     oc,
@@ -2330,7 +2330,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_rmsnorm_f32(
+                imp::ch_metal_rmsnorm_f32(
                     ctx,
                     xc,
                     wc,
@@ -2373,7 +2373,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_norm_add_f32(
+                imp::ch_metal_norm_add_f32(
                     ctx,
                     xc,
                     wc,
@@ -2432,7 +2432,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_qk_norm_f32(
+                imp::ch_metal_qk_norm_f32(
                     ctx,
                     qc,
                     qwc,
@@ -2468,7 +2468,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_silu_mul_f32(ctx, gc, uc, oc, n, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_silu_mul_f32(ctx, gc, uc, oc, n, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -2490,7 +2490,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_gelu_tanh_mul_f32(ctx, gc, uc, oc, n, err.as_mut_ptr(), ERR_CAP)
+                imp::ch_metal_gelu_tanh_mul_f32(ctx, gc, uc, oc, n, err.as_mut_ptr(), ERR_CAP)
             };
             (code, err)
         })
@@ -2520,7 +2520,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_q8_0_gemm_mma(
+                imp::ch_metal_q8_0_gemm_mma(
                     ctx,
                     wc,
                     xc,
@@ -2564,7 +2564,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_q8_0_gemm_mma_f16op(
+                imp::ch_metal_q8_0_gemm_mma_f16op(
                     ctx,
                     wc,
                     xc,
@@ -2605,7 +2605,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_q8_0_gemm(
+                imp::ch_metal_q8_0_gemm(
                     ctx,
                     wc,
                     xc,
@@ -2644,7 +2644,7 @@ impl MetalContext {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
-                imp::tm_metal_f16_gemm(
+                imp::ch_metal_f16_gemm(
                     ctx,
                     wc,
                     xc,
@@ -2669,7 +2669,7 @@ impl MetalContext {
             {
                 let mut err = [0 as c_char; ERR_CAP];
                 // SAFETY: caller holds the lock; raw is valid.
-                let code = unsafe { imp::tm_metal_fence(_ctx, err.as_mut_ptr(), ERR_CAP) };
+                let code = unsafe { imp::ch_metal_fence(_ctx, err.as_mut_ptr(), ERR_CAP) };
                 (code, err)
             }
             #[cfg(not(target_os = "macos"))]
@@ -2681,7 +2681,7 @@ impl MetalContext {
 
     fn check_owned(&self, buffer: &MetalBuffer, name: &str) -> Result<()> {
         if !Arc::ptr_eq(&self.inner, &buffer.ctx) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("Metal {name} buffer belongs to a different context"),
             ));
@@ -2717,7 +2717,7 @@ impl MetalBuffer {
     pub fn len(&self) -> usize {
         #[cfg(target_os = "macos")]
         unsafe {
-            imp::tm_metal_buffer_len(self.ctx.raw, self.raw)
+            imp::ch_metal_buffer_len(self.ctx.raw, self.raw)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2736,7 +2736,7 @@ impl MetalBuffer {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (offset, len);
-            return Err(TuckmillError::new(ErrorCode::Unavailable, "no Metal"));
+            return Err(ChineError::new(ErrorCode::Unavailable, "no Metal"));
         }
         #[cfg(target_os = "macos")]
         {
@@ -2744,7 +2744,7 @@ impl MetalBuffer {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: raw handle was validated against this context.
             let code = unsafe {
-                imp::tm_metal_buffer_zero(
+                imp::ch_metal_buffer_zero(
                     self.ctx.raw,
                     self.raw,
                     offset,
@@ -2764,7 +2764,7 @@ impl MetalBuffer {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (offset, data);
-            return Err(TuckmillError::new(ErrorCode::Unavailable, "no Metal"));
+            return Err(ChineError::new(ErrorCode::Unavailable, "no Metal"));
         }
         #[cfg(target_os = "macos")]
         {
@@ -2772,7 +2772,7 @@ impl MetalBuffer {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: handles valid; data slice pointer/len valid for read.
             let code = unsafe {
-                imp::tm_metal_upload(
+                imp::ch_metal_upload(
                     self.ctx.raw,
                     self.raw,
                     offset,
@@ -2794,7 +2794,7 @@ impl MetalBuffer {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (offset, dst);
-            return Err(TuckmillError::new(ErrorCode::Unavailable, "no Metal"));
+            return Err(ChineError::new(ErrorCode::Unavailable, "no Metal"));
         }
         #[cfg(target_os = "macos")]
         {
@@ -2802,7 +2802,7 @@ impl MetalBuffer {
             let mut err = [0 as c_char; ERR_CAP];
             // SAFETY: handles valid; dst slice pointer/len valid for write.
             let code = unsafe {
-                imp::tm_metal_download(
+                imp::ch_metal_download(
                     self.ctx.raw,
                     self.raw,
                     offset,
@@ -2833,7 +2833,7 @@ impl MetalBuffer {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (offset, dst, completed_target);
-            return Err(TuckmillError::new(ErrorCode::Unavailable, "no Metal"));
+            return Err(ChineError::new(ErrorCode::Unavailable, "no Metal"));
         }
         #[cfg(target_os = "macos")]
         {
@@ -2842,7 +2842,7 @@ impl MetalBuffer {
             // No lock: the wait must not block encoding of later work, and
             // the call only reads atomics and the shared contents.
             let code = unsafe {
-                imp::tm_metal_download_after(
+                imp::ch_metal_download_after(
                     self.ctx.raw,
                     self.raw,
                     offset,
@@ -2865,9 +2865,9 @@ impl MetalBuffer {
 impl Drop for MetalBuffer {
     fn drop(&mut self) {
         let _guard = self.ctx.lock.lock().expect("metal lock");
-        // SAFETY: created by tm_metal_buffer_new against this context; freed
+        // SAFETY: created by ch_metal_buffer_new against this context; freed
         // exactly once because Drop runs once.
-        unsafe { imp::tm_metal_buffer_free(self.ctx.raw, self.raw) };
+        unsafe { imp::ch_metal_buffer_free(self.ctx.raw, self.raw) };
     }
 }
 

@@ -1,12 +1,12 @@
 # ADR-010: Kernel sourcing, precision profiles, and kernel acceptance
 
 Status: **accepted** (2026-10-26). Extends ADR-007 (Metal ABI) and ADR-005
-(TuckCore). Does not change AGENTS rule 6: the llama.cpp reference backend
+(ChineCore). Does not change AGENTS rule 6: the llama.cpp reference backend
 stays pinned and runtime-loaded.
 
 ## Context
 
-TuckCore's Metal path is correct-first. It uses one simdgroup per row,
+ChineCore's Metal path is correct-first. It uses one simdgroup per row,
 byte loads, GEMM that re-reads activations per row, f32 activations, and
 f32 dense KV. It executes only Q8_0/F16; K-quants and IQ formats are
 refused. The Phase 0 baseline measures the gap against pinned llama.cpp
@@ -18,10 +18,10 @@ written for exactly these block formats.
 1. **Port, attribute, pin.** Quantized kernels for Q4_0, Q8_0, Q4_K, Q5_K,
    Q6_K and IQ4_XS are ported from ggml-metal at the pinned llama.cpp
    revision (b11695) into `native/metal/kernels_ggml.metal`, adapted to the
-   TuckCore ABI. The file header names the source path, the revision and
+   ChineCore ABI. The file header names the source path, the revision and
    the upstream file's SHA-256. `THIRD_PARTY_NOTICES` carries the MIT
    license text. This is porting source, not vendoring the reference
-   backend, which keeps loading at runtime and never becomes the TuckCore
+   backend, which keeps loading at runtime and never becomes the ChineCore
    execution path.
 2. **Block layouts are derived, never hand-written.** Block sizes, scale
    packing and grid tables come from the pinned `ggml.rs` constants and the

@@ -1,5 +1,5 @@
 // Times the pinned llama.cpp/ggml Metal mul_mat (Q8_0 weights x f32
-// activations) in isolation, for comparison with TuckCore's matrix-unit
+// activations) in isolation, for comparison with ChineCore's matrix-unit
 // GEMM (`q8_0_gemm_mma_grouped_wall_timing_when_requested` in
 // crates/metal/src/tests.rs, which uses the same method: 16 serial
 // dispatches, wall time per dispatch). Measurement only; never a gate.

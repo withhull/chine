@@ -4,7 +4,7 @@ Prompts are rendered with Jinja2 configured the way Hugging Face applies
 chat templates (sandboxed, trim_blocks + lstrip_blocks, loopcontrols,
 `raise_exception`), from the template bytes declared by each pinned GGUF.
 Token ids come from the pinned llama.cpp `llama-tokenize` tool (special
-spellings parsed), not from Tuckmill's encoder, so the goldens are
+spellings parsed), not from Chine's encoder, so the goldens are
 independent of the code they test.
 
 Usage (no network; run in the mlx venv, which provides jinja2):

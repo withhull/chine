@@ -15,7 +15,7 @@ pub use graph::{
     AttentionSpec, FfnSpec, GatedDeltaNetSpec, LayerSpec, MixerSpec, ModelGraph, MtpSpec, Tensor,
 };
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 /// Read access to an artifact's tensors by inspection index. Blocks see
 /// weights only through this trait.
@@ -45,11 +45,11 @@ impl GgufWeights {
     /// import record and verifies the handle's content digest first).
     pub fn with_inspection(
         file: &std::fs::File,
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
     ) -> Result<Self> {
         Ok(Self {
             file: file.try_clone().map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::StorageLost,
                     format!("cannot clone the verified artifact handle: {e}"),
                 )
@@ -60,7 +60,7 @@ impl GgufWeights {
 
     fn meta_of(&self, tensor_index: usize) -> Result<&crate::qwen35_forward::TensorMeta> {
         self.meta.get(tensor_index).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::Internal,
                 format!("tensor index {tensor_index} is outside the inspected range"),
             )
@@ -86,7 +86,7 @@ impl WeightSource for GgufWeights {
         use std::os::unix::fs::FileExt;
         let m = *self.meta_of(tensor_index)?;
         if offset + dst.len() as u64 > m.byte_size {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("tensor {tensor_index} read past its {} bytes", m.byte_size),
             ));
@@ -97,10 +97,10 @@ impl WeightSource for GgufWeights {
                 .file
                 .read_at(&mut dst[done..], m.offset + offset + done as u64)
                 .map_err(|e| {
-                    TuckmillError::new(ErrorCode::StorageLost, format!("artifact read failed: {e}"))
+                    ChineError::new(ErrorCode::StorageLost, format!("artifact read failed: {e}"))
                 })?;
             if n == 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::StorageLost,
                     "artifact ended early while reading a tensor",
                 ));

@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use tuckmill_manifest::error::{ErrorCode, TuckmillError};
-use tuckmill_manifest::ids::{now_unix_ms, secure_random_hex};
+use chine_manifest::error::{ChineError, ErrorCode};
+use chine_manifest::ids::{now_unix_ms, secure_random_hex};
 
 use crate::bundle::{ChatMessageSpec, ChatRole, ModelBundle, RequestMode, RequestSpec};
 use crate::runtime::{RunEvent, Runtime};
@@ -68,16 +68,16 @@ pub struct ChatCompletionRequest {
 fn request_keep_alive(
     keep_alive: Option<&serde_json::Value>,
     ttl: Option<&serde_json::Value>,
-) -> Result<Option<Option<std::time::Duration>>, TuckmillError> {
+) -> Result<Option<Option<std::time::Duration>>, ChineError> {
     match (keep_alive, ttl) {
-        (Some(_), Some(_)) => Err(TuckmillError::new(
+        (Some(_), Some(_)) => Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "set keep_alive or ttl, not both",
         )),
         (Some(k), None) => crate::runtime::keep_alive_from_json(k).map(Some),
         (None, Some(t)) => match t.as_f64() {
             Some(secs) if secs >= 0.0 => crate::runtime::keep_alive_from_json(t).map(Some),
-            _ => Err(TuckmillError::new(
+            _ => Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "ttl must be a non-negative number of seconds",
             )),
@@ -98,9 +98,9 @@ struct ModelControlRequest {
     ttl: Option<serde_json::Value>,
 }
 
-fn validate_chat_request(req: &ChatCompletionRequest) -> Result<(), TuckmillError> {
+fn validate_chat_request(req: &ChatCompletionRequest) -> Result<(), ChineError> {
     if req.messages.is_empty() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "messages must contain at least one message",
         ));
@@ -109,7 +109,7 @@ fn validate_chat_request(req: &ChatCompletionRequest) -> Result<(), TuckmillErro
         match m.role.as_str() {
             "system" | "user" | "assistant" => {}
             other => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!(
                         "role {other:?} is not supported; supported roles: system, user, assistant"
@@ -120,7 +120,7 @@ fn validate_chat_request(req: &ChatCompletionRequest) -> Result<(), TuckmillErro
     }
     if let Some(t) = req.temperature {
         if !(0.0..=2.0).contains(&t) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "temperature must be within 0.0..=2.0",
             ));
@@ -128,7 +128,7 @@ fn validate_chat_request(req: &ChatCompletionRequest) -> Result<(), TuckmillErro
     }
     if let Some(p) = req.top_p {
         if !(0.0..=1.0).contains(&p) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "top_p must be within 0.0..=1.0",
             ));
@@ -136,20 +136,20 @@ fn validate_chat_request(req: &ChatCompletionRequest) -> Result<(), TuckmillErro
     }
     if let Some(stop) = &req.stop {
         if stop.len() > 4 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "at most 4 stop sequences are supported",
             ));
         }
         if stop.iter().any(|s| s.is_empty()) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "stop sequences must be non-empty",
             ));
         }
     }
     if let Some(0) = req.max_tokens {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "max_tokens must be positive",
         ));
@@ -166,26 +166,26 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-fn read_request(stream: &mut BufReader<TcpStream>) -> Result<Option<HttpRequest>, TuckmillError> {
+fn read_request(stream: &mut BufReader<TcpStream>) -> Result<Option<HttpRequest>, ChineError> {
     let mut request_line = String::new();
     match stream.read_line(&mut request_line) {
         Ok(0) => return Ok(None),
         Ok(_) => {}
-        Err(e) => return Err(TuckmillError::from(e)),
+        Err(e) => return Err(ChineError::from(e)),
     }
     let request_line = request_line.trim_end();
     let mut parts = request_line.split(' ');
     let (method, path) = match (parts.next(), parts.next(), parts.next()) {
         (Some(m), Some(p), Some(v)) if v.starts_with("HTTP/1.") => (m.to_string(), p.to_string()),
         _ => {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "malformed request line",
             ))
         }
     };
     if path.len() > 2048 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "request path is too long",
         ));
@@ -194,10 +194,10 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<Option<HttpRequest>
     let mut header_bytes = request_line.len();
     loop {
         let mut line = String::new();
-        stream.read_line(&mut line).map_err(TuckmillError::from)?;
+        stream.read_line(&mut line).map_err(ChineError::from)?;
         header_bytes += line.len();
         if header_bytes > MAX_HEADER_BYTES {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "request headers exceed the size cap",
             ));
@@ -213,7 +213,7 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<Option<HttpRequest>
     // Body: Content-Length only; chunked transfer is not part of the subset.
     let mut body = Vec::new();
     if let Some(te) = headers.get("transfer-encoding") {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!("transfer-encoding {te:?} is not supported; use content-length"),
         ));
@@ -221,15 +221,15 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<Option<HttpRequest>
     if let Some(len) = headers.get("content-length") {
         let len: usize = len
             .parse()
-            .map_err(|_| TuckmillError::new(ErrorCode::InvalidRequest, "invalid content-length"))?;
+            .map_err(|_| ChineError::new(ErrorCode::InvalidRequest, "invalid content-length"))?;
         if len > MAX_BODY_BYTES {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("request body exceeds {MAX_BODY_BYTES} bytes"),
             ));
         }
         body.resize(len, 0);
-        stream.read_exact(&mut body).map_err(TuckmillError::from)?;
+        stream.read_exact(&mut body).map_err(ChineError::from)?;
     }
     Ok(Some(HttpRequest {
         method,
@@ -255,7 +255,7 @@ fn respond_json(
     stream.flush()
 }
 
-fn respond_error(stream: &mut TcpStream, err: &TuckmillError) {
+fn respond_error(stream: &mut TcpStream, err: &ChineError) {
     let status = match err.code() {
         ErrorCode::InvalidRequest => 400,
         ErrorCode::QueueFull => 429,
@@ -274,11 +274,11 @@ fn respond_error(stream: &mut TcpStream, err: &TuckmillError) {
 
 /// Load or create the local API credential. The file lives in the store's
 /// control directory with user-only permissions and is never logged.
-pub fn load_or_create_token(control_dir: &std::path::Path) -> Result<String, TuckmillError> {
-    std::fs::create_dir_all(control_dir).map_err(TuckmillError::from)?;
+pub fn load_or_create_token(control_dir: &std::path::Path) -> Result<String, ChineError> {
+    std::fs::create_dir_all(control_dir).map_err(ChineError::from)?;
     let path = control_dir.join("api-token");
     if path.exists() {
-        let token = std::fs::read_to_string(&path).map_err(TuckmillError::from)?;
+        let token = std::fs::read_to_string(&path).map_err(ChineError::from)?;
         let token = token.trim().to_string();
         if !token.is_empty() {
             return Ok(token);
@@ -286,14 +286,14 @@ pub fn load_or_create_token(control_dir: &std::path::Path) -> Result<String, Tuc
     }
     let token = secure_random_hex(32)?;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &token).map_err(TuckmillError::from)?;
+    std::fs::write(&tmp, &token).map_err(ChineError::from)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
     }
-    std::fs::rename(&tmp, &path).map_err(TuckmillError::from)?;
+    std::fs::rename(&tmp, &path).map_err(ChineError::from)?;
     Ok(token)
 }
 
@@ -322,14 +322,14 @@ impl ApiServer {
         runtime: Arc<Runtime>,
         port: u16,
         token: Option<String>,
-    ) -> Result<Self, TuckmillError> {
+    ) -> Result<Self, ChineError> {
         let token = match token {
             Some(t) => t,
             None => load_or_create_token(&runtime.layout.control_dir())?,
         };
         // Loopback only, by construction (PRD §16).
         let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidConfiguration,
                 format!("cannot bind 127.0.0.1:{port}: {e}"),
             )
@@ -351,10 +351,10 @@ impl ApiServer {
 
     /// Serve until `shutdown` is set. One accept loop plus bounded
     /// per-connection threads.
-    pub fn serve(self, shutdown: Arc<AtomicBool>) -> Result<(), TuckmillError> {
+    pub fn serve(self, shutdown: Arc<AtomicBool>) -> Result<(), ChineError> {
         self.listener
             .set_nonblocking(true)
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
         while !shutdown.load(Ordering::Relaxed) {
             match self.listener.accept() {
                 Ok((stream, _)) => {
@@ -363,11 +363,11 @@ impl ApiServer {
                     // a client's bytes arrive after the headers. Connection
                     // threads use blocking I/O bounded by read timeouts.
                     if let Err(e) = stream.set_nonblocking(false) {
-                        return Err(TuckmillError::from(e));
+                        return Err(ChineError::from(e));
                     }
                     if self.conn_count.load(Ordering::Relaxed) >= MAX_CONNECTIONS as u64 {
                         let mut s = stream;
-                        let err = TuckmillError::new(
+                        let err = ChineError::new(
                             ErrorCode::QueueFull,
                             "too many concurrent connections",
                         );
@@ -379,17 +379,17 @@ impl ApiServer {
                     let count = self.conn_count.clone();
                     count.fetch_add(1, Ordering::Relaxed);
                     std::thread::Builder::new()
-                        .name("tuckmill-http".into())
+                        .name("chine-http".into())
                         .spawn(move || {
                             let _guard = ConnGuard(count);
                             let _ = handle_connection(runtime, token, stream);
                         })
-                        .map_err(TuckmillError::from)?;
+                        .map_err(ChineError::from)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(e) => return Err(TuckmillError::from(e)),
+                Err(e) => return Err(ChineError::from(e)),
             }
         }
         Ok(())
@@ -408,11 +408,11 @@ fn handle_connection(
     runtime: Arc<Runtime>,
     token: String,
     stream: TcpStream,
-) -> Result<(), TuckmillError> {
+) -> Result<(), ChineError> {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(TuckmillError::from)?;
-    let mut reader = BufReader::new(stream.try_clone().map_err(TuckmillError::from)?);
+        .map_err(ChineError::from)?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(ChineError::from)?);
     let mut stream = stream;
     let request = match read_request(&mut reader) {
         Ok(Some(r)) => r,
@@ -432,7 +432,7 @@ fn handle_connection(
         if !host_ok {
             respond_error(
                 &mut stream,
-                &TuckmillError::new(
+                &ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("Host {host:?} is not accepted; bind is loopback-only"),
                 ),
@@ -442,7 +442,7 @@ fn handle_connection(
     } else {
         respond_error(
             &mut stream,
-            &TuckmillError::new(ErrorCode::InvalidRequest, "Host header is required"),
+            &ChineError::new(ErrorCode::InvalidRequest, "Host header is required"),
         );
         return Ok(());
     }
@@ -451,7 +451,7 @@ fn handle_connection(
         if origin != "null" {
             respond_error(
                 &mut stream,
-                &TuckmillError::new(
+                &ChineError::new(
                     ErrorCode::InvalidRequest,
                     "cross-origin requests are not enabled",
                 ),
@@ -548,7 +548,7 @@ fn handle_connection(
                 }
                 None => respond_error(
                     &mut stream,
-                    &TuckmillError::new(
+                    &ChineError::new(
                         ErrorCode::QueueFull,
                         "a generation is running; its model is not idle",
                     )
@@ -579,7 +579,7 @@ fn handle_connection(
         _ => {
             respond_error(
                 &mut stream,
-                &TuckmillError::new(
+                &ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("no route for {} {path}", request.method),
                 ),
@@ -589,12 +589,12 @@ fn handle_connection(
     }
 }
 
-fn parse_control(body: &[u8]) -> Result<ModelControlRequest, TuckmillError> {
+fn parse_control(body: &[u8]) -> Result<ModelControlRequest, ChineError> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(ModelControlRequest::default());
     }
     serde_json::from_slice(body).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidRequest,
             format!("control body must be {{\"model\", \"keep_alive\" | \"ttl\"}}: {e}"),
         )
@@ -603,11 +603,11 @@ fn parse_control(body: &[u8]) -> Result<ModelControlRequest, TuckmillError> {
 
 /// `POST /control/load {"model", "keep_alive"?}`: load (or keep) a model
 /// under the same admission as a request, and set its keep-alive.
-fn control_load(runtime: &Arc<Runtime>, body: &[u8]) -> Result<serde_json::Value, TuckmillError> {
+fn control_load(runtime: &Arc<Runtime>, body: &[u8]) -> Result<serde_json::Value, ChineError> {
     let c = parse_control(body)?;
     let model = c
         .model
-        .ok_or_else(|| TuckmillError::new(ErrorCode::InvalidRequest, "load needs a model"))?;
+        .ok_or_else(|| ChineError::new(ErrorCode::InvalidRequest, "load needs a model"))?;
     let keep_alive = request_keep_alive(c.keep_alive.as_ref(), c.ttl.as_ref())?;
     let (artifact, adapter) = runtime.resolve_artifact(&model)?;
     let plan = runtime.plan_for(
@@ -619,7 +619,7 @@ fn control_load(runtime: &Arc<Runtime>, body: &[u8]) -> Result<serde_json::Value
     )?;
     runtime.plan_admitted(&plan)?;
     runtime.admit_engine(&plan)?;
-    let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+    let artifact_ref = chine_backend::ArtifactRef::from_record(
         &artifact,
         &runtime.layout.artifact_payload_path(&artifact.artifact_id),
     );
@@ -634,21 +634,21 @@ fn control_load(runtime: &Arc<Runtime>, body: &[u8]) -> Result<serde_json::Value
 
 fn list_models(runtime: &Runtime) -> serde_json::Value {
     let mut data = Vec::new();
-    let aliases = tuckmill_store::aliases::AliasRegistry::load(&runtime.layout).unwrap_or_default();
+    let aliases = chine_store::aliases::AliasRegistry::load(&runtime.layout).unwrap_or_default();
     let reverse: BTreeMap<&str, &String> = aliases
         .aliases
         .iter()
         .map(|(a, id)| (id.as_str(), a))
         .collect();
-    if let Ok(manifests) = tuckmill_store::aliases::list_manifests(&runtime.layout) {
+    if let Ok(manifests) = chine_store::aliases::list_manifests(&runtime.layout) {
         for m in manifests {
             let id = m.artifact_id.as_str();
             data.push(serde_json::json!({
                 "id": id,
                 "object": "model",
                 "created": m.created_unix_ms / 1000,
-                "owned_by": "tuckmill",
-                "tuckmill": {
+                "owned_by": "chine",
+                "chine": {
                     "alias": reverse.get(id).map(|a| a.as_str()),
                     "arch_id": m.arch_id,
                     "quant_label": m.quant_label,
@@ -663,7 +663,7 @@ fn list_models(runtime: &Runtime) -> serde_json::Value {
     serde_json::json!({"object": "list", "data": data})
 }
 
-fn latest_bench(runtime: &Runtime) -> Result<serde_json::Value, TuckmillError> {
+fn latest_bench(runtime: &Runtime) -> Result<serde_json::Value, ChineError> {
     let dir = runtime.layout.bench_dir();
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -681,16 +681,16 @@ fn latest_bench(runtime: &Runtime) -> Result<serde_json::Value, TuckmillError> {
     }
     match newest {
         Some((_, path)) => {
-            let bytes = std::fs::read(&path).map_err(TuckmillError::from)?;
+            let bytes = std::fs::read(&path).map_err(ChineError::from)?;
             serde_json::from_slice(&bytes).map_err(|e| {
-                tuckmill_manifest::error::json_error(
+                chine_manifest::error::json_error(
                     e,
                     ErrorCode::IntegrityFailure,
                     "benchmark record",
                 )
             })
         }
-        None => Err(TuckmillError::new(
+        None => Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "no benchmark runs recorded yet",
         )),
@@ -703,7 +703,7 @@ fn handle_chat_completions(runtime: Arc<Runtime>, mut stream: TcpStream, body: &
         Err(e) => {
             // Strict schemas: unknown/unsupported fields are rejected
             // explicitly, with the supported subset stated.
-            let err = TuckmillError::new(
+            let err = ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("request does not match the supported chat-completions subset: {e}"),
             )
@@ -745,7 +745,7 @@ fn handle_chat_completions(runtime: Arc<Runtime>, mut stream: TcpStream, body: &
         }
     };
     let max_tokens = request.max_tokens.unwrap_or(runtime.default_max_output);
-    let sampling = tuckmill_backend::SamplingPolicy {
+    let sampling = chine_backend::SamplingPolicy {
         temperature: request.temperature.unwrap_or(0.0) as f32,
         top_p: request.top_p.map(|p| p as f32),
     };
@@ -805,7 +805,7 @@ fn handle_chat_completions(runtime: Arc<Runtime>, mut stream: TcpStream, body: &
             return;
         }
     };
-    let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+    let artifact_ref = chine_backend::ArtifactRef::from_record(
         &artifact,
         &runtime.layout.artifact_payload_path(&artifact.artifact_id),
     );
@@ -850,12 +850,12 @@ struct CompletionMeta {
     completion_id: String,
     created: u64,
     model: String,
-    plan: tuckmill_manifest::plan::ExecutionPlan,
+    plan: chine_manifest::plan::ExecutionPlan,
     spec: RequestSpec,
 }
 
-fn tuckmill_extension(
-    identity: &tuckmill_manifest::records::EngineIdentity,
+fn chine_extension(
+    identity: &chine_manifest::records::EngineIdentity,
     meta: &CompletionMeta,
     run: &crate::runtime::ActiveRun,
 ) -> serde_json::Value {
@@ -876,7 +876,7 @@ fn tuckmill_extension(
         "certified": identity.certified,
         "confidence": meta.plan.confidence,
         "performance_class": meta.plan.performance_class,
-        "synthetic_output": tuckmill_backend::is_synthetic_engine(&identity.engine),
+        "synthetic_output": chine_backend::is_synthetic_engine(&identity.engine),
         "tokenizer": meta.spec.tokenizer_label,
         "prompt": mode,
         "prompt_tokens": meta.spec.prompt_tokens.len(),
@@ -933,10 +933,10 @@ fn collect_json(
                         "completion_tokens": committed,
                         "total_tokens": prompt_tokens + committed,
                     },
-                    "tuckmill": tuckmill_extension(&identity, meta, run),
+                    "chine": chine_extension(&identity, meta, run),
                 });
                 let mut body = body;
-                body["tuckmill"]["generated_tokens"] = serde_json::json!(generated);
+                body["chine"]["generated_tokens"] = serde_json::json!(generated);
                 let _ = respond_json(stream, 200, "OK", &body);
                 return;
             }
@@ -945,7 +945,7 @@ fn collect_json(
                 message,
                 action,
             }) => {
-                let err = TuckmillError::new(
+                let err = ChineError::new(
                     serde_json::from_value::<ErrorCode>(serde_json::Value::String(code))
                         .unwrap_or(ErrorCode::WorkerFailed),
                     message,
@@ -955,7 +955,7 @@ fn collect_json(
                 return;
             }
             Err(_) => {
-                let err = TuckmillError::new(
+                let err = ChineError::new(
                     ErrorCode::WorkerFailed,
                     "run event stream closed unexpectedly",
                 );
@@ -990,7 +990,7 @@ fn stream_sse(
     let mut first = true;
     // The engine identity is read from the run-scoped snapshot exactly
     // once, at the first content chunk.
-    let mut identity: Option<tuckmill_manifest::records::EngineIdentity> = None;
+    let mut identity: Option<chine_manifest::records::EngineIdentity> = None;
     let mut role_sent = false;
     loop {
         match run.events.recv() {
@@ -1031,10 +1031,10 @@ fn stream_sse(
                         },
                         "finish_reason": serde_json::Value::Null,
                     }],
-                    "tuckmill": {
+                    "chine": {
                         "request_id": run.request_id,
                         "backend": identity.engine,
-                        "synthetic_output": tuckmill_backend::is_synthetic_engine(&identity.engine),
+                        "synthetic_output": chine_backend::is_synthetic_engine(&identity.engine),
                     },
                 });
                 if write_sse(stream, &chunk.to_string()).is_err() {
@@ -1065,7 +1065,7 @@ fn stream_sse(
                         "completion_tokens": committed,
                         "total_tokens": prompt_tokens + committed,
                     },
-                    "tuckmill": {
+                    "chine": {
                         "request_id": run.request_id,
                         "plan_id": meta.plan.plan_id.as_str(),
                         "committed_tokens": committed,
@@ -1088,7 +1088,7 @@ fn stream_sse(
                 message,
                 action,
             }) => {
-                let err = TuckmillError::new(
+                let err = ChineError::new(
                     serde_json::from_value::<ErrorCode>(serde_json::Value::String(code))
                         .unwrap_or(ErrorCode::WorkerFailed),
                     message,
@@ -1155,21 +1155,21 @@ mod tests {
 
     use super::*;
     use crate::runtime::RuntimeOptions;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
-    use tuckmill_manifest::units::Bytes;
-    use tuckmill_store::layout::StoreLayout;
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::units::Bytes;
+    use chine_store::layout::StoreLayout;
 
     fn test_server() -> (tempfile::TempDir, Arc<Runtime>, ApiServer, String) {
         let dir = tempfile::tempdir().unwrap();
         let layout = StoreLayout::open(dir.path().join("store"));
         let src = dir.path().join("m.gguf");
         write_synthetic(&src, &SyntheticConfig::tiny_qwen3()).unwrap();
-        let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
-        tuckmill_store::import::import_local(
+        let registry = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
+        chine_store::import::import_local(
             &layout,
             &registry,
             &src,
-            &tuckmill_store::import::ImportOptions {
+            &chine_store::import::ImportOptions {
                 alias: Some("local".into()),
                 ..Default::default()
             },
@@ -1453,10 +1453,10 @@ mod tests {
         );
         // The request is reported as a chat with the recognized template,
         // and greedy by default.
-        assert_eq!(body["tuckmill"]["prompt"]["kind"], "chat");
-        assert_eq!(body["tuckmill"]["prompt"]["chat_template"], "qwen3-chatml");
-        assert_eq!(body["tuckmill"]["sampling"]["greedy"], true);
-        assert_eq!(body["tuckmill"]["generated_tokens"], 3);
+        assert_eq!(body["chine"]["prompt"]["kind"], "chat");
+        assert_eq!(body["chine"]["prompt"]["chat_template"], "qwen3-chatml");
+        assert_eq!(body["chine"]["sampling"]["greedy"], true);
+        assert_eq!(body["chine"]["generated_tokens"], 3);
 
         // Nonzero temperature is refused by the synthetic engine instead of
         // silently generating greedily.
@@ -1551,7 +1551,7 @@ mod tests {
         assert_eq!(body["usage"]["completion_tokens"], 2);
         // The stop token was generated (and billed honestly as generated),
         // but only visible tokens count as completion tokens.
-        assert!(body["tuckmill"]["generated_tokens"].as_u64().unwrap() >= 2);
+        assert!(body["chine"]["generated_tokens"].as_u64().unwrap() >= 2);
 
         shutdown.store(true, Ordering::Relaxed);
         let _ = handle.join();
@@ -1607,12 +1607,12 @@ mod tests {
         let layout = StoreLayout::open(dir.path().join("store"));
         let src = dir.path().join("m.gguf");
         write_synthetic(&src, &SyntheticConfig::tiny_qwen3()).unwrap();
-        let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
-        tuckmill_store::import::import_local(
+        let registry = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
+        chine_store::import::import_local(
             &layout,
             &registry,
             &src,
-            &tuckmill_store::import::ImportOptions {
+            &chine_store::import::ImportOptions {
                 alias: Some("local".into()),
                 ..Default::default()
             },

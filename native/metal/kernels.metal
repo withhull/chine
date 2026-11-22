@@ -1,5 +1,5 @@
 /*
- * TuckCore Metal kernels (ADR-007), compiled at runtime from this exact
+ * ChineCore Metal kernels (ADR-007), compiled at runtime from this exact
  * repository revision. Correctness-first: every kernel is validated against
  * the CPU scalar reference before any tuning; see crates/metal tests.
  *
@@ -12,7 +12,7 @@
 using namespace metal;
 
 /* y[i] = x[i] * factor; tail-safe for any n. */
-kernel void tm_scale_f32(device const float *x [[buffer(0)]],
+kernel void ch_scale_f32(device const float *x [[buffer(0)]],
                          device float *y [[buffer(1)]],
                          constant float &factor [[buffer(2)]],
                          constant uint &n [[buffer(3)]],
@@ -24,7 +24,7 @@ kernel void tm_scale_f32(device const float *x [[buffer(0)]],
 }
 
 /* y[i] = y[i] + alpha * a[i]. */
-kernel void tm_axpy_f32(device const float *a [[buffer(0)]],
+kernel void ch_axpy_f32(device const float *a [[buffer(0)]],
                         device float *y [[buffer(1)]],
                         constant float &alpha [[buffer(2)]],
                         constant uint &n [[buffer(3)]],
@@ -36,7 +36,7 @@ kernel void tm_axpy_f32(device const float *a [[buffer(0)]],
 }
 
 /* y[i] = (float) x[i]; x holds IEEE binary16. */
-kernel void tm_cast_f16_f32(device const half *x [[buffer(0)]],
+kernel void ch_cast_f16_f32(device const half *x [[buffer(0)]],
                             device float *y [[buffer(1)]],
                             constant uint &n [[buffer(2)]],
                             uint gid [[thread_position_in_grid]]) {
@@ -47,7 +47,7 @@ kernel void tm_cast_f16_f32(device const half *x [[buffer(0)]],
 }
 
 /* y[i] = (half) x[i]; round-to-nearest-even, overflow to infinity. */
-kernel void tm_cast_f32_f16(device const float *x [[buffer(0)]],
+kernel void ch_cast_f32_f16(device const float *x [[buffer(0)]],
                             device half *y [[buffer(1)]],
                             constant uint &n [[buffer(2)]],
                             uint gid [[thread_position_in_grid]]) {
@@ -61,18 +61,18 @@ kernel void tm_cast_f32_f16(device const float *x [[buffer(0)]],
  * Packed Q8_0 matrix-vector decode: y[r] = dot(dequant_q8_0(w_row_r), x).
  *
  * Q8_0 blocks are 34 bytes: [f16 d][i8 qs; 32]; dequant(w) = d * q.
- * Multi-row form (Phase 1C): each SIMD group computes TM_Q8_ROWS rows, and
- * a threadgroup holds TM_Q8_SG SIMD groups. Lane L handles quants
+ * Multi-row form (Phase 1C): each SIMD group computes CH_Q8_ROWS rows, and
+ * a threadgroup holds CH_Q8_SG SIMD groups. Lane L handles quants
  * (L % 4) * 8 .. +7 of block (L / 4), so one SIMD-group step covers 8
  * blocks; the 8 matching x values are loaded once into registers and
  * reused for every row. Per-lane partials reduce with simd_sum. Reduction
  * order differs from the CPU sequence (tolerance-registered, ADR-007).
  * `cols` must be a positive multiple of 32 (validated C-side).
  */
-#define TM_Q8_ROWS 4u
-#define TM_Q8_SG 2u
+#define CH_Q8_ROWS 4u
+#define CH_Q8_SG 2u
 
-kernel void tm_q8_0_gemv(device const uchar *w [[buffer(0)]],
+kernel void ch_q8_0_gemv(device const uchar *w [[buffer(0)]],
                          device const float *x [[buffer(1)]],
                          device float *y [[buffer(2)]],
                          constant uint &rows [[buffer(3)]],
@@ -82,20 +82,20 @@ kernel void tm_q8_0_gemv(device const uchar *w [[buffer(0)]],
                          uint lane [[thread_index_in_simdgroup]]) {
     const uint blocks = cols / 32u;
     const size_t row_bytes = (size_t)blocks * 34u;
-    const uint first = (tg * TM_Q8_SG + sg) * TM_Q8_ROWS;
+    const uint first = (tg * CH_Q8_SG + sg) * CH_Q8_ROWS;
     if (first >= rows) {
         return;
     }
     const uint sub = lane % 4u;   /* which 8-quant slice of the block */
     const uint lane_blk = lane / 4u; /* which of the 8 blocks this step */
 
-    float acc[TM_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float acc[CH_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
     for (uint b = lane_blk; b < blocks; b += 8u) {
         const device packed_float4 *xv =
             (const device packed_float4 *)(x + (size_t)b * 32u + sub * 8u);
         const float4 x0 = float4(xv[0]);
         const float4 x1 = float4(xv[1]);
-        for (uint r = 0; r < TM_Q8_ROWS; ++r) {
+        for (uint r = 0; r < CH_Q8_ROWS; ++r) {
             const uint row = first + r;
             if (row >= rows) {
                 break;
@@ -108,7 +108,7 @@ kernel void tm_q8_0_gemv(device const uchar *w [[buffer(0)]],
             acc[r] += d * (dot(q0, x0) + dot(q1, x1));
         }
     }
-    for (uint r = 0; r < TM_Q8_ROWS; ++r) {
+    for (uint r = 0; r < CH_Q8_ROWS; ++r) {
         const float total = simd_sum(acc[r]);
         const uint row = first + r;
         if (lane == 0u && row < rows) {
@@ -120,7 +120,7 @@ kernel void tm_q8_0_gemv(device const uchar *w [[buffer(0)]],
 /* dst[dst_off + i] = src[src_off + i] for i < n: a bit-exact f32 copy
  * between buffers, encodable inside a compute dispatch group (batched
  * prefill moves per-token slices with it). */
-kernel void tm_copy_f32(device const float *src [[buffer(0)]],
+kernel void ch_copy_f32(device const float *src [[buffer(0)]],
                         device float *dst [[buffer(1)]],
                         constant uint &src_off [[buffer(2)]],
                         constant uint &dst_off [[buffer(3)]],
@@ -134,54 +134,54 @@ kernel void tm_copy_f32(device const float *src [[buffer(0)]],
 
 /*
  * Greedy argmax over f32 logits, exactly the CPU rule
- * (`tuckmill_backend::sampling::argmax`): NaN entries are skipped, the
+ * (`chine_backend::sampling::argmax`): NaN entries are skipped, the
  * largest value wins, and ties go to the lowest index. That order is
  * associative, so the two-pass parallel reduction returns the sequential
- * answer. TM_ARGMAX_NONE means every entry was NaN.
+ * answer. CH_ARGMAX_NONE means every entry was NaN.
  */
-#define TM_ARGMAX_NONE 0xFFFFFFFFu
-#define TM_ARGMAX_GROUPS 64u
-#define TM_ARGMAX_THREADS 256u
+#define CH_ARGMAX_NONE 0xFFFFFFFFu
+#define CH_ARGMAX_GROUPS 64u
+#define CH_ARGMAX_THREADS 256u
 
-inline bool tm_argmax_better(float av, uint ai, float bv, uint bi) {
-    if (ai == TM_ARGMAX_NONE) {
+inline bool ch_argmax_better(float av, uint ai, float bv, uint bi) {
+    if (ai == CH_ARGMAX_NONE) {
         return false;
     }
-    if (bi == TM_ARGMAX_NONE) {
+    if (bi == CH_ARGMAX_NONE) {
         return true;
     }
     return av > bv || (av == bv && ai < bi);
 }
 
-inline void tm_argmax_simd(thread float &v, thread uint &i) {
+inline void ch_argmax_simd(thread float &v, thread uint &i) {
     for (ushort off = 16; off > 0; off >>= 1) {
         const float ov = simd_shuffle_down(v, off);
         const uint oi = simd_shuffle_down(i, off);
-        if (tm_argmax_better(ov, oi, v, i)) {
+        if (ch_argmax_better(ov, oi, v, i)) {
             v = ov;
             i = oi;
         }
     }
 }
 
-inline void tm_argmax_threadgroup(thread float &v, thread uint &i,
+inline void ch_argmax_threadgroup(thread float &v, thread uint &i,
                                   threadgroup float *tv, threadgroup uint *ti,
                                   uint lane, uint sg) {
-    tm_argmax_simd(v, i);
+    ch_argmax_simd(v, i);
     if (lane == 0u) {
         tv[sg] = v;
         ti[sg] = i;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0u) {
-        v = lane < TM_ARGMAX_THREADS / 32u ? tv[lane] : -INFINITY;
-        i = lane < TM_ARGMAX_THREADS / 32u ? ti[lane] : TM_ARGMAX_NONE;
-        tm_argmax_simd(v, i);
+        v = lane < CH_ARGMAX_THREADS / 32u ? tv[lane] : -INFINITY;
+        i = lane < CH_ARGMAX_THREADS / 32u ? ti[lane] : CH_ARGMAX_NONE;
+        ch_argmax_simd(v, i);
     }
 }
 
-/* Pass 1: each of TM_ARGMAX_GROUPS threadgroups reduces a strided slice. */
-kernel void tm_argmax_partial(device const float *x [[buffer(0)]],
+/* Pass 1: each of CH_ARGMAX_GROUPS threadgroups reduces a strided slice. */
+kernel void ch_argmax_partial(device const float *x [[buffer(0)]],
                               device float *part_v [[buffer(1)]],
                               device uint *part_i [[buffer(2)]],
                               constant uint &n [[buffer(3)]],
@@ -189,18 +189,18 @@ kernel void tm_argmax_partial(device const float *x [[buffer(0)]],
                               uint tid [[thread_position_in_threadgroup]],
                               uint lane [[thread_index_in_simdgroup]],
                               uint sg [[simdgroup_index_in_threadgroup]]) {
-    threadgroup float tv[TM_ARGMAX_THREADS / 32u];
-    threadgroup uint ti[TM_ARGMAX_THREADS / 32u];
+    threadgroup float tv[CH_ARGMAX_THREADS / 32u];
+    threadgroup uint ti[CH_ARGMAX_THREADS / 32u];
     float v = -INFINITY;
-    uint i = TM_ARGMAX_NONE;
-    for (uint k = tg * TM_ARGMAX_THREADS + tid; k < n; k += TM_ARGMAX_GROUPS * TM_ARGMAX_THREADS) {
+    uint i = CH_ARGMAX_NONE;
+    for (uint k = tg * CH_ARGMAX_THREADS + tid; k < n; k += CH_ARGMAX_GROUPS * CH_ARGMAX_THREADS) {
         const float xv = x[k];
-        if (!isnan(xv) && tm_argmax_better(xv, k, v, i)) {
+        if (!isnan(xv) && ch_argmax_better(xv, k, v, i)) {
             v = xv;
             i = k;
         }
     }
-    tm_argmax_threadgroup(v, i, tv, ti, lane, sg);
+    ch_argmax_threadgroup(v, i, tv, ti, lane, sg);
     if (tid == 0u) {
         part_v[tg] = v;
         part_i[tg] = i;
@@ -208,18 +208,18 @@ kernel void tm_argmax_partial(device const float *x [[buffer(0)]],
 }
 
 /* Pass 2: one threadgroup reduces the partials into out[out_index]. */
-kernel void tm_argmax_final(device const float *part_v [[buffer(0)]],
+kernel void ch_argmax_final(device const float *part_v [[buffer(0)]],
                             device const uint *part_i [[buffer(1)]],
                             device uint *out [[buffer(2)]],
                             constant uint &out_index [[buffer(3)]],
                             uint tid [[thread_position_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]],
                             uint sg [[simdgroup_index_in_threadgroup]]) {
-    threadgroup float tv[TM_ARGMAX_THREADS / 32u];
-    threadgroup uint ti[TM_ARGMAX_THREADS / 32u];
-    float v = tid < TM_ARGMAX_GROUPS ? part_v[tid] : -INFINITY;
-    uint i = tid < TM_ARGMAX_GROUPS ? part_i[tid] : TM_ARGMAX_NONE;
-    tm_argmax_threadgroup(v, i, tv, ti, lane, sg);
+    threadgroup float tv[CH_ARGMAX_THREADS / 32u];
+    threadgroup uint ti[CH_ARGMAX_THREADS / 32u];
+    float v = tid < CH_ARGMAX_GROUPS ? part_v[tid] : -INFINITY;
+    uint i = tid < CH_ARGMAX_GROUPS ? part_i[tid] : CH_ARGMAX_NONE;
+    ch_argmax_threadgroup(v, i, tv, ti, lane, sg);
     if (tid == 0u) {
         out[out_index] = i;
     }
@@ -227,12 +227,12 @@ kernel void tm_argmax_final(device const float *part_v [[buffer(0)]],
 
 /*
  * Embedding lookup whose row is a token id produced on the device
- * (ids[slot], written by tm_argmax_final), so the host can encode the next
+ * (ids[slot], written by ch_argmax_final), so the host can encode the next
  * decode step before it has read the token. An id outside the table (the
  * all-NaN marker) writes zeros; the host fails that request when it reads
  * the marker, so the row is never used.
  */
-kernel void tm_q8_0_row_indirect_f32(device const uchar *w [[buffer(0)]],
+kernel void ch_q8_0_row_indirect_f32(device const uchar *w [[buffer(0)]],
                                      device float *out [[buffer(1)]],
                                      device const uint *ids [[buffer(2)]],
                                      constant uint &slot [[buffer(3)]],
@@ -254,7 +254,7 @@ kernel void tm_q8_0_row_indirect_f32(device const uchar *w [[buffer(0)]],
     out[gid] = d * q;
 }
 
-kernel void tm_f16_row_indirect_f32(device const half *w [[buffer(0)]],
+kernel void ch_f16_row_indirect_f32(device const half *w [[buffer(0)]],
                                     device float *out [[buffer(1)]],
                                     device const uint *ids [[buffer(2)]],
                                     constant uint &slot [[buffer(3)]],
@@ -272,7 +272,7 @@ kernel void tm_f16_row_indirect_f32(device const half *w [[buffer(0)]],
 
 /* Dequantize one Q8_0 matrix row (or embedding row) to f32:
  * out[d] = d_scale(d/32) * q(d). One thread per output element. */
-kernel void tm_q8_0_row_f32(device const uchar *w [[buffer(0)]],
+kernel void ch_q8_0_row_f32(device const uchar *w [[buffer(0)]],
                             device float *out [[buffer(1)]],
                             constant uint &row [[buffer(2)]],
                             constant uint &cols [[buffer(3)]],
@@ -293,7 +293,7 @@ kernel void tm_q8_0_row_f32(device const uchar *w [[buffer(0)]],
 
 /* F16 matvec: y[r] = dot(f32(w_row_r), x). Lane-strided within one SIMD
  * group per row; used for F16-weight artifacts (fixtures, F16 twins). */
-kernel void tm_f16_gemv(device const half *w [[buffer(0)]],
+kernel void ch_f16_gemv(device const half *w [[buffer(0)]],
                         device const float *x [[buffer(1)]],
                         device float *y [[buffer(2)]],
                         constant uint &rows [[buffer(3)]],
@@ -316,7 +316,7 @@ kernel void tm_f16_gemv(device const half *w [[buffer(0)]],
 
 /* Threadgroup-wide reduction of `value` over 128 threads: 4 SIMD partials
  * are combined through shared memory. Returns the sum to every lane. */
-inline float tm_reduce_sum_128(float value, threadgroup float *scratch,
+inline float ch_reduce_sum_128(float value, threadgroup float *scratch,
                                uint simd_lane, uint simd_group) {
     value = simd_sum(value);
     if (simd_lane == 0u) {
@@ -338,7 +338,7 @@ inline float tm_reduce_sum_128(float value, threadgroup float *scratch,
 /* RMSNorm over one row of `cols` f32 values with a per-column weight and
  * epsilon. One threadgroup of 128 threads per row; in-place (x == y) is
  * safe because each thread only reads its own elements after the barrier. */
-kernel void tm_rmsnorm_f32(device const float *x [[buffer(0)]],
+kernel void ch_rmsnorm_f32(device const float *x [[buffer(0)]],
                            device const float *weight [[buffer(1)]],
                            device float *y [[buffer(2)]],
                            constant uint &cols [[buffer(3)]],
@@ -354,7 +354,7 @@ kernel void tm_rmsnorm_f32(device const float *x [[buffer(0)]],
     for (uint i = tid; i < cols; i += 128u) {
         acc += xrow[i] * xrow[i];
     }
-    const float sumsq = tm_reduce_sum_128(acc, scratch, lane, simd_group);
+    const float sumsq = ch_reduce_sum_128(acc, scratch, lane, simd_group);
     const float rms = 1.0f / sqrt(sumsq / (float)cols + eps);
     for (uint i = tid; i < cols; i += 128u) {
         yrow[i] = xrow[i] * rms * weight[i];
@@ -364,10 +364,10 @@ kernel void tm_rmsnorm_f32(device const float *x [[buffer(0)]],
 /* One launch for the per-head Q/K RMS norms of an attention core: rows
  * [0, q_rows) normalize q with q_weight, rows [q_rows, q_rows + k_rows)
  * normalize k with k_weight. Per-row arithmetic is exactly
- * tm_rmsnorm_f32's (same stride-128 accumulate, same tm_reduce_sum_128,
+ * ch_rmsnorm_f32's (same stride-128 accumulate, same ch_reduce_sum_128,
  * same x * rms * w — no add, so no contraction), making the merge
  * bit-identical to the two rmsnorm launches it replaces. */
-kernel void tm_qk_norm_f32(device const float *q [[buffer(0)]],
+kernel void ch_qk_norm_f32(device const float *q [[buffer(0)]],
                            device const float *q_weight [[buffer(1)]],
                            device float *q_out [[buffer(2)]],
                            device const float *k [[buffer(3)]],
@@ -394,7 +394,7 @@ kernel void tm_qk_norm_f32(device const float *q [[buffer(0)]],
     for (uint i = tid; i < cols; i += 128u) {
         acc += xrow[i] * xrow[i];
     }
-    const float sumsq = tm_reduce_sum_128(acc, scratch, lane, simd_group);
+    const float sumsq = ch_reduce_sum_128(acc, scratch, lane, simd_group);
     const float rms = 1.0f / sqrt(sumsq / (float)cols + eps);
     for (uint i = tid; i < cols; i += 128u) {
         yrow[i] = xrow[i] * rms * weight[i];
@@ -405,8 +405,8 @@ kernel void tm_qk_norm_f32(device const float *q [[buffer(0)]],
  * residual add. The rmsnorm + axpy pair it replaces reads and writes the
  * row three times (norm reads x writes y; axpy reads y and res, writes
  * y); this reads x and res and writes y once. Per-row arithmetic mirrors
- * tm_rmsnorm_f32 exactly (same stride-128 accumulate, same
- * tm_reduce_sum_128, same x * rms * w); the final multiply-add contracts
+ * ch_rmsnorm_f32 exactly (same stride-128 accumulate, same
+ * ch_reduce_sum_128, same x * rms * w); the final multiply-add contracts
  * to one fma (Metal fast math; MSL has no `precise`), which is one
  * rounding less than the pair's memory round-trip and is qualified by
  * the metal-crate gate within 4 eps x max(|norm|,|res|) (cancellation-
@@ -420,12 +420,12 @@ kernel void tm_qk_norm_f32(device const float *q [[buffer(0)]],
  * kernel bit-identical to the pair it replaces, which the chunk-vs-
  * per-token bit-identity gates depend on (both engine modes must agree
  * bit for bit even when one runs fused and the other does not). */
-__attribute__((optnone)) static inline float tm_normed_uncontracted(float x, float rms,
+__attribute__((optnone)) static inline float ch_normed_uncontracted(float x, float rms,
                                                                    float w) {
     return x * rms * w;
 }
 
-kernel void tm_norm_add_f32(device const float *x [[buffer(0)]],
+kernel void ch_norm_add_f32(device const float *x [[buffer(0)]],
                             device const float *weight [[buffer(1)]],
                             device const float *res [[buffer(2)]],
                             device float *y [[buffer(3)]],
@@ -443,10 +443,10 @@ kernel void tm_norm_add_f32(device const float *x [[buffer(0)]],
     for (uint i = tid; i < cols; i += 128u) {
         acc += xrow[i] * xrow[i];
     }
-    const float sumsq = tm_reduce_sum_128(acc, scratch, lane, simd_group);
+    const float sumsq = ch_reduce_sum_128(acc, scratch, lane, simd_group);
     const float rms = 1.0f / sqrt(sumsq / (float)cols + eps);
     for (uint i = tid; i < cols; i += 128u) {
-        yrow[i] = tm_normed_uncontracted(xrow[i], rms, weight[i]) + resrow[i];
+        yrow[i] = ch_normed_uncontracted(xrow[i], rms, weight[i]) + resrow[i];
     }
 }
 
@@ -468,7 +468,7 @@ kernel void tm_norm_add_f32(device const float *x [[buffer(0)]],
 /* out[i] = silu(gate[i]) * up[i], i < n. */
 /* GeGLU gate: out[i] = gelu_tanh(gate[i]) * up[i], with ggml's tanh
  * approximation 0.5 x (1 + tanh(sqrt(2/pi) x (1 + 0.044715 x^2))). */
-kernel void tm_gelu_tanh_mul_f32(device const float *gate [[buffer(0)]],
+kernel void ch_gelu_tanh_mul_f32(device const float *gate [[buffer(0)]],
                                  device const float *up [[buffer(1)]],
                                  device float *out [[buffer(2)]],
                                  constant uint &n [[buffer(3)]],
@@ -481,7 +481,7 @@ kernel void tm_gelu_tanh_mul_f32(device const float *gate [[buffer(0)]],
     out[i] = 0.5f * x * (1.0f + precise::tanh(inner)) * up[i];
 }
 
-kernel void tm_silu_mul_f32(device const float *gate [[buffer(0)]],
+kernel void ch_silu_mul_f32(device const float *gate [[buffer(0)]],
                             device const float *up [[buffer(1)]],
                             device float *out [[buffer(2)]],
                             constant uint &n [[buffer(3)]],
@@ -495,7 +495,7 @@ kernel void tm_silu_mul_f32(device const float *gate [[buffer(0)]],
 }
 
 /* Dequantize one F16 matrix row to f32 (embedding rows for F16 artifacts). */
-kernel void tm_f16_row_f32(device const half *w [[buffer(0)]],
+kernel void ch_f16_row_f32(device const half *w [[buffer(0)]],
                            device float *out [[buffer(1)]],
                            constant uint &row [[buffer(2)]],
                            constant uint &cols [[buffer(3)]],
@@ -516,11 +516,11 @@ kernel void tm_f16_row_f32(device const half *w [[buffer(0)]],
  * Per-(row, b) arithmetic is exactly the single-token GEMV's: the same
  * lane-to-quant mapping (lane L: block L/4 of each 8-block step, quants
  * (L%4)*8..+7), the same block order, the same per-block expression and
- * the same simd_sum, so batch=1 is bit-identical to tm_q8_0_gemv.
+ * the same simd_sum, so batch=1 is bit-identical to ch_q8_0_gemv.
  * X is [batch, cols] at element offset `x_off`; Y is [batch, rows] at
  * `y_off`; batch must be 1..=32 (validated C-side).
  */
-kernel void tm_q8_0_gemm(device const uchar *w [[buffer(0)]],
+kernel void ch_q8_0_gemm(device const uchar *w [[buffer(0)]],
                          device const float *x [[buffer(1)]],
                          device float *y [[buffer(2)]],
                          constant uint &rows [[buffer(3)]],
@@ -589,11 +589,11 @@ kernel void tm_q8_0_gemm(device const uchar *w [[buffer(0)]],
  * advance by increment, fragment indices are 16-bit, and SIMD barriers
  * separate the fragment loads from the multiplies (ADR-011).
  */
-#define TM_MMA_ROWS 64u
-#define TM_MMA_TOK 32u
-#define TM_UNROLL _Pragma("clang loop unroll(full)")
+#define CH_MMA_ROWS 64u
+#define CH_MMA_TOK 32u
+#define CH_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
+kernel void ch_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
                              device const float *x [[buffer(1)]],
                              device float *y [[buffer(2)]],
                              constant uint &rows [[buffer(3)]],
@@ -607,16 +607,16 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
     /* sa: 32 W^T fragments (4 k-blocks x 8 row-blocks), sb: 16 X fragments
      * (4 k-blocks x 4 token-blocks); 64 floats each. The edge-tile output
      * stage (64 x 32) reuses sa. */
-    threadgroup float sa[TM_MMA_ROWS * 32u];
-    threadgroup float sb[TM_MMA_TOK * 32u];
+    threadgroup float sa[CH_MMA_ROWS * 32u];
+    threadgroup float sb[CH_MMA_TOK * 32u];
 
-    const uint token_tiles = (batch + TM_MMA_TOK - 1u) / TM_MMA_TOK;
-    const uint tok0 = (tg % token_tiles) * TM_MMA_TOK;
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
     if (tok0 >= batch) {
         return;
     }
-    const uint tile_batch = min(batch - tok0, TM_MMA_TOK);
-    const uint row0 = (tg / token_tiles) * TM_MMA_ROWS;
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
     const uint blocks = cols / 32u;
     const size_t row_bytes = (size_t)blocks * 34u;
 
@@ -653,7 +653,7 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
         float wv[16];
         const float d = (float)(*(const device half *)block);
         const device packed_char4 *qv = (const device packed_char4 *)(block + 2u + w_k);
-        TM_UNROLL for (uint i = 0; i < 4u; ++i) {
+        CH_UNROLL for (uint i = 0; i < 4u; ++i) {
             const float4 q = float4(char4(qv[i]));
             wv[4u * i + 0u] = d * q.x;
             wv[4u * i + 1u] = d * q.y;
@@ -667,7 +667,7 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
         threadgroup_barrier(mem_flags::mem_threadgroup);
         /* W^T fragment element (k % 8, row % 8); the 16 k values span two
          * k-blocks of 8. */
-        TM_UNROLL for (ushort i = 0; i < 16; ++i) {
+        CH_UNROLL for (ushort i = 0; i < 16; ++i) {
             sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
         }
         /* X fragment row (token % 8), 8 contiguous k values. */
@@ -675,27 +675,27 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
         *(threadgroup float4 *)(sb_dst + 4u) = xv1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        TM_UNROLL for (ushort kb = 0; kb < 4; ++kb) {
+        CH_UNROLL for (ushort kb = 0; kb < 4; ++kb) {
             simdgroup_float8x8 ma[4];
             simdgroup_float8x8 mb[2];
             simdgroup_barrier(mem_flags::mem_none);
-            TM_UNROLL for (ushort i = 0; i < 4; ++i) {
+            CH_UNROLL for (ushort i = 0; i < 4; ++i) {
                 simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            TM_UNROLL for (ushort j = 0; j < 2; ++j) {
+            CH_UNROLL for (ushort j = 0; j < 2; ++j) {
                 simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            TM_UNROLL for (ushort j = 0; j < 2; ++j) {
-                TM_UNROLL for (ushort i = 0; i < 4; ++i) {
+            CH_UNROLL for (ushort j = 0; j < 2; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4; ++i) {
                     simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
                 }
             }
         }
     }
 
-    if (row0 + TM_MMA_ROWS <= rows && tile_batch == TM_MMA_TOK) {
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
         device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
         for (uint j = 0; j < 2u; ++j) {
             for (uint i = 0; i < 4u; ++i) {
@@ -709,16 +709,16 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
     threadgroup float *ot = sa;
     for (uint j = 0; j < 2u; ++j) {
         for (uint i = 0; i < 4u; ++i) {
-            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * TM_MMA_ROWS + (sg_r + i) * 8u,
-                            TM_MMA_ROWS);
+            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * CH_MMA_ROWS + (sg_r + i) * 8u,
+                            CH_MMA_ROWS);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint idx = tid; idx < TM_MMA_ROWS * TM_MMA_TOK; idx += 128u) {
-        const uint r = idx % TM_MMA_ROWS;
-        const uint b = idx / TM_MMA_ROWS;
+    for (uint idx = tid; idx < CH_MMA_ROWS * CH_MMA_TOK; idx += 128u) {
+        const uint r = idx % CH_MMA_ROWS;
+        const uint b = idx / CH_MMA_ROWS;
         if (row0 + r < rows && b < tile_batch) {
-            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * TM_MMA_ROWS + r];
+            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * CH_MMA_ROWS + r];
         }
     }
 }
@@ -728,8 +728,8 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
  * weights and activations are rounded to half when staged, the matrix
  * multiply runs in half, accumulation stays f32. Everything else (tiling,
  * fragment layout, summation order, edge handling) is identical to
- * tm_q8_0_gemm_mma. */
-kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
+ * ch_q8_0_gemm_mma. */
+kernel void ch_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
                                    device const float *x [[buffer(1)]],
                                    device float *y [[buffer(2)]],
                                    constant uint &rows [[buffer(3)]],
@@ -745,17 +745,17 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
      * 64-float stage per SIMD group for partial edge fragments (see the
      * edge comment at the store). 7 KB total keeps resident groups per
      * core high. */
-    threadgroup half sa[TM_MMA_ROWS * 32u];
-    threadgroup half sb[TM_MMA_TOK * 32u];
+    threadgroup half sa[CH_MMA_ROWS * 32u];
+    threadgroup half sb[CH_MMA_TOK * 32u];
     threadgroup float edge_frag[4][64];
 
-    const uint token_tiles = (batch + TM_MMA_TOK - 1u) / TM_MMA_TOK;
-    const uint tok0 = (tg % token_tiles) * TM_MMA_TOK;
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
     if (tok0 >= batch) {
         return;
     }
-    const uint tile_batch = min(batch - tok0, TM_MMA_TOK);
-    const uint row0 = (tg / token_tiles) * TM_MMA_ROWS;
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
     const uint blocks = cols / 32u;
     const size_t row_bytes = (size_t)blocks * 34u;
 
@@ -792,7 +792,7 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         float wv[16];
         const float d = (float)(*(const device half *)block);
         const device packed_char4 *qv = (const device packed_char4 *)(block + 2u + w_k);
-        TM_UNROLL for (uint i = 0; i < 4u; ++i) {
+        CH_UNROLL for (uint i = 0; i < 4u; ++i) {
             const float4 q = float4(char4(qv[i]));
             wv[4u * i + 0u] = d * q.x;
             wv[4u * i + 1u] = d * q.y;
@@ -807,7 +807,7 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         /* W^T fragment element (k % 8, row % 8); the 16 k values span two
          * k-blocks of 8. Rounding to half happens here, once per staged
          * element. */
-        TM_UNROLL for (ushort i = 0; i < 16u; ++i) {
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
             sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
         }
         /* X fragment row (token % 8), 8 contiguous k values. */
@@ -815,27 +815,27 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        TM_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
             simdgroup_half8x8 ma[4];
             simdgroup_half8x8 mb[2];
             simdgroup_barrier(mem_flags::mem_none);
-            TM_UNROLL for (ushort i = 0; i < 4u; ++i) {
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
                 simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            TM_UNROLL for (ushort j = 0; j < 2u; ++j) {
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
                 simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            TM_UNROLL for (ushort j = 0; j < 2u; ++j) {
-                TM_UNROLL for (ushort i = 0; i < 4u; ++i) {
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
                     simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
                 }
             }
         }
     }
 
-    if (row0 + TM_MMA_ROWS <= rows && tile_batch == TM_MMA_TOK) {
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
         device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
         for (uint j = 0; j < 2u; ++j) {
             for (uint i = 0; i < 4u; ++i) {
@@ -890,8 +890,8 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
     }
 }
 
-/* Batched F16 GEMM with the same contract as tm_q8_0_gemm. */
-kernel void tm_f16_gemm(device const half *w [[buffer(0)]],
+/* Batched F16 GEMM with the same contract as ch_q8_0_gemm. */
+kernel void ch_f16_gemm(device const half *w [[buffer(0)]],
                         device const float *x [[buffer(1)]],
                         device float *y [[buffer(2)]],
                         constant uint &rows [[buffer(3)]],
@@ -945,7 +945,7 @@ kernel void tm_f16_gemm(device const half *w [[buffer(0)]],
  * hist followed by x, so the output row is the graph's `ggml_ssm_conv`
  * result for this token. One thread per channel.
  */
-kernel void tm_qwen35_conv_step(device const float *hist [[buffer(0)]],
+kernel void ch_qwen35_conv_step(device const float *hist [[buffer(0)]],
                                 device const float *x [[buffer(1)]],
                                 device const float *w [[buffer(2)]],
                                 device float *y [[buffer(3)]],
@@ -966,11 +966,11 @@ kernel void tm_qwen35_conv_step(device const float *hist [[buffer(0)]],
 
 /*
  * Advance the convolution history after a conv_step: shift down by one
- * row and append the new input row. Runs after tm_qwen35_conv_step inside
+ * row and append the new input row. Runs after ch_qwen35_conv_step inside
  * the same group, so the next token sees exactly the last (kernel - 1)
  * rows of the window.
  */
-kernel void tm_qwen35_conv_shift(device float *hist [[buffer(0)]],
+kernel void ch_qwen35_conv_shift(device float *hist [[buffer(0)]],
                                  device const float *x [[buffer(1)]],
                                  constant uint &channels [[buffer(2)]],
                                  constant uint &kern [[buffer(3)]],
@@ -989,7 +989,7 @@ kernel void tm_qwen35_conv_shift(device float *hist [[buffer(0)]],
  * x / sqrt(sum(x^2) + eps). One threadgroup of 128 threads per row
  * (head); shared with the full-attention Q/K head norms.
  */
-kernel void tm_qwen35_l2norm_heads(device const float *x [[buffer(0)]],
+kernel void ch_qwen35_l2norm_heads(device const float *x [[buffer(0)]],
                                    device float *y [[buffer(1)]],
                                    constant uint &cols [[buffer(2)]],
                                    constant float &eps [[buffer(3)]],
@@ -1004,7 +1004,7 @@ kernel void tm_qwen35_l2norm_heads(device const float *x [[buffer(0)]],
     for (uint i = tid; i < cols; i += 128u) {
         acc += xrow[i] * xrow[i];
     }
-    const float sumsq = tm_reduce_sum_128(acc, scratch, lane, simd_group);
+    const float sumsq = ch_reduce_sum_128(acc, scratch, lane, simd_group);
     const float inv = 1.0f / sqrt(sumsq + eps);
     for (uint i = tid; i < cols; i += 128u) {
         yrow[i] = xrow[i] * inv;
@@ -1016,7 +1016,7 @@ kernel void tm_qwen35_l2norm_heads(device const float *x [[buffer(0)]],
  * gate = ssm_a * softplus(alpha + dt_bias), with ggml's thresholded
  * softplus (x > 20 ? x : log(1 + exp(x))). One thread per head.
  */
-kernel void tm_qwen35_beta_decay(device const float *raw_beta [[buffer(0)]],
+kernel void ch_qwen35_beta_decay(device const float *raw_beta [[buffer(0)]],
                                  device const float *alpha [[buffer(1)]],
                                  device const float *dt_bias [[buffer(2)]],
                                  device const float *ssm_a [[buffer(3)]],
@@ -1050,7 +1050,7 @@ kernel void tm_qwen35_beta_decay(device const float *raw_beta [[buffer(0)]],
  * instead of stored: the same product, so the same rounding.
  * (Phase 1B: the earlier one-thread-per-head form was 90% of decode time.)
  */
-kernel void tm_qwen35_gdn_step(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_gdn_step(device const float *q [[buffer(0)]],
                                device const float *k [[buffer(1)]],
                                device const float *v [[buffer(2)]],
                                device const float *gate [[buffer(3)]],
@@ -1093,7 +1093,7 @@ kernel void tm_qwen35_gdn_step(device const float *q [[buffer(0)]],
  * value dim with the `ssm_norm` weights, times SiLU of the gate row.
  * One thread per head, same order as the CPU operator.
  */
-kernel void tm_qwen35_gated_norm(device const float *o [[buffer(0)]],
+kernel void ch_qwen35_gated_norm(device const float *o [[buffer(0)]],
                                  device const float *z [[buffer(1)]],
                                  device const float *weight [[buffer(2)]],
                                  device float *out [[buffer(3)]],
@@ -1121,7 +1121,7 @@ kernel void tm_qwen35_gated_norm(device const float *o [[buffer(0)]],
  * Split the joint Q projection `qg` [heads, 2*head_dim] (query first,
  * gate second, per head) into q and gate, both [heads, head_dim].
  */
-kernel void tm_qwen35_q_gate_split(device const float *qg [[buffer(0)]],
+kernel void ch_qwen35_q_gate_split(device const float *qg [[buffer(0)]],
                                    device float *q_out [[buffer(1)]],
                                    device float *gate_out [[buffer(2)]],
                                    constant uint &head_dim [[buffer(3)]],
@@ -1140,7 +1140,7 @@ kernel void tm_qwen35_q_gate_split(device const float *qg [[buffer(0)]],
  * n_rot pass through untouched; with n_rot == head_dim it is full NeoX
  * RoPE (dense Qwen3). One threadgroup per head over q then k.
  */
-kernel void tm_qwen35_rope_partial_f32(device float *q [[buffer(0)]],
+kernel void ch_qwen35_rope_partial_f32(device float *q [[buffer(0)]],
                                        device float *k [[buffer(1)]],
                                        device const float *inv_freq [[buffer(2)]],
                                        constant uint &pos [[buffer(3)]],
@@ -1169,7 +1169,7 @@ kernel void tm_qwen35_rope_partial_f32(device float *q [[buffer(0)]],
 
 /* Packed f16 KV store: k_cache[h][pos][d] = (half) k_src[h][d], true
  * two-byte entries (the declared packed cache contract), same for v. */
-kernel void tm_qwen35_kv_store_f16(device const float *k_src [[buffer(0)]],
+kernel void ch_qwen35_kv_store_f16(device const float *k_src [[buffer(0)]],
                                    device const float *v_src [[buffer(1)]],
                                    device half *k_cache [[buffer(2)]],
                                    device half *v_cache [[buffer(3)]],
@@ -1198,7 +1198,7 @@ kernel void tm_qwen35_kv_store_f16(device const float *k_src [[buffer(0)]],
 /* One head's causal attention over a packed f16 (or f32) cache, shared by
  * the per-token and chunk kernels, so both run exactly this code. */
 template <typename C>
-inline void tm_q35_attend(const device float *qh, const device C *kc, const device C *vc,
+inline void ch_q35_attend(const device float *qh, const device C *kc, const device C *vc,
                           device float *oh, device float *head_scratch, uint start, uint seq,
                           uint head_dim, float scale, uint tid, uint lane, uint simd_group,
                           threadgroup float *reduce_scratch, threadgroup float *row_stats) {
@@ -1238,7 +1238,7 @@ inline void tm_q35_attend(const device float *qh, const device C *kc, const devi
     for (uint j = start + tid; j < seq; j += 128u) {
         local_sum += exp(head_scratch[j] - row_max);
     }
-    const float denom = tm_reduce_sum_128(local_sum, reduce_scratch, lane, simd_group);
+    const float denom = ch_reduce_sum_128(local_sum, reduce_scratch, lane, simd_group);
     if (tid == 0u) {
         row_stats[1] = denom;
     }
@@ -1258,7 +1258,7 @@ inline void tm_q35_attend(const device float *qh, const device C *kc, const devi
     }
 }
 
-kernel void tm_qwen35_attention_f16(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_attention_f16(device const float *q [[buffer(0)]],
                                     device const half *k_cache [[buffer(1)]],
                                     device const half *v_cache [[buffer(2)]],
                                     device float *out [[buffer(3)]],
@@ -1275,7 +1275,7 @@ kernel void tm_qwen35_attention_f16(device const float *q [[buffer(0)]],
     threadgroup float reduce_scratch[4];
     threadgroup float row_stats[2];
     const uint kv_head = head / group;
-    tm_q35_attend(q + (size_t)head * (size_t)head_dim,
+    ch_q35_attend(q + (size_t)head * (size_t)head_dim,
                   k_cache + ((size_t)kv_head * (size_t)cap) * (size_t)head_dim,
                   v_cache + ((size_t)kv_head * (size_t)cap) * (size_t)head_dim,
                   out + (size_t)head * (size_t)head_dim, scratch + (size_t)head * (size_t)cap,
@@ -1285,7 +1285,7 @@ kernel void tm_qwen35_attention_f16(device const float *q [[buffer(0)]],
 /* First key a query row attends: the last `window` positions up to and
  * including its own (sliding-window attention), or position 0 when window
  * is 0 (full causal attention). */
-inline uint tm_attn_start(uint seq, uint window) {
+inline uint ch_attn_start(uint seq, uint window) {
     return (window != 0u && seq > window) ? seq - window : 0u;
 }
 
@@ -1294,7 +1294,7 @@ inline uint tm_attn_start(uint seq, uint window) {
  * the per-token kernel. Every chunk token's K/V must already be stored.
  * Scratch rows are [n, heads, cap]. */
 template <typename C>
-kernel void tm_qwen35_attention_chunk(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_attention_chunk(device const float *q [[buffer(0)]],
                                       device const C *k_cache [[buffer(1)]],
                                       device const C *v_cache [[buffer(2)]],
                                           device float *out [[buffer(3)]],
@@ -1317,15 +1317,15 @@ kernel void tm_qwen35_attention_chunk(device const float *q [[buffer(0)]],
     const uint kv_head = head / group;
     const size_t row = (size_t)t * heads + head;
     const uint seq = pos0 + t + 1u;
-    tm_q35_attend(q + row * (size_t)head_dim,
+    ch_q35_attend(q + row * (size_t)head_dim,
                   k_cache + ((size_t)kv_head * (size_t)cap) * (size_t)head_dim,
                   v_cache + ((size_t)kv_head * (size_t)cap) * (size_t)head_dim,
                   out + row * (size_t)head_dim, scratch + row * (size_t)cap,
-                  tm_attn_start(seq, window), seq, head_dim, scale, tid, lane, simd_group,
+                  ch_attn_start(seq, window), seq, head_dim, scale, tid, lane, simd_group,
                   reduce_scratch, row_stats);
 }
 
-#define TM_ATTN_CHUNK_ARGS(C)                                                               \
+#define CH_ATTN_CHUNK_ARGS(C)                                                               \
     device const float *q [[buffer(0)]], device const C *k_cache [[buffer(1)]],             \
         device const C *v_cache [[buffer(2)]], device float *out [[buffer(3)]],             \
         device float *scratch [[buffer(4)]], constant uint &pos0 [[buffer(5)]],             \
@@ -1335,10 +1335,10 @@ kernel void tm_qwen35_attention_chunk(device const float *q [[buffer(0)]],
         uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
         uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]
 
-template [[host_name("tm_qwen35_attention_f16_chunk")]] kernel void
-tm_qwen35_attention_chunk<half>(TM_ATTN_CHUNK_ARGS(half));
-template [[host_name("tm_qwen35_attention_f32_chunk")]] kernel void
-tm_qwen35_attention_chunk<float>(TM_ATTN_CHUNK_ARGS(float));
+template [[host_name("ch_qwen35_attention_f16_chunk")]] kernel void
+ch_qwen35_attention_chunk<half>(CH_ATTN_CHUNK_ARGS(half));
+template [[host_name("ch_qwen35_attention_f32_chunk")]] kernel void
+ch_qwen35_attention_chunk<float>(CH_ATTN_CHUNK_ARGS(float));
 
 /*
  * Chunk attention over a packed f16 (f32_cache 0) or f32 (1) cache:
@@ -1348,10 +1348,10 @@ tm_qwen35_attention_chunk<float>(TM_ATTN_CHUNK_ARGS(float));
  * reduction); SIMD group h normalizes head h; SIMD groups split the
  * keys for the value phase and the four partials sum in a fixed order.
  * Scratch rows are [n, heads, cap].
- * Summation order differs from tm_q35_attend (tolerance-qualified).
+ * Summation order differs from ch_q35_attend (tolerance-qualified).
  */
 template <uint HD, uint G, typename C>
-kernel void tm_qwen35_attention_gqa(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_attention_gqa(device const float *q [[buffer(0)]],
                                     device const C *k_cache [[buffer(1)]],
                                     device const C *v_cache [[buffer(2)]],
                                     device float *out [[buffer(3)]],
@@ -1378,7 +1378,7 @@ kernel void tm_qwen35_attention_gqa(device const float *q [[buffer(0)]],
     const uint kv_head = tg.x;
     const uint t = tg.y;
     const uint seq = pos0 + t + 1u;
-    const uint start = tm_attn_start(seq, window);
+    const uint start = ch_attn_start(seq, window);
     const uint d0 = lane * EPL;
     const bool active = d0 < HD;
     const size_t row0 = (size_t)t * heads + (size_t)kv_head * G;
@@ -1474,7 +1474,7 @@ kernel void tm_qwen35_attention_gqa(device const float *q [[buffer(0)]],
     }
 }
 
-#define TM_ATTN_GQA_ARGS(C)                                                               \
+#define CH_ATTN_GQA_ARGS(C)                                                               \
     device const float *q [[buffer(0)]], device const C *k_cache [[buffer(1)]],             \
         device const C *v_cache [[buffer(2)]], device float *out [[buffer(3)]],             \
         device float *scratch [[buffer(4)]], constant uint &pos0 [[buffer(5)]],              \
@@ -1484,26 +1484,26 @@ kernel void tm_qwen35_attention_gqa(device const float *q [[buffer(0)]],
         uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],  \
         uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
 
-template [[host_name("tm_qwen35_attention_gqa_256x4")]] kernel void
-tm_qwen35_attention_gqa<256u, 4u, half>(TM_ATTN_GQA_ARGS(half));
-template [[host_name("tm_qwen35_attention_gqa_16x2")]] kernel void
-tm_qwen35_attention_gqa<16u, 2u, half>(TM_ATTN_GQA_ARGS(half));
-template [[host_name("tm_qwen35_attention_gqa_128x2")]] kernel void
-tm_qwen35_attention_gqa<128u, 2u, half>(TM_ATTN_GQA_ARGS(half));
-template [[host_name("tm_qwen35_attention_gqa_128x4")]] kernel void
-tm_qwen35_attention_gqa<128u, 4u, half>(TM_ATTN_GQA_ARGS(half));
-template [[host_name("tm_qwen35_attention_gqa_f32_16x2")]] kernel void
-tm_qwen35_attention_gqa<16u, 2u, float>(TM_ATTN_GQA_ARGS(float));
-template [[host_name("tm_qwen35_attention_gqa_f32_128x2")]] kernel void
-tm_qwen35_attention_gqa<128u, 2u, float>(TM_ATTN_GQA_ARGS(float));
-template [[host_name("tm_qwen35_attention_gqa_f32_128x4")]] kernel void
-tm_qwen35_attention_gqa<128u, 4u, float>(TM_ATTN_GQA_ARGS(float));
+template [[host_name("ch_qwen35_attention_gqa_256x4")]] kernel void
+ch_qwen35_attention_gqa<256u, 4u, half>(CH_ATTN_GQA_ARGS(half));
+template [[host_name("ch_qwen35_attention_gqa_16x2")]] kernel void
+ch_qwen35_attention_gqa<16u, 2u, half>(CH_ATTN_GQA_ARGS(half));
+template [[host_name("ch_qwen35_attention_gqa_128x2")]] kernel void
+ch_qwen35_attention_gqa<128u, 2u, half>(CH_ATTN_GQA_ARGS(half));
+template [[host_name("ch_qwen35_attention_gqa_128x4")]] kernel void
+ch_qwen35_attention_gqa<128u, 4u, half>(CH_ATTN_GQA_ARGS(half));
+template [[host_name("ch_qwen35_attention_gqa_f32_16x2")]] kernel void
+ch_qwen35_attention_gqa<16u, 2u, float>(CH_ATTN_GQA_ARGS(float));
+template [[host_name("ch_qwen35_attention_gqa_f32_128x2")]] kernel void
+ch_qwen35_attention_gqa<128u, 2u, float>(CH_ATTN_GQA_ARGS(float));
+template [[host_name("ch_qwen35_attention_gqa_f32_128x4")]] kernel void
+ch_qwen35_attention_gqa<128u, 4u, float>(CH_ATTN_GQA_ARGS(float));
 
 /*
  * Split-K chunk attention (ADR-011 engine note, 2026-11-22). One
  * threadgroup per (KV head, row) could not hide the KV range's latency
  * (~5.4 GB/s at decode - the measured Gemma decode gap); the partial
- * kernel below gives every (KV head, row) up to TM_ATTN_SK_SLICES
+ * kernel below gives every (KV head, row) up to CH_ATTN_SK_SLICES
  * threadgroups, each covering a slice of the row's key range, writing
  * per-slice online-softmax partials [m, l, acc dims] to scratch; the
  * merge kernel folds them (max-rescaled) into the output rows.
@@ -1516,16 +1516,16 @@ tm_qwen35_attention_gqa<128u, 4u, float>(TM_ATTN_GQA_ARGS(float));
  * before any load and write nothing; the merge reads only s < slices.
  * Scratch partials are [(n, heads, SLICES, head_dim + 2)].
  */
-#define TM_ATTN_SK_SLICES 16u
-#define TM_ATTN_SK_KT 128u
+#define CH_ATTN_SK_SLICES 16u
+#define CH_ATTN_SK_KT 128u
 
-static inline uint tm_attn_sk_slices(uint total) {
+static inline uint ch_attn_sk_slices(uint total) {
     const uint sk = (total + 31u) / 32u; /* ~32 keys per slice group */
-    return sk < 1u ? 1u : (sk > TM_ATTN_SK_SLICES ? TM_ATTN_SK_SLICES : sk);
+    return sk < 1u ? 1u : (sk > CH_ATTN_SK_SLICES ? CH_ATTN_SK_SLICES : sk);
 }
 
 template <typename C, uint HD, uint G>
-kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
                                       device const C *k_cache [[buffer(1)]],
                                       device const C *v_cache [[buffer(2)]],
                                       device float *scratch [[buffer(3)]],
@@ -1541,7 +1541,7 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
                                       uint lane [[thread_index_in_simdgroup]],
                                       uint sg [[simdgroup_index_in_threadgroup]]) {
     constexpr uint EPL = (HD + 31u) / 32u;
-    threadgroup float sc[G * TM_ATTN_SK_KT];
+    threadgroup float sc[G * CH_ATTN_SK_KT];
     threadgroup float tgs[G * 2u];
     threadgroup float qt[G * HD];
     /* The value loop splits keys across the four SIMD groups, so each
@@ -1552,13 +1552,13 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
     if (head_dim != HD || group != G) {
         return;
     }
-    const uint kv_head = tg.x / TM_ATTN_SK_SLICES;
-    const uint slice = tg.x % TM_ATTN_SK_SLICES;
+    const uint kv_head = tg.x / CH_ATTN_SK_SLICES;
+    const uint slice = tg.x % CH_ATTN_SK_SLICES;
     const uint t = tg.y;
     const uint seq = pos0 + t + 1u;
-    const uint start = tm_attn_start(seq, window);
+    const uint start = ch_attn_start(seq, window);
     const uint total = seq - start;
-    const uint slices = tm_attn_sk_slices(total);
+    const uint slices = ch_attn_sk_slices(total);
     if (slice >= slices) {
         return; /* idle: the merge reads only s < slices */
     }
@@ -1585,8 +1585,8 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
             acc[h][e] = 0.0f;
         }
     }
-    for (uint base = jb; base < je; base += TM_ATTN_SK_KT) {
-        const uint tile = je - base < TM_ATTN_SK_KT ? je - base : TM_ATTN_SK_KT;
+    for (uint base = jb; base < je; base += CH_ATTN_SK_KT) {
+        const uint tile = je - base < CH_ATTN_SK_KT ? je - base : CH_ATTN_SK_KT;
         /* Scores: per-thread key ownership (deep in-flight loads), staged
          * per head into threadgroup memory. */
         if (tid < tile) {
@@ -1602,7 +1602,7 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
                 }
             }
             for (uint h = 0; h < G; ++h) {
-                sc[h * TM_ATTN_SK_KT + tid] = part[h] * scale;
+                sc[h * CH_ATTN_SK_KT + tid] = part[h] * scale;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1610,12 +1610,12 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
         for (uint h = sg; h < G; h += 4u) {
             float mt = -INFINITY;
             for (uint jj = lane; jj < tile; jj += 32u) {
-                mt = max(mt, sc[h * TM_ATTN_SK_KT + jj]);
+                mt = max(mt, sc[h * CH_ATTN_SK_KT + jj]);
             }
             mt = simd_max(mt);
             float lt = 0.0f;
             for (uint jj = lane; jj < tile; jj += 32u) {
-                lt += exp(sc[h * TM_ATTN_SK_KT + jj] - mt);
+                lt += exp(sc[h * CH_ATTN_SK_KT + jj] - mt);
             }
             lt = simd_sum(lt);
             if (lane == 0u) {
@@ -1647,7 +1647,7 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
                 vv[e] = active ? (float)vr[d0 + e] : 0.0f;
             }
             for (uint h = 0; h < G; ++h) {
-                const float p = exp(sc[h * TM_ATTN_SK_KT + jj] - tgs[h * 2u]);
+                const float p = exp(sc[h * CH_ATTN_SK_KT + jj] - tgs[h * 2u]);
                 for (uint e = 0; e < EPL; ++e) {
                     acc[h][e] += p * vv[e];
                 }
@@ -1662,7 +1662,7 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint h = 0; h < G; ++h) {
-        device float *pmh = scratch + ((row0 + h) * TM_ATTN_SK_SLICES + slice) * (HD + 2u);
+        device float *pmh = scratch + ((row0 + h) * CH_ATTN_SK_SLICES + slice) * (HD + 2u);
         if (tid == 0u) {
             pmh[0] = mrun[h];
             pmh[1] = lrun[h];
@@ -1686,7 +1686,7 @@ kernel void tm_qwen35_attn_sk_partial(device const float *q [[buffer(0)]],
  * independent accumulators (a single runtime-bounded loop left a
  * 128-deep dependent load chain per lane in an earlier version). */
 template <uint HD, uint G>
-kernel void tm_qwen35_attn_sk_merge(device const float *scratch [[buffer(0)]],
+kernel void ch_qwen35_attn_sk_merge(device const float *scratch [[buffer(0)]],
                                     device float *out [[buffer(1)]],
                                     constant uint &pos0 [[buffer(2)]],
                                     constant uint &head_dim [[buffer(3)]],
@@ -1701,16 +1701,16 @@ kernel void tm_qwen35_attn_sk_merge(device const float *scratch [[buffer(0)]],
     if (head_dim != HD || group != G) {
         return;
     }
-    threadgroup float wg[G][TM_ATTN_SK_SLICES];
+    threadgroup float wg[G][CH_ATTN_SK_SLICES];
     const uint kv_head = tg.x;
     const uint t = tg.y;
     const uint seq = pos0 + t + 1u;
-    const uint start = tm_attn_start(seq, window);
+    const uint start = ch_attn_start(seq, window);
     const uint total = seq - start;
-    const uint slices = tm_attn_sk_slices(total);
+    const uint slices = ch_attn_sk_slices(total);
     const size_t row0 = (size_t)t * heads + (size_t)kv_head * G;
     for (uint h = sg; h < G; h += 4u) {
-        const device float *base = scratch + ((row0 + h) * TM_ATTN_SK_SLICES) * (HD + 2u);
+        const device float *base = scratch + ((row0 + h) * CH_ATTN_SK_SLICES) * (HD + 2u);
         float m = -INFINITY;
         for (uint s2 = lane; s2 < slices; s2 += 32u) {
             m = max(m, base[s2 * (HD + 2u)]);
@@ -1752,7 +1752,7 @@ kernel void tm_qwen35_attn_sk_merge(device const float *scratch [[buffer(0)]],
     }
 }
 
-#define TM_ATTN_SK_ARGS(C)                                                                  \
+#define CH_ATTN_SK_ARGS(C)                                                                  \
     device const float *q [[buffer(0)]], device const C *k_cache [[buffer(1)]],             \
         device const C *v_cache [[buffer(2)]], device float *scratch [[buffer(3)]],          \
         constant uint &pos0 [[buffer(4)]], constant uint &cap [[buffer(5)]],                \
@@ -1762,22 +1762,22 @@ kernel void tm_qwen35_attn_sk_merge(device const float *scratch [[buffer(0)]],
         uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
         uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
 
-template [[host_name("tm_qwen35_attn_sk_256x4")]] kernel void
-tm_qwen35_attn_sk_partial<half, 256u, 4u>(TM_ATTN_SK_ARGS(half));
-template [[host_name("tm_qwen35_attn_sk_16x2")]] kernel void
-tm_qwen35_attn_sk_partial<half, 16u, 2u>(TM_ATTN_SK_ARGS(half));
-template [[host_name("tm_qwen35_attn_sk_128x2")]] kernel void
-tm_qwen35_attn_sk_partial<half, 128u, 2u>(TM_ATTN_SK_ARGS(half));
-template [[host_name("tm_qwen35_attn_sk_128x4")]] kernel void
-tm_qwen35_attn_sk_partial<half, 128u, 4u>(TM_ATTN_SK_ARGS(half));
-template [[host_name("tm_qwen35_attn_sk_f32_16x2")]] kernel void
-tm_qwen35_attn_sk_partial<float, 16u, 2u>(TM_ATTN_SK_ARGS(float));
-template [[host_name("tm_qwen35_attn_sk_f32_128x2")]] kernel void
-tm_qwen35_attn_sk_partial<float, 128u, 2u>(TM_ATTN_SK_ARGS(float));
-template [[host_name("tm_qwen35_attn_sk_f32_128x4")]] kernel void
-tm_qwen35_attn_sk_partial<float, 128u, 4u>(TM_ATTN_SK_ARGS(float));
+template [[host_name("ch_qwen35_attn_sk_256x4")]] kernel void
+ch_qwen35_attn_sk_partial<half, 256u, 4u>(CH_ATTN_SK_ARGS(half));
+template [[host_name("ch_qwen35_attn_sk_16x2")]] kernel void
+ch_qwen35_attn_sk_partial<half, 16u, 2u>(CH_ATTN_SK_ARGS(half));
+template [[host_name("ch_qwen35_attn_sk_128x2")]] kernel void
+ch_qwen35_attn_sk_partial<half, 128u, 2u>(CH_ATTN_SK_ARGS(half));
+template [[host_name("ch_qwen35_attn_sk_128x4")]] kernel void
+ch_qwen35_attn_sk_partial<half, 128u, 4u>(CH_ATTN_SK_ARGS(half));
+template [[host_name("ch_qwen35_attn_sk_f32_16x2")]] kernel void
+ch_qwen35_attn_sk_partial<float, 16u, 2u>(CH_ATTN_SK_ARGS(float));
+template [[host_name("ch_qwen35_attn_sk_f32_128x2")]] kernel void
+ch_qwen35_attn_sk_partial<float, 128u, 2u>(CH_ATTN_SK_ARGS(float));
+template [[host_name("ch_qwen35_attn_sk_f32_128x4")]] kernel void
+ch_qwen35_attn_sk_partial<float, 128u, 4u>(CH_ATTN_SK_ARGS(float));
 
-#define TM_ATTN_SK_MERGE_ARGS                                                              \
+#define CH_ATTN_SK_MERGE_ARGS                                                              \
     device const float *scratch [[buffer(0)]], device float *out [[buffer(1)]],             \
         constant uint &pos0 [[buffer(2)]], constant uint &head_dim [[buffer(3)]],            \
         constant uint &group [[buffer(4)]], constant uint &heads [[buffer(5)]],             \
@@ -1785,17 +1785,17 @@ tm_qwen35_attn_sk_partial<float, 128u, 4u>(TM_ATTN_SK_ARGS(float));
         uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
         uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
 
-template [[host_name("tm_qwen35_attn_sk_merge_256x4")]] kernel void
-tm_qwen35_attn_sk_merge<256u, 4u>(TM_ATTN_SK_MERGE_ARGS);
-template [[host_name("tm_qwen35_attn_sk_merge_16x2")]] kernel void
-tm_qwen35_attn_sk_merge<16u, 2u>(TM_ATTN_SK_MERGE_ARGS);
-template [[host_name("tm_qwen35_attn_sk_merge_128x2")]] kernel void
-tm_qwen35_attn_sk_merge<128u, 2u>(TM_ATTN_SK_MERGE_ARGS);
-template [[host_name("tm_qwen35_attn_sk_merge_128x4")]] kernel void
-tm_qwen35_attn_sk_merge<128u, 4u>(TM_ATTN_SK_MERGE_ARGS);
+template [[host_name("ch_qwen35_attn_sk_merge_256x4")]] kernel void
+ch_qwen35_attn_sk_merge<256u, 4u>(CH_ATTN_SK_MERGE_ARGS);
+template [[host_name("ch_qwen35_attn_sk_merge_16x2")]] kernel void
+ch_qwen35_attn_sk_merge<16u, 2u>(CH_ATTN_SK_MERGE_ARGS);
+template [[host_name("ch_qwen35_attn_sk_merge_128x2")]] kernel void
+ch_qwen35_attn_sk_merge<128u, 2u>(CH_ATTN_SK_MERGE_ARGS);
+template [[host_name("ch_qwen35_attn_sk_merge_128x4")]] kernel void
+ch_qwen35_attn_sk_merge<128u, 4u>(CH_ATTN_SK_MERGE_ARGS);
 
 /* attn[i] *= sigmoid(gate[i]) — the joint Q-projection output gate. */
-kernel void tm_qwen35_attn_gate(device float *attn [[buffer(0)]],
+kernel void ch_qwen35_attn_gate(device float *attn [[buffer(0)]],
                                 device const float *gate [[buffer(1)]],
                                 constant uint &n [[buffer(2)]],
                                 uint gid [[thread_position_in_grid]]) {
@@ -1806,7 +1806,7 @@ kernel void tm_qwen35_attn_gate(device float *attn [[buffer(0)]],
 }
 
 /* x[i] = silu(x[i]) in place (conv output activation, graph order). */
-kernel void tm_qwen35_silu(device float *x [[buffer(0)]],
+kernel void ch_qwen35_silu(device float *x [[buffer(0)]],
                            constant uint &n [[buffer(1)]],
                            uint gid [[thread_position_in_grid]]) {
     if (gid >= n) {
@@ -1818,7 +1818,7 @@ kernel void tm_qwen35_silu(device float *x [[buffer(0)]],
 
 /* Split the conv output [3*width] into q, k, v [width] each (graph order:
  * q first, then k, then v). */
-kernel void tm_qwen35_split_qkv(device const float *y [[buffer(0)]],
+kernel void ch_qwen35_split_qkv(device const float *y [[buffer(0)]],
                                 device float *q [[buffer(1)]],
                                 device float *k [[buffer(2)]],
                                 device float *v [[buffer(3)]],
@@ -1839,9 +1839,9 @@ kernel void tm_qwen35_split_qkv(device const float *y [[buffer(0)]],
 
 /* Causal convolution over a chunk. Token t's tap j (j < k-1) reads the
  * input at time t-(k-1)+j: from the chunk when that is >= 0, else from the
- * carried history (oldest first), exactly as tm_qwen35_conv_step sees it
+ * carried history (oldest first), exactly as ch_qwen35_conv_step sees it
  * after t shifts. One thread per (channel, token). */
-kernel void tm_qwen35_conv_chunk(device const float *hist [[buffer(0)]],
+kernel void ch_qwen35_conv_chunk(device const float *hist [[buffer(0)]],
                                  device const float *x [[buffer(1)]],
                                  device const float *w [[buffer(2)]],
                                  device float *y [[buffer(3)]],
@@ -1868,7 +1868,7 @@ kernel void tm_qwen35_conv_chunk(device const float *hist [[buffer(0)]],
 
 /* History after a chunk: the last k-1 inputs (oldest first), in place.
  * Reads index n+j > j, so ascending j never reads an overwritten slot. */
-kernel void tm_qwen35_conv_chunk_shift(device float *hist [[buffer(0)]],
+kernel void ch_qwen35_conv_chunk_shift(device float *hist [[buffer(0)]],
                                        device const float *x [[buffer(1)]],
                                        constant uint &channels [[buffer(2)]],
                                        constant uint &kern [[buffer(3)]],
@@ -1886,7 +1886,7 @@ kernel void tm_qwen35_conv_chunk_shift(device float *hist [[buffer(0)]],
 }
 
 /* Per-token q/k/v split of conv rows [n, 3*width] into [n, width] each. */
-kernel void tm_qwen35_split_qkv_chunk(device const float *y [[buffer(0)]],
+kernel void ch_qwen35_split_qkv_chunk(device const float *y [[buffer(0)]],
                                       device float *q [[buffer(1)]],
                                       device float *k [[buffer(2)]],
                                       device float *v [[buffer(3)]],
@@ -1904,9 +1904,9 @@ kernel void tm_qwen35_split_qkv_chunk(device const float *y [[buffer(0)]],
     v[(size_t)t * width + i] = y[row + 2u * width + i];
 }
 
-/* tm_qwen35_beta_decay over [n, per] rows; the per-head biases index by
+/* ch_qwen35_beta_decay over [n, per] rows; the per-head biases index by
  * gid % per. */
-kernel void tm_qwen35_beta_decay_chunk(device const float *raw_beta [[buffer(0)]],
+kernel void ch_qwen35_beta_decay_chunk(device const float *raw_beta [[buffer(0)]],
                                        device const float *alpha [[buffer(1)]],
                                        device const float *dt_bias [[buffer(2)]],
                                        device const float *ssm_a [[buffer(3)]],
@@ -1927,11 +1927,11 @@ kernel void tm_qwen35_beta_decay_chunk(device const float *raw_beta [[buffer(0)]
 }
 
 /* The delta rule over a chunk: thread (column j, head) walks tokens
- * t = 0..n-1 in order with exactly tm_qwen35_gdn_step's per-element
+ * t = 0..n-1 in order with exactly ch_qwen35_gdn_step's per-element
  * arithmetic, so the state after the chunk equals n single steps. Per
  * token, rows are `qk_stride` (q, k), `v_stride` (v, out) and `g_stride`
  * (gate, beta) wide; head h reads offset h*k_dim / h*v_dim / h. */
-kernel void tm_qwen35_gdn_chunk(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_gdn_chunk(device const float *q [[buffer(0)]],
                                 device const float *k [[buffer(1)]],
                                 device const float *v [[buffer(2)]],
                                 device const float *gate [[buffer(3)]],
@@ -1989,9 +1989,9 @@ kernel void tm_qwen35_gdn_chunk(device const float *q [[buffer(0)]],
 
 
 /* Partial split-half RoPE over a chunk: threadgroup (head, t) rotates q or
- * k row t at position pos0+t, exactly tm_qwen35_rope_partial_f32's math.
+ * k row t at position pos0+t, exactly ch_qwen35_rope_partial_f32's math.
  * q rows are [n, n_q_heads, head_dim], k rows [n, n_kv_heads, head_dim]. */
-kernel void tm_qwen35_rope_partial_chunk(device float *q [[buffer(0)]],
+kernel void ch_qwen35_rope_partial_chunk(device float *q [[buffer(0)]],
                                          device float *k [[buffer(1)]],
                                          device const float *inv_freq [[buffer(2)]],
                                          constant uint &pos0 [[buffer(3)]],
@@ -2022,10 +2022,10 @@ kernel void tm_qwen35_rope_partial_chunk(device float *q [[buffer(0)]],
 }
 
 /* KV store of a chunk's rows [n, kv_heads, head_dim] at positions
- * pos0+t: packed f16 (same rounding as tm_qwen35_kv_store_f16) or f32
+ * pos0+t: packed f16 (same rounding as ch_qwen35_kv_store_f16) or f32
  * (an exact copy). */
 template <typename C>
-kernel void tm_qwen35_kv_store_chunk(device const float *k_src [[buffer(0)]],
+kernel void ch_qwen35_kv_store_chunk(device const float *k_src [[buffer(0)]],
                                      device const float *v_src [[buffer(1)]],
                                      device C *k_cache [[buffer(2)]],
                                      device C *v_cache [[buffer(3)]],
@@ -2048,19 +2048,19 @@ kernel void tm_qwen35_kv_store_chunk(device const float *k_src [[buffer(0)]],
     v_cache[dst] = (C)v_src[gid];
 }
 
-#define TM_KV_CHUNK_ARGS(C)                                                                  \
+#define CH_KV_CHUNK_ARGS(C)                                                                  \
     device const float *k_src [[buffer(0)]], device const float *v_src [[buffer(1)]],        \
         device C *k_cache [[buffer(2)]], device C *v_cache [[buffer(3)]],                     \
         constant uint &pos0 [[buffer(4)]], constant uint &cap [[buffer(5)]],                  \
         constant uint &head_dim [[buffer(6)]], constant uint &kv_heads [[buffer(7)]],         \
         constant uint &n [[buffer(8)]], uint gid [[thread_position_in_grid]]
 
-template [[host_name("tm_qwen35_kv_store_f16_chunk")]] kernel void
-tm_qwen35_kv_store_chunk<half>(TM_KV_CHUNK_ARGS(half));
-template [[host_name("tm_qwen35_kv_store_f32_chunk")]] kernel void
-tm_qwen35_kv_store_chunk<float>(TM_KV_CHUNK_ARGS(float));
+template [[host_name("ch_qwen35_kv_store_f16_chunk")]] kernel void
+ch_qwen35_kv_store_chunk<half>(CH_KV_CHUNK_ARGS(half));
+template [[host_name("ch_qwen35_kv_store_f32_chunk")]] kernel void
+ch_qwen35_kv_store_chunk<float>(CH_KV_CHUNK_ARGS(float));
 
-/* tm_qwen35_gdn_chunk with the state column held in registers for the
+/* ch_qwen35_gdn_chunk with the state column held in registers for the
  * whole chunk (read once, written once) instead of re-read from device
  * memory twice per token. Each column is split across P lanes of one
  * SIMD group, each holding SK / P rows; the two per-token dot products
@@ -2075,7 +2075,7 @@ tm_qwen35_kv_store_chunk<float>(TM_KV_CHUNK_ARGS(float));
  * constant); the grid is P * v_dim lanes per head in threadgroups of 32,
  * and v_dim must be a multiple of C. */
 template <uint SK, uint P>
-kernel void tm_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
+kernel void ch_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
                                     device const float *k [[buffer(1)]],
                                     device const float *v [[buffer(2)]],
                                     device const float *gate [[buffer(3)]],
@@ -2151,10 +2151,10 @@ kernel void tm_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
     }
 }
 
-/* Lanes per state column (must match the host's TM_GDN_LANES). */
-#define TM_GDN_LANES 8u
+/* Lanes per state column (must match the host's CH_GDN_LANES). */
+#define CH_GDN_LANES 8u
 
-#define TM_GDN_REG_ARGS                                                          \
+#define CH_GDN_REG_ARGS                                                          \
     device const float *q [[buffer(0)]], device const float *k [[buffer(1)]],      \
         device const float *v [[buffer(2)]], device const float *gate [[buffer(3)]], \
         device const float *beta [[buffer(4)]], device float *state [[buffer(5)]],  \
@@ -2165,6 +2165,6 @@ kernel void tm_qwen35_gdn_chunk_reg(device const float *q [[buffer(0)]],
         constant uint &v_stride [[buffer(14)]], constant uint &g_stride [[buffer(15)]], \
         constant uint &snap_t [[buffer(16)]], uint2 gid [[thread_position_in_grid]]
 
-template [[host_name("tm_qwen35_gdn_chunk_k128")]] kernel void
-tm_qwen35_gdn_chunk_reg<128u, TM_GDN_LANES>(TM_GDN_REG_ARGS);
+template [[host_name("ch_qwen35_gdn_chunk_k128")]] kernel void
+ch_qwen35_gdn_chunk_reg<128u, CH_GDN_LANES>(CH_GDN_REG_ARGS);
 

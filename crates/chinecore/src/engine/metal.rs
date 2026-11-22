@@ -2,15 +2,15 @@
 //! that executes any [`ModelGraph`].
 //!
 //! Every block is built from the qualified device operators
-//! ([`Qwen35Gpu`]'s `*_dev` ops and the `tuckmill-metal` kernels). Each
+//! ([`Qwen35Gpu`]'s `*_dev` ops and the `chine-metal` kernels). Each
 //! block offers a per-token `decode` and a chunked `prefill`, and both run
 //! the block's one sequential `core`, so the two paths cannot diverge. The
 //! engine owns one command buffer per decode step and per prefill chunk,
 //! session reset, the exact preflight plan (ledger == plan) and
 //! per-operator profiling.
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_metal::{
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_metal::{
     MetalBuffer, MetalContext, ARGMAX_NONE, ARGMAX_PARTIAL_BYTES, ATTENTION_SK_SLICES,
     GEMM_MAX_BATCH, GEMM_MMA_MAX_BATCH,
 };
@@ -134,13 +134,13 @@ impl Matrix {
         let type_id = src.tensor_type_id(t.index)?;
         let (in_dim, out_dim) = src.tensor_dims(t.index)?;
         if out_dim <= 1 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("tensor {} is 1-D; vectors use the f32 path", t.index),
             ));
         }
         if type_id != 1 && type_id != 8 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedQuantization,
                 format!(
                     "engine matrices must be F16 or Q8_0; tensor {} is type {type_id}",
@@ -246,8 +246,8 @@ impl Matrix {
     }
 }
 
-fn unsupported_type(type_id: u32) -> TuckmillError {
-    TuckmillError::new(
+fn unsupported_type(type_id: u32) -> ChineError {
+    ChineError::new(
         ErrorCode::UnsupportedQuantization,
         format!("no device projection for stored type {type_id}"),
     )
@@ -620,7 +620,7 @@ impl GdnBlock {
     fn check_supported(s: &GatedDeltaNetSpec) -> Result<()> {
         let key = s.groups * s.state_size;
         if s.head_v * s.dt_rank != key || s.channels != 3 * key || s.groups != s.dt_rank {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "Gated DeltaNet geometry (key {key}, value {}, channels {}, groups {}, value heads {}) has no engine block yet",
@@ -725,7 +725,7 @@ impl GdnBlock {
     /// on the device, in queue order with the surrounding chunks.
     fn copy_snapshot(&self, gpu: &Qwen35Gpu, save: bool) -> Result<()> {
         let Some((snap_state, snap_hist)) = &self.snapshot else {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 "prefix snapshot requested on a block loaded without the prefix cache",
             ));
@@ -746,7 +746,7 @@ impl GdnBlock {
     /// speculative verify (its draft was rejected).
     fn roll_back(&self, gpu: &Qwen35Gpu) -> Result<()> {
         let Some((rb_state, rb_hist)) = &self.rollback else {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 "rollback requested on a block loaded without speculation",
             ));
@@ -791,7 +791,7 @@ impl GdnBlock {
             return self.out.gemm(gpu, &s.e, &s.proj, nn, exact);
         }
         if mode.capture {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 "rollback capture needs the chunk-wide core",
             ));
@@ -829,7 +829,7 @@ impl GdnBlock {
         let value = (spec.head_v * spec.dt_rank) as u32;
         let rollback = if capture {
             let Some(rb) = &self.rollback else {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Internal,
                     "rollback capture on a block loaded without speculation",
                 ));
@@ -1044,7 +1044,7 @@ impl AttentionBlock {
     fn check_supported(s: &AttentionSpec) -> Result<(Tensor, Tensor)> {
         match (s.q_norm, s.k_norm) {
             (Some(q_norm), Some(k_norm)) => Ok((q_norm, k_norm)),
-            _ => Err(TuckmillError::new(
+            _ => Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "attention variant (output gate {}, q_norm {}, k_norm {}) has no engine block yet; only attention with Q/K norms is implemented",
@@ -1817,7 +1817,7 @@ pub fn alloc_plan_with(
 
 fn mtp_spec(graph: &ModelGraph) -> Result<&super::graph::MtpSpec> {
     graph.mtp.as_ref().ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "{} artifact has no multi-token-prediction block; speculative decoding needs one",
@@ -1919,7 +1919,7 @@ impl EngineModel {
         let plan = alloc_plan_with(&graph, src, capacity, opts)?;
         let total = plan.total();
         if total > admitted_gpu_bytes {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 format!(
                     "GPU admission of {admitted_gpu_bytes} B does not cover the exact plan of {total} B (weights {} + state {} + scratch {}); nothing was allocated",
@@ -2131,7 +2131,7 @@ impl EngineModel {
             return Ok(());
         };
         let Some(snap) = &mtp.hid_snap else {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 "MTP prefix snapshot requested without the prefix cache",
             ));
@@ -2179,14 +2179,14 @@ impl EngineModel {
     fn speculate(&self, token: u32, forced: Option<u32>) -> Result<SpecStep> {
         self.ensure_valid()?;
         let Some(mtp) = &self.mtp else {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "speculation needs an engine loaded with the MTP head",
             ));
         };
         let pending = self.mtp_pending.borrow().clone();
         if pending.last() != Some(&token) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "speculation must continue the session's last greedy token",
             )
@@ -2310,7 +2310,7 @@ impl EngineModel {
 
     fn ensure_valid(&self) -> Result<()> {
         if !self.session_valid.get() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "engine session was interrupted and its partial state was discarded",
             )
@@ -2331,14 +2331,14 @@ impl EngineModel {
     fn check_tokens(&self, tokens: &[u32]) -> Result<usize> {
         let vocab = self.graph.vocab;
         if let Some(bad) = tokens.iter().find(|t| **t as usize >= vocab) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("token id {bad} is outside the {vocab}-entry vocabulary"),
             ));
         }
         let pos = self.positions.get();
         if pos + tokens.len() > self.capacity {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 format!(
                     "tokens {pos}..{} exceed the admitted {}-position context",
@@ -2448,13 +2448,13 @@ impl EngineModel {
                 GreedyInput::Previous(prev) => {
                     let pos = self.check_tokens(&[])?;
                     if pos == 0 || prev.slot != token_slot(pos - 1) {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::Internal,
                             "pipelined step does not follow the step it reads",
                         ));
                     }
                     if pos + 1 > self.capacity {
-                        return Err(TuckmillError::new(
+                        return Err(ChineError::new(
                             ErrorCode::InvalidPlan,
                             format!(
                                 "token {pos} exceeds the admitted {}-position context",
@@ -2596,7 +2596,7 @@ impl EngineModel {
         let result = (|| {
             let n = tokens.len();
             if n == 0 || n > PREFILL_BATCH {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("prefill chunk of {n} tokens is outside 1..={PREFILL_BATCH}"),
                 ));
@@ -2744,14 +2744,14 @@ mod oracle_tests {
     use super::*;
     use crate::qwen35_forward::TensorSource;
     use crate::qwen35_gpu::bytes_f32;
-    use tuckmill_metal::probe;
+    use chine_metal::probe;
 
     fn qwen35_graph(src: &impl TensorSource) -> ModelGraph {
         crate::engine::adapters::qwen35(src.config(), src.layout())
     }
     use crate::qwen35_forward::Qwen35Model;
     use crate::qwen35_kv::KvPrecision;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     /// Registered device-vs-oracle tolerances for the complete fixture
     /// model (observed worst: hidden 5.4e-7, logits 1.4e-6 over 3 tokens).
@@ -2762,8 +2762,8 @@ mod oracle_tests {
         let probe = probe();
         if !probe.available {
             assert!(
-                std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-                "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+                std::env::var("CHINE_REQUIRE_METAL").is_err(),
+                "CHINE_REQUIRE_METAL is set but no Metal device is available"
             );
             eprintln!("skipping: no Metal device");
             return None;
@@ -2945,26 +2945,26 @@ mod oracle_tests {
         assert!(model.prefill_chunk(&too_many, true, &mut l).is_err());
     }
 
-    /// Machine-local (TUCKMILL_QWEN35_GGUF): on the pinned Q8_0 artifact,
+    /// Machine-local (CHINE_QWEN35_GGUF): on the pinned Q8_0 artifact,
     /// batched prefill stays within the registered drift of sequential
     /// decode for the resolved GEMM operand profile (the shipping default
-    /// is metal-f16-act, ADR-010; `TUCKMILL_QWEN35_GEMM_F32=1` restores
+    /// is metal-f16-act, ADR-010; `CHINE_QWEN35_GEMM_F32=1` restores
     /// f32 operands); prints 512-token prefill time for both (measurement,
     /// not asserted).
     #[test]
     fn real_artifact_batched_prefill_matches_sequential_when_available() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
         if gpu_or_skip().is_none() {
             return;
         }
-        let gemm_f16_operands = std::env::var("TUCKMILL_QWEN35_GEMM_F32")
+        let gemm_f16_operands = std::env::var("CHINE_QWEN35_GEMM_F32")
             .map(|v| v != "1")
             .unwrap_or(true);
         let engine_opts = EngineOptions {
@@ -3075,7 +3075,7 @@ mod oracle_tests {
         assert_eq!(top1(&batched), top1(&seq), "last-token top-1");
         assert_eq!(top1(&batched_next), top1(&seq_next), "next-step top-1");
 
-        if std::env::var("TUCKMILL_PROFILE").ok().as_deref() == Some("1") {
+        if std::env::var("CHINE_PROFILE").ok().as_deref() == Some("1") {
             let ctx = model.context();
             model.reset().unwrap();
             model.set_grouped(false);
@@ -3108,20 +3108,20 @@ mod oracle_tests {
     /// GPU busy time, command buffers, and GPU time per operator for the
     /// pinned model's decode. Prints a table; asserts only that the
     /// accounting is consistent. Run with
-    /// `TUCKMILL_QWEN35_GGUF=... TUCKMILL_PROFILE=1 cargo test --release
-    /// -p tuckmill-tuckcore profile_pinned_decode -- --nocapture`.
+    /// `CHINE_QWEN35_GGUF=... CHINE_PROFILE=1 cargo test --release
+    /// -p chine-chinecore profile_pinned_decode -- --nocapture`.
     #[test]
     fn profile_pinned_decode_when_requested() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
-        if std::env::var("TUCKMILL_PROFILE").ok().as_deref() != Some("1") {
-            eprintln!("skipping: TUCKMILL_PROFILE=1 not set (measurement only)");
+        if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
             return;
         }
         if gpu_or_skip().is_none() {
@@ -3209,12 +3209,12 @@ mod oracle_tests {
     /// Run with --release for speed.
     #[test]
     fn real_artifact_gpu_model_matches_cpu_when_available() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
             return;
         };
         if gpu_or_skip().is_none() {
@@ -3461,15 +3461,15 @@ mod greedy_tests {
     use super::*;
     use crate::qwen35_forward::{ArtifactTensorSource, TensorSource};
     use crate::sampling::argmax;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn gpu_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -3593,16 +3593,16 @@ mod greedy_tests {
         device_greedy_equals_cpu_greedy(&ArtifactTensorSource::open(&path).unwrap(), 24);
     }
 
-    /// Machine-local (TUCKMILL_QWEN35_GGUF): the same equality on the
+    /// Machine-local (CHINE_QWEN35_GGUF): the same equality on the
     /// pinned artifact, with per-token time for both paths.
     #[test]
     fn device_greedy_equals_cpu_greedy_on_the_pinned_artifact() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
         if !gpu_or_skip() {
@@ -3623,15 +3623,15 @@ mod greedy_tests {
 mod chunk_core_tests {
     use super::*;
     use crate::qwen35_forward::{ArtifactTensorSource, TensorSource};
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn gpu_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -3674,11 +3674,11 @@ mod chunk_core_tests {
     /// agree), for partial, single, exact and multi-chunk prompts.
     fn chunk_core_matches_per_token(src: &(impl TensorSource + WeightSource), lens: &[usize]) {
         // The resolved GEMM operand profile (ADR-010): the shipping default
-        // is metal-f16-act; `TUCKMILL_QWEN35_GEMM_F32=1` restores f32
+        // is metal-f16-act; `CHINE_QWEN35_GEMM_F32=1` restores f32
         // operands. The register-vs-generic recurrence bound is
         // profile-dependent: f16 operand rounding amplifies the two
         // compilations' fast-math difference.
-        let gemm_f16_operands = std::env::var("TUCKMILL_QWEN35_GEMM_F32")
+        let gemm_f16_operands = std::env::var("CHINE_QWEN35_GEMM_F32")
             .map(|v| v != "1")
             .unwrap_or(true);
         let engine_opts = EngineOptions {
@@ -3789,15 +3789,15 @@ mod chunk_core_tests {
         chunk_core_matches_per_token(&ArtifactTensorSource::open(&path).unwrap(), &[1, 5, 16, 37]);
     }
 
-    /// Machine-local (TUCKMILL_QWEN35_GGUF), with 512-token timing.
+    /// Machine-local (CHINE_QWEN35_GGUF), with 512-token timing.
     #[test]
     fn chunk_cores_are_bit_identical_on_the_pinned_artifact() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
         if !gpu_or_skip() {
@@ -3813,15 +3813,15 @@ mod chunk_core_tests {
 #[cfg(test)]
 mod qwen3_tests {
     use super::*;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn gpu_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -3841,9 +3841,8 @@ mod qwen3_tests {
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let file = std::fs::File::open(&path).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
-        let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
+        let registry = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
         let (cfg, _) = crate::model::resolve(&insp, &registry).unwrap();
         let mut names = crate::model::TensorNames::for_layers(cfg.layers);
         names.resolve(&insp).unwrap();
@@ -3934,30 +3933,29 @@ mod qwen3_real_tests {
     use super::*;
 
     /// Measurement (opt-in): 512-token prefill of the pinned dense Qwen3
-    /// (`TUCKMILL_REAL_GGUF`) on the engine with declared f16 KV, batched vs
-    /// sequential drift, and with `TUCKMILL_PROFILE=1` the ungrouped GPU time
+    /// (`CHINE_REAL_GGUF`) on the engine with declared f16 KV, batched vs
+    /// sequential drift, and with `CHINE_PROFILE=1` the ungrouped GPU time
     /// per operator.
     #[test]
     fn real_qwen3_prefill_timing_and_profile_when_available() {
-        let Some(path) = std::env::var("TUCKMILL_REAL_GGUF")
+        let Some(path) = std::env::var("CHINE_REAL_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_REAL_GGUF not set");
+            eprintln!("skipping: CHINE_REAL_GGUF not set");
             return;
         };
-        if !tuckmill_metal::probe().available {
+        if !chine_metal::probe().available {
             eprintln!("skipping: no Metal device");
             return;
         }
         let file = std::fs::File::open(&path).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
-        let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin().unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
+        let registry = chine_manifest::adapter::AdapterRegistry::builtin().unwrap();
         let Ok((cfg, _)) = crate::model::resolve(&insp, &registry) else {
-            eprintln!("skipping: TUCKMILL_REAL_GGUF is not a dense Qwen3 artifact");
+            eprintln!("skipping: CHINE_REAL_GGUF is not a dense Qwen3 artifact");
             return;
         };
         let mut names = crate::model::TensorNames::for_layers(cfg.layers);
@@ -4024,7 +4022,7 @@ mod qwen3_real_tests {
             "top-1"
         );
 
-        if std::env::var("TUCKMILL_PROFILE").ok().as_deref() == Some("1") {
+        if std::env::var("CHINE_PROFILE").ok().as_deref() == Some("1") {
             let ctx = model.context();
             model.reset().unwrap();
             model.set_grouped(false);
@@ -4054,15 +4052,15 @@ mod qwen3_real_tests {
 mod prefix_cache_tests {
     use super::*;
     use crate::qwen35_forward::{ArtifactTensorSource, TensorSource};
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn gpu_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -4204,12 +4202,12 @@ mod prefix_cache_tests {
 
     #[test]
     fn prefix_hit_is_bit_identical_to_a_cold_prefill_on_the_pinned_artifact() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
         if !gpu_or_skip() {
@@ -4234,15 +4232,15 @@ mod mtp_tests {
 
     use super::*;
     use crate::qwen35_forward::{ArtifactTensorSource, TensorSource};
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn gpu_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -4481,12 +4479,12 @@ mod mtp_tests {
 
     #[test]
     fn speculative_greedy_is_token_identical_on_the_pinned_artifact() {
-        let Some(path) = std::env::var("TUCKMILL_QWEN35_GGUF")
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
             .ok()
             .map(std::path::PathBuf::from)
             .filter(|p| p.exists())
         else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
             return;
         };
         if !gpu_or_skip() {
@@ -4529,15 +4527,15 @@ mod mtp_tests {
 mod gemma3_tests {
     use super::*;
     use crate::engine::GgufWeights;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn gpu_or_skip() -> bool {
-        if tuckmill_metal::probe().available {
+        if chine_metal::probe().available {
             return true;
         }
         assert!(
-            std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-            "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+            std::env::var("CHINE_REQUIRE_METAL").is_err(),
+            "CHINE_REQUIRE_METAL is set but no Metal device is available"
         );
         eprintln!("skipping: no Metal device");
         false
@@ -4587,7 +4585,7 @@ mod gemma3_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g3.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_gemma3()).unwrap();
-        let insp = tuckmill_manifest::gguf::inspect(&path, &Default::default()).unwrap();
+        let insp = chine_manifest::gguf::inspect(&path, &Default::default()).unwrap();
         let file = std::fs::File::open(&path).unwrap();
         let src = GgufWeights::with_inspection(&file, &insp).unwrap();
         let graph = crate::engine::adapters::gemma3(&insp).unwrap();
@@ -4618,7 +4616,7 @@ mod gemma3_tests {
         // prints here on any future failure, from which the bound can be
         // tightened (passing tests' output is captured, so the exact VM
         // value is not otherwise visible).
-        let probe = tuckmill_metal::probe();
+        let probe = chine_metal::probe();
         let virtualized = probe.info.to_lowercase().contains("paravirtual");
         eprintln!("gemma3 fixture gate on: {}", probe.info);
         let top1 = |v: &[f32]| {

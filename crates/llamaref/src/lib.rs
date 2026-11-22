@@ -1,12 +1,12 @@
-//! Tuckmill reference backend: pinned llama.cpp behind the checked C shim
+//! Chine reference backend: pinned llama.cpp behind the checked C shim
 //! (ADR-005/ADR-006).
 //!
 //! llama.cpp is the compatibility backend and the numerical oracle. It is
-//! executed through `native/llamaref/tm_llama_shim.c`, compiled against the
+//! executed through `native/llamaref/ch_llama_shim.c`, compiled against the
 //! pinned revision's own headers by `scripts/fetch-llama.sh` — so struct
 //! layouts are compile-time checked and the Rust side only speaks a stable
 //! pointer/integer ABI. The library is discovered at runtime
-//! (`TUCKMILL_LLAMA_LIB` or the `lib_path` load option): the repository never
+//! (`CHINE_LLAMA_LIB` or the `lib_path` load option): the repository never
 //! vendors llama.cpp.
 //!
 //! Execution is CPU-only here (`n_gpu_layers = 0`): deterministic across GPU
@@ -19,19 +19,19 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tuckmill_backend::{
+use chine_backend::{
     ArtifactRef, BackendCapabilities, BackendId, BackendStats, FinishReason, GenControl,
     GenOutcome, GenerateRequest, InferenceBackend, RunState,
 };
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::{ExecutionMode, ExecutionPlan};
-use tuckmill_manifest::records::EngineIdentity;
-use tuckmill_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::{ExecutionMode, ExecutionPlan};
+use chine_manifest::records::EngineIdentity;
+use chine_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
 
 /// llama.cpp revision this shim is compiled against (scripts/fetch-llama.sh).
 pub const LLAMA_REVISION: &str = "b11695";
 pub const SHIM_VERSION: c_int = 4;
-const LIB_FILE_NAME: &str = "libtm_llama.dylib";
+const LIB_FILE_NAME: &str = "libchine_llama.dylib";
 
 #[repr(C)]
 struct TmHandle {
@@ -108,17 +108,17 @@ impl Shim {
     fn open(lib_path: &Path) -> Result<Shim> {
         let c_path = CString::new(lib_path.as_os_str().to_string_lossy().as_bytes().to_vec())
             .map_err(|_| {
-                TuckmillError::new(ErrorCode::InvalidConfiguration, "library path contains NUL")
+                ChineError::new(ErrorCode::InvalidConfiguration, "library path contains NUL")
             })?;
         // SAFETY: dlopen on a caller-provided path; RTLD_NOW resolves all
         // symbols eagerly so a mismatched library fails at open, not mid-run.
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if handle.is_null() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 format!("cannot load {}: {}", lib_path.display(), dlerror_string()),
             )
-            .with_action("Run scripts/fetch-llama.sh and set TUCKMILL_LLAMA_LIB."));
+            .with_action("Run scripts/fetch-llama.sh and set CHINE_LLAMA_LIB."));
         }
         let dl = Dl { handle };
         let sym = |name: &str| -> Result<*mut c_void> {
@@ -126,7 +126,7 @@ impl Shim {
             // SAFETY: symbol lookup on an open handle.
             let ptr = unsafe { libc::dlsym(dl.handle, c_name.as_ptr()) };
             if ptr.is_null() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Unavailable,
                     format!(
                         "llama shim is missing symbol {name}; rebuild it with scripts/fetch-llama.sh (expected shim v{SHIM_VERSION})"
@@ -139,35 +139,35 @@ impl Shim {
             ($name:literal, $ty:ty) => {{
                 let raw = sym($name)?;
                 // SAFETY: symbol was resolved from the shim with this exact
-                // declaration (kept in sync with tm_llama_shim.c).
+                // declaration (kept in sync with ch_llama_shim.c).
                 unsafe { std::mem::transmute::<*mut c_void, $ty>(raw) }
             }};
         }
         let shim = Shim {
-            version: get!("tm_shim_version", FnShimVersion),
-            load: get!("tm_load", FnLoad),
-            free: get!("tm_free", FnFree),
-            vocab_size: get!("tm_vocab_size", FnVocabSize),
-            bos: get!("tm_bos", FnBosEos),
-            eos: get!("tm_eos", FnBosEos),
-            n_ctx: get!("tm_n_ctx", FnNCtx),
-            tokenize: get!("tm_tokenize", FnTokenize),
-            token_to_piece: get!("tm_token_to_piece", FnTokenToPiece),
-            decode: get!("tm_decode", FnDecode),
-            reset: get!("tm_reset", FnReset),
-            kv_type: get!("tm_kv_type", FnProbe),
-            n_threads: get!("tm_n_threads", FnProbe),
-            logits: get!("tm_logits", FnLogits),
-            sample_greedy: get!("tm_sample_greedy", FnSampleGreedy),
-            model_desc: get!("tm_model_desc", FnModelDesc),
-            meta: get!("tm_meta", FnMeta),
-            model_size: get!("tm_model_size", FnModelSize),
+            version: get!("ch_shim_version", FnShimVersion),
+            load: get!("ch_load", FnLoad),
+            free: get!("ch_free", FnFree),
+            vocab_size: get!("ch_vocab_size", FnVocabSize),
+            bos: get!("ch_bos", FnBosEos),
+            eos: get!("ch_eos", FnBosEos),
+            n_ctx: get!("ch_n_ctx", FnNCtx),
+            tokenize: get!("ch_tokenize", FnTokenize),
+            token_to_piece: get!("ch_token_to_piece", FnTokenToPiece),
+            decode: get!("ch_decode", FnDecode),
+            reset: get!("ch_reset", FnReset),
+            kv_type: get!("ch_kv_type", FnProbe),
+            n_threads: get!("ch_n_threads", FnProbe),
+            logits: get!("ch_logits", FnLogits),
+            sample_greedy: get!("ch_sample_greedy", FnSampleGreedy),
+            model_desc: get!("ch_model_desc", FnModelDesc),
+            meta: get!("ch_meta", FnMeta),
+            model_size: get!("ch_model_size", FnModelSize),
             _dl: dl,
         };
         // SAFETY: shim version probe is side-effect free.
         let version = unsafe { (shim.version)() };
         if version != SHIM_VERSION {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 format!("llama shim version {version} is not supported (want {SHIM_VERSION})"),
             ));
@@ -190,7 +190,7 @@ fn dlerror_string() -> String {
 }
 
 /// Resolve the shim library path: the `lib_path` load option, else
-/// `TUCKMILL_LLAMA_LIB` (file or directory).
+/// `CHINE_LLAMA_LIB` (file or directory).
 pub fn resolve_lib_path(option: Option<&str>) -> Result<PathBuf> {
     if let Some(value) = option {
         let path = PathBuf::from(value);
@@ -200,7 +200,7 @@ pub fn resolve_lib_path(option: Option<&str>) -> Result<PathBuf> {
             Ok(path)
         };
     }
-    if let Ok(value) = std::env::var("TUCKMILL_LLAMA_LIB") {
+    if let Ok(value) = std::env::var("CHINE_LLAMA_LIB") {
         if !value.trim().is_empty() {
             let path = PathBuf::from(value);
             return if path.is_dir() {
@@ -210,12 +210,12 @@ pub fn resolve_lib_path(option: Option<&str>) -> Result<PathBuf> {
             };
         }
     }
-    Err(TuckmillError::new(
+    Err(ChineError::new(
         ErrorCode::Unavailable,
-        "the llama.cpp reference backend is not configured (no lib_path option, TUCKMILL_LLAMA_LIB unset)",
+        "the llama.cpp reference backend is not configured (no lib_path option, CHINE_LLAMA_LIB unset)",
     )
     .with_action(
-        "Run scripts/fetch-llama.sh, then export TUCKMILL_LLAMA_LIB to the printed libtm_llama.dylib path.",
+        "Run scripts/fetch-llama.sh, then export CHINE_LLAMA_LIB to the printed libchine_llama.dylib path.",
     ))
 }
 
@@ -234,14 +234,12 @@ unsafe impl Send for ReferenceTokenizer {}
 
 impl ReferenceTokenizer {
     /// Open a vocab-only handle for `model_path`. The library resolves from
-    /// the `lib_path` option or `TUCKMILL_LLAMA_LIB`.
+    /// the `lib_path` option or `CHINE_LLAMA_LIB`.
     pub fn open(lib_path: Option<&str>, model_path: &std::path::Path) -> Result<Self> {
         let lib = resolve_lib_path(lib_path)?;
         let shim = Shim::open(&lib)?;
         let c_path = CString::new(model_path.as_os_str().to_string_lossy().as_bytes().to_vec())
-            .map_err(|_| {
-                TuckmillError::new(ErrorCode::InvalidConfiguration, "path contains NUL")
-            })?;
+            .map_err(|_| ChineError::new(ErrorCode::InvalidConfiguration, "path contains NUL"))?;
         let mut err_buf = vec![0u8; 512];
         // SAFETY: shim version-checked; path and error buffer valid;
         // vocab_only=1 skips context creation entirely.
@@ -263,7 +261,7 @@ impl ReferenceTokenizer {
                 .position(|b| *b == 0)
                 .unwrap_or(err_buf.len());
             let msg = String::from_utf8_lossy(&err_buf[..len]).into_owned();
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!(
                     "llama.cpp could not load the tokenizer of {}: {msg}",
@@ -278,7 +276,7 @@ impl ReferenceTokenizer {
         // SAFETY: handle valid.
         let n = unsafe { (self.shim.vocab_size)(self.handle) };
         if n <= 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "llama.cpp reported no vocabulary",
             ));
@@ -293,7 +291,7 @@ impl ReferenceTokenizer {
 
     pub fn tokenize(&self, text: &str, add_special: bool) -> Result<Vec<u32>> {
         let c_text = CString::new(text)
-            .map_err(|_| TuckmillError::new(ErrorCode::InvalidRequest, "text contains NUL"))?;
+            .map_err(|_| ChineError::new(ErrorCode::InvalidRequest, "text contains NUL"))?;
         let mut out = vec![0i32; 4096];
         // SAFETY: pointers valid for the calls; capacities match buffers.
         let n = unsafe {
@@ -319,7 +317,7 @@ impl ReferenceTokenizer {
                 )
             };
             if n2 < 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "llama_tokenize failed twice",
                 ));
@@ -354,7 +352,7 @@ impl ReferenceTokenizer {
                 )
             };
             if n2 < 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "llama_token_to_piece failed twice",
                 ));
@@ -370,7 +368,7 @@ impl ReferenceTokenizer {
 impl Drop for ReferenceTokenizer {
     fn drop(&mut self) {
         if !self.handle.is_null() {
-            // SAFETY: handle came from tm_load and is freed once.
+            // SAFETY: handle came from ch_load and is freed once.
             unsafe { (self.shim.free)(self.handle) };
             self.handle = std::ptr::null_mut();
         }
@@ -482,7 +480,7 @@ impl LlamaRef {
         gpu_layers: i32,
     ) -> Result<()> {
         if !self.handle.is_null() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "reference model is already loaded",
             ));
@@ -493,9 +491,8 @@ impl LlamaRef {
             .map(|n| (n.get() / 2).max(1) as c_int)
             .unwrap_or(4);
         let path_str = model_path.to_string_lossy().into_owned();
-        let c_path = CString::new(path_str.clone().into_bytes()).map_err(|_| {
-            TuckmillError::new(ErrorCode::InvalidConfiguration, "path contains NUL")
-        })?;
+        let c_path = CString::new(path_str.clone().into_bytes())
+            .map_err(|_| ChineError::new(ErrorCode::InvalidConfiguration, "path contains NUL"))?;
         let mut err_buf = vec![0u8; 512];
         // SAFETY: shim was version-checked at open; path and buffers are valid.
         let handle = unsafe {
@@ -516,7 +513,7 @@ impl LlamaRef {
                 .position(|b| *b == 0)
                 .unwrap_or(err_buf.len());
             let msg = String::from_utf8_lossy(&err_buf[..len]).into_owned();
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!("llama.cpp failed to load {path_str}: {msg}"),
             ));
@@ -554,13 +551,13 @@ impl LlamaRef {
     /// and the declared precision.
     pub fn teacher_forced_logits(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
         if tokens.is_empty() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "teacher forcing needs at least one token id",
             ));
         }
         if tokens.len() > self.ctx_tokens as usize {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "{} tokens exceed the reference context {}",
@@ -573,7 +570,7 @@ impl LlamaRef {
         // SAFETY: handle valid.
         let rc = unsafe { (self.shim.reset)(h) };
         if rc != 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("llama context reset failed (rc {rc})"),
             ));
@@ -583,7 +580,7 @@ impl LlamaRef {
         // SAFETY: handle valid; buffer sized to the vocabulary.
         let n = unsafe { (self.shim.logits)(h, logits.as_mut_ptr(), logits.len() as i32) };
         if n < 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("llama logits unavailable (rc {n})"),
             ));
@@ -603,7 +600,7 @@ impl LlamaRef {
 
     fn h(&self) -> Result<*mut TmHandle> {
         if self.handle.is_null() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "llama.cpp reference backend has no loaded model",
             ));
@@ -615,7 +612,7 @@ impl LlamaRef {
     pub fn tokenize(&self, text: &str, add_special: bool) -> Result<Vec<u32>> {
         let h = self.h()?;
         let c_text = CString::new(text)
-            .map_err(|_| TuckmillError::new(ErrorCode::InvalidRequest, "text contains NUL"))?;
+            .map_err(|_| ChineError::new(ErrorCode::InvalidRequest, "text contains NUL"))?;
         let mut out = vec![0i32; 4096];
         // SAFETY: pointers are valid for the calls; capacities match buffers.
         let n = unsafe {
@@ -643,7 +640,7 @@ impl LlamaRef {
                 )
             };
             if n2 < 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "llama_tokenize failed twice",
                 ));
@@ -683,7 +680,7 @@ impl LlamaRef {
                 )
             };
             if n2 < 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "llama_token_to_piece failed twice",
                 ));
@@ -717,7 +714,7 @@ impl LlamaRef {
             // SAFETY: ids buffer is valid for chunk length.
             let rc = unsafe { (self.shim.decode)(h, c_chunk.as_ptr(), c_chunk.len() as i32) };
             if rc != 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     if rc == -2 {
                         ErrorCode::ContextExceedsBudget
                     } else {
@@ -817,9 +814,9 @@ fn production_timing(
     t0: std::time::Instant,
     first: Option<std::time::Instant>,
     last: Option<std::time::Instant>,
-) -> tuckmill_backend::RequestTiming {
+) -> chine_backend::RequestTiming {
     let ms = |from: std::time::Instant, to: std::time::Instant| (to - from).as_secs_f64() * 1000.0;
-    tuckmill_backend::RequestTiming {
+    chine_backend::RequestTiming {
         total_ms: ms(t0, std::time::Instant::now()),
         prefill_ms: None,
         first_token_ms: first.map(|f| ms(t0, f)),
@@ -868,14 +865,14 @@ impl InferenceBackend for LlamaRef {
     ) -> Result<String> {
         plan.validate()?;
         if plan.mode == ExecutionMode::Rejected {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 "refusing to load a rejected plan",
             ));
         }
         let opts: LlamaRefOptions = match options {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("invalid llama backend options: {e}"),
                 )
@@ -886,7 +883,7 @@ impl InferenceBackend for LlamaRef {
             None | Some("f16") => true,
             Some("f32") => false,
             Some(other) => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("unknown kv_precision {other:?}; use \"f16\" or \"f32\""),
                 ))
@@ -898,9 +895,8 @@ impl InferenceBackend for LlamaRef {
         let threads = std::thread::available_parallelism()
             .map(|n| (n.get() / 2).max(1) as c_int)
             .unwrap_or(4);
-        let c_path = CString::new(artifact.path.as_bytes().to_vec()).map_err(|_| {
-            TuckmillError::new(ErrorCode::InvalidConfiguration, "path contains NUL")
-        })?;
+        let c_path = CString::new(artifact.path.as_bytes().to_vec())
+            .map_err(|_| ChineError::new(ErrorCode::InvalidConfiguration, "path contains NUL"))?;
         let mut err_buf = vec![0u8; 512];
         // SAFETY: shim was version-checked; path and error buffer are valid.
         let gpu_layers = opts.gpu_layers.unwrap_or(0).max(0);
@@ -922,7 +918,7 @@ impl InferenceBackend for LlamaRef {
                 .position(|b| *b == 0)
                 .unwrap_or(err_buf.len());
             let msg = String::from_utf8_lossy(&err_buf[..len]).into_owned();
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!("llama.cpp failed to load {}: {msg}", artifact.path),
             ));
@@ -986,7 +982,7 @@ impl InferenceBackend for LlamaRef {
             self.ctx_tokens,
             self.kv_precision,
             self.threads,
-            tuckmill_manifest::units::Bytes(model_bytes)
+            chine_manifest::units::Bytes(model_bytes)
         );
         Ok(self.note.clone())
     }
@@ -995,19 +991,19 @@ impl InferenceBackend for LlamaRef {
         req.sampling.validate()?;
         let prompt_len = req.prompt_tokens.len() as u64;
         if prompt_len == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "prompt must contain at least one token",
             ));
         }
         if req.max_output_tokens == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "max_output_tokens must be positive",
             ));
         }
         if prompt_len + req.max_output_tokens > self.ctx_tokens as u64 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "prompt {prompt_len} + max output {} exceeds the context {}",
@@ -1024,7 +1020,7 @@ impl InferenceBackend for LlamaRef {
             // SAFETY: handle valid; clears KV memory and samples state.
             let rc = unsafe { (self.shim.reset)(h) };
             if rc != 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "llama context reset failed before prefill",
                 ));
@@ -1040,17 +1036,17 @@ impl InferenceBackend for LlamaRef {
         let t0 = Instant::now();
         let mut first_generated_at: Option<Instant> = None;
         let mut last_generated_at: Option<Instant> = None;
-        let mut rng = tuckmill_backend::sampling::Rng::new(req.seed);
-        let sampling_cfg = tuckmill_backend::sampling::SamplingConfig {
+        let mut rng = chine_backend::sampling::Rng::new(req.seed);
+        let sampling_cfg = chine_backend::sampling::SamplingConfig {
             temperature: req.sampling.temperature,
             top_k: None,
             top_p: req.sampling.top_p,
         };
-        let mut buffer = tuckmill_backend::output::VisibleOutputBuffer::new(&req.stop);
+        let mut buffer = chine_backend::output::VisibleOutputBuffer::new(&req.stop);
         let mut release_index: u64 = 0;
         let mut generated_ids: u64 = 0;
         // Incremental UTF-8 assembly with byte-level token provenance.
-        let mut decoder = tuckmill_manifest::utf8::Utf8StreamDecoder::new();
+        let mut decoder = chine_manifest::utf8::Utf8StreamDecoder::new();
         let emit = |text: &str, release_index: &mut u64, ctl: &mut GenControl<'_>| -> bool {
             if text.is_empty() {
                 return true;
@@ -1075,7 +1071,7 @@ impl InferenceBackend for LlamaRef {
                 // SAFETY: handle valid; out pointer valid.
                 let rc = unsafe { (self.shim.sample_greedy)(h, &mut sampled) };
                 if rc != 0 || sampled < 0 {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("llama greedy sampling failed (rc {rc})"),
                     ));
@@ -1088,15 +1084,15 @@ impl InferenceBackend for LlamaRef {
                 // SAFETY: logits buffer sized to the vocabulary.
                 let n = unsafe { (self.shim.logits)(h, logits.as_mut_ptr(), logits.len() as i32) };
                 if n < 0 {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         format!("llama logits unavailable (rc {n})"),
                     ));
                 }
                 logits.truncate(n as usize);
-                let Some(t) = tuckmill_backend::sampling::sample(&logits, &sampling_cfg, &mut rng)
+                let Some(t) = chine_backend::sampling::sample(&logits, &sampling_cfg, &mut rng)
                 else {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::WorkerFailed,
                         "sampling produced no token: every logit was non-finite",
                     ));
@@ -1168,14 +1164,14 @@ impl InferenceBackend for LlamaRef {
         let mut scored = 0u64;
         for position in positions {
             if cancelled() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Cancelled,
                     "scoring cancelled at a position boundary",
                 ));
             }
             let pos = *position as usize;
             if pos >= tokens.len() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     "scoring position outside the token sequence",
                 ));
@@ -1184,7 +1180,7 @@ impl InferenceBackend for LlamaRef {
             // SAFETY: handle valid.
             let rc = unsafe { (self.shim.reset)(h) };
             if rc != 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "llama_reset failed",
                 ));
@@ -1194,7 +1190,7 @@ impl InferenceBackend for LlamaRef {
             // SAFETY: logits buffer sized to the vocabulary.
             let n = unsafe { (self.shim.logits)(h, logits.as_mut_ptr(), logits.len() as i32) };
             if n < 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     format!("llama logits unavailable (rc {n})"),
                 ));
@@ -1220,7 +1216,7 @@ impl InferenceBackend for LlamaRef {
 
     fn shutdown(&mut self) {
         if !self.handle.is_null() {
-            // SAFETY: handle came from tm_load and is freed exactly once.
+            // SAFETY: handle came from ch_load and is freed exactly once.
             unsafe { (self.shim.free)(self.handle) };
             self.handle = std::ptr::null_mut();
         }
@@ -1237,7 +1233,7 @@ impl Drop for LlamaRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn lib_available() -> Option<PathBuf> {
         resolve_lib_path(None).ok().filter(|p| p.exists())
@@ -1252,12 +1248,12 @@ mod tests {
 
     fn plan_for(ctx: u64) -> ExecutionPlan {
         let mut p = ExecutionPlan::new_skeleton(
-            tuckmill_manifest::Id::new("a".repeat(64)).unwrap(),
-            tuckmill_manifest::Id::new("b".repeat(64)).unwrap(),
+            chine_manifest::Id::new("a".repeat(64)).unwrap(),
+            chine_manifest::Id::new("b".repeat(64)).unwrap(),
             "qwen3".into(),
         );
         p.mode = ExecutionMode::Resident;
-        p.context = tuckmill_manifest::plan::PlanContext::new(ctx, 64);
+        p.context = chine_manifest::plan::PlanContext::new(ctx, 64);
         p.plan_id = p.compute_id().unwrap();
         p
     }
@@ -1265,7 +1261,7 @@ mod tests {
     #[test]
     fn lib_resolution_reports_honestly_when_unset() {
         // Only meaningful when the environment genuinely lacks the library.
-        if std::env::var("TUCKMILL_LLAMA_LIB").is_ok() {
+        if std::env::var("CHINE_LLAMA_LIB").is_ok() {
             return;
         }
         let err = resolve_lib_path(None).unwrap_err();
@@ -1276,7 +1272,7 @@ mod tests {
     #[test]
     fn shim_missing_symbols_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("libtm_llama.dylib");
+        let path = dir.path().join("libchine_llama.dylib");
         std::fs::write(&path, b"not a dylib").unwrap();
         let err = match Shim::open(&path) {
             Err(e) => e,
@@ -1288,14 +1284,14 @@ mod tests {
     #[test]
     fn tokenizer_golden_matches_llama_cpp_when_available() {
         let Some(_lib) = lib_available() else {
-            eprintln!("skipping: TUCKMILL_LLAMA_LIB not set (run scripts/fetch-llama.sh)");
+            eprintln!("skipping: CHINE_LLAMA_LIB not set (run scripts/fetch-llama.sh)");
             return;
         };
         let (_dir, fixture) = fixture();
         let insp =
-            tuckmill_manifest::gguf::inspect(&fixture, &tuckmill_manifest::gguf::Limits::default())
+            chine_manifest::gguf::inspect(&fixture, &chine_manifest::gguf::Limits::default())
                 .unwrap();
-        let ours = tuckmill_tuckcore::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
+        let ours = chine_chinecore::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
 
         let mut backend = LlamaRef::new();
         let artifact = ArtifactRef {
@@ -1340,14 +1336,14 @@ mod tests {
     #[test]
     fn real_model_reference_tokenizer_goldens_when_available() {
         let (Ok(lib), Ok(real)) = (
-            std::env::var("TUCKMILL_LLAMA_LIB"),
-            std::env::var("TUCKMILL_REAL_GGUF"),
+            std::env::var("CHINE_LLAMA_LIB"),
+            std::env::var("CHINE_REAL_GGUF"),
         ) else {
-            eprintln!("skipping: set TUCKMILL_LLAMA_LIB and TUCKMILL_REAL_GGUF");
+            eprintln!("skipping: set CHINE_LLAMA_LIB and CHINE_REAL_GGUF");
             return;
         };
         if !std::path::Path::new(&real).exists() {
-            eprintln!("skipping: TUCKMILL_REAL_GGUF does not exist");
+            eprintln!("skipping: CHINE_REAL_GGUF does not exist");
             return;
         }
         let _ = lib;
@@ -1381,31 +1377,31 @@ mod tests {
         }
         // And the built-in tokenizer refuses non-GPT-2 pre-tokenizers rather
         // than approximating them (same-profile honesty).
-        let insp = tuckmill_manifest::gguf::inspect(
+        let insp = chine_manifest::gguf::inspect(
             std::path::Path::new(&real),
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
         )
         .unwrap();
-        let native = tuckmill_tuckcore::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
+        let native = chine_chinecore::tokenizer::Tokenizer::from_gguf(&insp).unwrap();
         if !native.encode_is_exact() {
             let err = native.encode("test", false).unwrap_err();
             assert_eq!(
                 err.code(),
-                tuckmill_manifest::ErrorCode::UnsupportedArchitecture
+                chine_manifest::ErrorCode::UnsupportedArchitecture
             );
-            assert!(err.action().contains("TUCKMILL_LLAMA_LIB"));
+            assert!(err.action().contains("CHINE_LLAMA_LIB"));
         }
     }
 
     #[test]
     fn reference_backend_scores_and_generates_when_available() {
         let Some(_lib) = lib_available() else {
-            eprintln!("skipping: TUCKMILL_LLAMA_LIB not set (run scripts/fetch-llama.sh)");
+            eprintln!("skipping: CHINE_LLAMA_LIB not set (run scripts/fetch-llama.sh)");
             return;
         };
         let (_dir, fixture) = fixture();
         let insp =
-            tuckmill_manifest::gguf::inspect(&fixture, &tuckmill_manifest::gguf::Limits::default())
+            chine_manifest::gguf::inspect(&fixture, &chine_manifest::gguf::Limits::default())
                 .unwrap();
         let artifact = ArtifactRef {
             path: fixture.display().to_string(),
@@ -1456,7 +1452,7 @@ mod tests {
             max_output_tokens: 4,
             stop: vec![],
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
         };
         let outcome = backend.generate(&req, &mut ctl).unwrap();
@@ -1501,7 +1497,7 @@ mod tests {
             let mut req = req.clone();
             req.max_output_tokens = 8;
             req.seed = seed;
-            req.sampling = tuckmill_backend::SamplingPolicy {
+            req.sampling = chine_backend::SamplingPolicy {
                 temperature: 1.0,
                 top_p: Some(0.9),
             };

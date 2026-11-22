@@ -11,6 +11,6 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo:rustc-env=TUCKMILL_SOURCE_REV={rev}");
+    println!("cargo:rustc-env=CHINE_SOURCE_REV={rev}");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
 }

@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::units::Bytes;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::units::Bytes;
 
 use crate::layout::StoreLayout;
 
@@ -20,13 +20,13 @@ pub const CURL_CANDIDATE: &str = "/usr/bin/curl";
 /// Validate a remote URL: HTTPS only, no embedded credentials, bounded
 /// length, real host.
 pub fn validate_remote_url(url: &str) -> Result<()> {
-    let err = |msg: String| TuckmillError::new(ErrorCode::InvalidRequest, msg);
+    let err = |msg: String| ChineError::new(ErrorCode::InvalidRequest, msg);
     if url.len() > 4096 {
         return Err(err("url is unreasonably long".into()));
     }
     let rest = url.strip_prefix("https://").ok_or_else(|| {
         err("only https:// origins are supported for downloads".into())
-            .with_action("Use an https URL or import a local file with 'tuckmill import'.")
+            .with_action("Use an https URL or import a local file with 'chine import'.")
     })?;
     let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host_port = &rest[..host_end];
@@ -103,7 +103,7 @@ impl CurlFetcher {
     /// Discover the system curl. Absence is reported as unavailable, not
     /// worked around with weaker http.
     pub fn discover() -> Result<Self> {
-        let candidates: Vec<PathBuf> = std::env::var("TUCKMILL_CURL")
+        let candidates: Vec<PathBuf> = std::env::var("CHINE_CURL")
             .map(PathBuf::from)
             .into_iter()
             .chain([PathBuf::from(CURL_CANDIDATE)])
@@ -113,11 +113,11 @@ impl CurlFetcher {
                 return Ok(Self { curl: c });
             }
         }
-        Err(TuckmillError::new(
+        Err(ChineError::new(
             ErrorCode::Unavailable,
             "curl was not found; controlled https downloads require it",
         )
-        .with_action("Install curl or import a local file with 'tuckmill import'."))
+        .with_action("Install curl or import a local file with 'chine import'."))
     }
 
     pub fn fetch(
@@ -131,10 +131,10 @@ impl CurlFetcher {
         let args = build_curl_args(url, dest, resume_from, max_bytes);
         // Never a shell: argv goes straight to exec.
         let status = Command::new(&self.curl).args(&args).status().map_err(|e| {
-            TuckmillError::new(ErrorCode::Io, format!("failed to run curl: {e}")).with_source(e)
+            ChineError::new(ErrorCode::Io, format!("failed to run curl: {e}")).with_source(e)
         })?;
         if !status.success() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Io,
                 format!(
                     "download failed (curl exit {})",
@@ -168,7 +168,7 @@ pub fn download(
 ) -> Result<DownloadOutcome> {
     layout.ensure()?;
     let fetcher = CurlFetcher::discover()?;
-    let name_hash = tuckmill_manifest::ids::sha256_hex(url.as_bytes());
+    let name_hash = chine_manifest::ids::sha256_hex(url.as_bytes());
     let dest = layout
         .downloads_dir()
         .join(format!("{}.download", &name_hash[..16]));
@@ -183,11 +183,11 @@ pub fn download(
     }
 
     fetcher.fetch(url, &dest, resume_from, max_bytes)?;
-    let bytes = std::fs::metadata(&dest).map_err(TuckmillError::from)?.len();
+    let bytes = std::fs::metadata(&dest).map_err(ChineError::from)?.len();
     if let Some(max) = max_bytes {
         if bytes > max {
             let _ = std::fs::remove_file(&dest);
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "download exceeded the {} ceiling and was discarded",
@@ -205,7 +205,7 @@ pub fn download(
             crate::digester::digest_file(&dest, crate::digester::DEFAULT_CHUNK_BYTES)?;
         if actual.as_str() != expected {
             let _ = std::fs::remove_file(&dest);
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 "downloaded payload does not match the expected digest; the file was discarded",
             ));

@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{hex, Id};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{hex, Id};
 
 pub const DEFAULT_CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -46,12 +46,12 @@ impl DigestJournal {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).map_err(TuckmillError::from)?;
+        let bytes = std::fs::read(path).map_err(ChineError::from)?;
         let journal: DigestJournal = serde_json::from_slice(&bytes).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "digest journal")
+            chine_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "digest journal")
         })?;
         if journal.schema_version != 1 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "unsupported digest journal schema {}",
@@ -65,15 +65,15 @@ impl DigestJournal {
     pub fn save(&self, path: &Path) -> Result<()> {
         let tmp = path.with_extension("journal.tmp");
         let bytes = serde_json::to_vec(self).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "digest journal write")
+            chine_manifest::error::json_error(e, ErrorCode::Internal, "digest journal write")
         })?;
-        std::fs::write(&tmp, bytes).map_err(TuckmillError::from)?;
-        std::fs::rename(&tmp, path).map_err(TuckmillError::from)?;
+        std::fs::write(&tmp, bytes).map_err(ChineError::from)?;
+        std::fs::rename(&tmp, path).map_err(ChineError::from)?;
         Ok(())
     }
 
     /// Final digest from the journal. Delegates to the shared canonical
-    /// implementation (`tuckmill_manifest::digest`) so store imports and
+    /// implementation (`chine_manifest::digest`) so store imports and
     /// executor payload verification agree by construction.
     pub fn final_digest(&self) -> Id {
         let rows: Vec<(u64, String)> = self
@@ -81,7 +81,7 @@ impl DigestJournal {
             .iter()
             .map(|c| (c.len, c.sha256.clone()))
             .collect();
-        Id::new(tuckmill_manifest::digest::final_digest(
+        Id::new(chine_manifest::digest::final_digest(
             self.chunk_bytes,
             &rows,
         ))
@@ -116,7 +116,7 @@ impl ChunkedDigester {
         let mut chunk_len: u64 = 0;
         let mut total: u64 = 0;
         loop {
-            let n = reader.read(&mut buf).map_err(TuckmillError::from)?;
+            let n = reader.read(&mut buf).map_err(ChineError::from)?;
             if n == 0 {
                 break;
             }
@@ -160,7 +160,7 @@ impl ChunkedDigester {
 /// Digest an entire file in one streaming pass.
 pub fn digest_file(path: &Path, chunk_bytes: u64) -> Result<(Id, u64)> {
     let file = std::fs::File::open(path).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::StorageLost,
             format!("cannot open {} for hashing: {e}", path.display()),
         )
@@ -174,18 +174,18 @@ pub fn digest_file(path: &Path, chunk_bytes: u64) -> Result<(Id, u64)> {
 
 /// Hash the first `prefix_len` bytes of a file (source-change detection).
 pub fn prefix_hash(path: &Path, prefix_len: u64) -> Result<String> {
-    let mut file = std::fs::File::open(path).map_err(TuckmillError::from)?;
+    let mut file = std::fs::File::open(path).map_err(ChineError::from)?;
     let mut buf = vec![0u8; prefix_len as usize];
     let mut filled = 0usize;
     while filled < buf.len() {
-        let n = file.read(&mut buf[filled..]).map_err(TuckmillError::from)?;
+        let n = file.read(&mut buf[filled..]).map_err(ChineError::from)?;
         if n == 0 {
             break;
         }
         filled += n;
     }
     buf.truncate(filled);
-    Ok(tuckmill_manifest::ids::sha256_hex(&buf))
+    Ok(chine_manifest::ids::sha256_hex(&buf))
 }
 
 #[cfg(test)]

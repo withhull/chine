@@ -6,9 +6,9 @@
 
 use std::path::Path;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{hash_of, now_unix_ms, Id};
-use tuckmill_manifest::records::{
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{hash_of, now_unix_ms, Id};
+use chine_manifest::records::{
     CapabilityStatus, DeviceProfile, GpuProfile, PowerProfile, StorageProfile,
 };
 
@@ -22,7 +22,7 @@ pub fn detect(data_path: &Path) -> Result<DeviceProfile> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = data_path;
-        Err(TuckmillError::new(
+        Err(ChineError::new(
             ErrorCode::Unavailable,
             "device detection is implemented for macOS only in this build",
         ))
@@ -35,7 +35,7 @@ fn detect_macos(data_path: &Path) -> Result<DeviceProfile> {
 
     let chip = sysctl_string("machdep.cpu.brand_string").unwrap_or_else(|| "unknown".to_string());
     let memory_bytes = sysctl_u64("hw.memsize")
-        .ok_or_else(|| TuckmillError::new(ErrorCode::Unavailable, "hw.memsize is unavailable"))?;
+        .ok_or_else(|| ChineError::new(ErrorCode::Unavailable, "hw.memsize is unavailable"))?;
     let cpu_cores_total = sysctl_u64("hw.ncpu").unwrap_or(1) as u32;
     let cpu_cores_performance = sysctl_u64("hw.perflevel0.physicalcpu").map(|v| v as u32);
     let cpu_cores_efficiency = sysctl_u64("hw.perflevel1.physicalcpu").map(|v| v as u32);
@@ -216,7 +216,7 @@ fn statfs_of(path: &Path) -> Option<(u64, u64, Id)> {
             &buf.f_fsid as *const libc::fsid_t as *const u8,
             std::mem::size_of::<libc::fsid_t>(),
         );
-        let identity = Id::new(tuckmill_manifest::ids::sha256_hex(
+        let identity = Id::new(chine_manifest::ids::sha256_hex(
             &[fsid_bytes, &buf.f_fssubtype.to_le_bytes()].concat(),
         ))
         .ok()?;
@@ -452,7 +452,7 @@ mod tests {
         assert!(!profile.os_version.is_empty());
         assert_eq!(
             profile.capabilities["storage"].status,
-            tuckmill_manifest::records::CapabilityStatusKind::Available
+            chine_manifest::records::CapabilityStatusKind::Available
         );
         // Device id is stable across samples.
         let again = detect(dir.path()).unwrap();

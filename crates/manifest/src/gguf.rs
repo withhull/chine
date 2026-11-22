@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 use crate::ggml;
 use crate::ids::{hash_of, now_unix_ms, sha256_hex, Id};
 use crate::records::TensorStats;
@@ -374,13 +374,13 @@ pub fn classify_tensor(name: &str) -> TensorClass {
 /// Parse and validate a GGUF file without reading tensor data.
 pub fn inspect(path: &Path, limits: &Limits) -> Result<GgufInspection> {
     let file = std::fs::File::open(path).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidArtifact,
             format!("cannot open {}: {e}", path.display()),
         )
         .with_source(e)
     })?;
-    let file_len = file.metadata().map_err(TuckmillError::from)?.len();
+    let file_len = file.metadata().map_err(ChineError::from)?.len();
     let mut reader = BufReader::with_capacity(1 << 20, file);
     let inspection = inspect_reader(&mut reader, file_len, limits, None)?;
     Ok(inspection)
@@ -398,14 +398,14 @@ pub fn inspect_reader<R: Read + Seek>(
     let mut magic = [0u8; 4];
     r.read_exact_bytes(&mut magic)?;
     if &magic != GGUF_MAGIC {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             "file does not start with the GGUF magic",
         ));
     }
     let version = r.read_u32()?;
     if version != 2 && version != 3 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             format!("unsupported GGUF version {version} (expected 2 or 3)"),
         ));
@@ -413,7 +413,7 @@ pub fn inspect_reader<R: Read + Seek>(
     let tensor_count = r.read_u64()?;
     let kv_count = r.read_u64()?;
     if tensor_count > limits.max_tensors {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             format!(
                 "tensor count {tensor_count} exceeds limit {}",
@@ -495,9 +495,8 @@ pub fn inspect_reader<R: Read + Seek>(
         }
         let type_id = r.read_u32()?;
         let offset = r.read_u64()?;
-        let byte_size = ggml::tensor_bytes(type_id, elems).map_err(|e| {
-            TuckmillError::new(e.code(), format!("tensor {name:?}: {}", e.message()))
-        })?;
+        let byte_size = ggml::tensor_bytes(type_id, elems)
+            .map_err(|e| ChineError::new(e.code(), format!("tensor {name:?}: {}", e.message())))?;
         tensors.push(GgufTensor {
             name,
             dims,
@@ -667,8 +666,8 @@ fn read_value_of_type<R: Read>(
     })
 }
 
-fn bad(msg: impl Into<String>) -> TuckmillError {
-    TuckmillError::new(ErrorCode::InvalidArtifact, msg)
+fn bad(msg: impl Into<String>) -> ChineError {
+    ChineError::new(ErrorCode::InvalidArtifact, msg)
 }
 
 fn align_up(value: u64, align: u64) -> Option<u64> {
@@ -751,7 +750,7 @@ impl<'a, R: Read> CountingReader<'a, R> {
 pub fn seek_to_data<R: Seek>(reader: &mut R, inspection: &GgufInspection) -> Result<()> {
     reader
         .seek(SeekFrom::Start(inspection.data_start))
-        .map_err(TuckmillError::from)?;
+        .map_err(ChineError::from)?;
     Ok(())
 }
 

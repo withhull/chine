@@ -1,6 +1,6 @@
 //! Canonical chat templates for supported architectures.
 //!
-//! Tuckmill renders chat prompts with a *restricted* renderer: only these
+//! Chine renders chat prompts with a *restricted* renderer: only these
 //! exact, pinned template revisions are recognized (byte-for-byte), and any
 //! other declared template is refused rather than approximated. The constant
 //! below was extracted from the unchanged Qwen3-0.6B GGUF artifact used by

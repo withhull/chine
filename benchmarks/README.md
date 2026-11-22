@@ -23,10 +23,10 @@ Frozen workload definition: [`standard-v1.json`](standard-v1.json).
 
 ## This build's output
 
-`tuckmill bench <model>` writes a standard-v1 record for the selected
+`chine bench <model>` writes a standard-v1 record for the selected
 backend: `--allow-test-engine` measures the *pipeline* only (synthetic
 output, `engine: reference-test`, a caveat stating that no weights ran —
-never evidence of model speed); `--engine tuckcore` and `--engine llama`
+never evidence of model speed); `--engine chinecore` and `--engine llama`
 execute real weights and count the worker's model tokens (schema v4).
 Every record carries `certified: false` and its caveats.
 
@@ -38,7 +38,7 @@ One command per artifact and machine:
 scripts/bench-baseline.sh path/to/model.gguf
 ```
 
-It runs TuckCore (`--kernels metal`) and the pinned llama.cpp
+It runs ChineCore (`--kernels metal`) and the pinned llama.cpp
 (`--gpu-layers 99`) through the same harness on the same frozen token ids,
 alternating their order every round (ABBA), then the pinned `llama-bench`
 tool on the same file (its own tokens; a vendor-tool row, never
@@ -53,13 +53,13 @@ cold-load and kept out of warm medians. Results land in
 
 ## Comparator program (ADR-006)
 
-Tuckmill is measured against **llama.cpp**, **MLX**, and **Splash** across
+Chine is measured against **llama.cpp**, **MLX**, and **Splash** across
 memory tiers — not only validated on the 8 GiB floor. A comparison counts as
 evidence only when:
 
 - the same artifact and the same token IDs are used (identity-verified),
 - declared numerical profiles and cache states match,
-- tolerances are registered before the run (`tuckmill verify --reference` is
+- tolerances are registered before the run (`chine verify --reference` is
   the harness; the pinned llama.cpp backend is integrated and the first
   numerical profile is recorded),
 - ordering is randomized/ABBA with matched foreground controls, and
@@ -76,7 +76,7 @@ fixture weights, context 2048:
 
 | Engine | ttft p50 | throughput (median) | footprint peak |
 | --- | --- | --- | --- |
-| TuckCore (scalar f32 oracle) | 72 ms | 314 tok/s | 7.2 MiB |
+| ChineCore (scalar f32 oracle) | 72 ms | 314 tok/s | 7.2 MiB |
 | llama.cpp b11695 (CPU via tm shim) | 1.6 ms | 6412 tok/s | 86.8 MiB |
 
 ## Real-model Stage A measurements (not claims)
@@ -97,10 +97,10 @@ are kept alongside; neither set is a controlled comparison:
 
 | Configuration | e2e tok/s (median of 3) | decode tok/s | ttft | footprint peak | historical single run (e2e/decode, ttft) |
 | --- | --- | --- | --- | --- | --- |
-| TuckCore, scalar + owned | 0.25 | 0.75 | 166.4 s | 1.24 GiB | 1.24 / 2.65, 27.6 s |
-| TuckCore, scalar + mapped | 1.17 | 2.38 | 28.1 s | 513 MiB | 1.57 / 3.24, 21.2 s |
-| TuckCore, neon + owned | 1.36 | 2.79 | 27.1 s | 1.26 GiB | 2.69 / 5.70, 12.7 s |
-| TuckCore, neon + mapped | 3.96 | 7.87 | 8.2 s | 513 MiB | 4.19 / 9.18, 8.4 s |
+| ChineCore, scalar + owned | 0.25 | 0.75 | 166.4 s | 1.24 GiB | 1.24 / 2.65, 27.6 s |
+| ChineCore, scalar + mapped | 1.17 | 2.38 | 28.1 s | 513 MiB | 1.57 / 3.24, 21.2 s |
+| ChineCore, neon + owned | 1.36 | 2.79 | 27.1 s | 1.26 GiB | 2.69 / 5.70, 12.7 s |
+| ChineCore, neon + mapped | 3.96 | 7.87 | 8.2 s | 513 MiB | 4.19 / 9.18, 8.4 s |
 | llama.cpp b11695 CPU (speed baseline) | 28.71 | 71.83 | 226 ms | 928 MiB | 35.22 / 89.56, 1.1 s |
 | llama.cpp b11695 Metal (gpu_layers 99, speed baseline) | 55.97 | 82.47 | 52 ms | 370 MiB | 61.44 / 88.37, 0.33 s |
 
@@ -115,7 +115,7 @@ memory/thermal state, clean file-backed views are not. Do not certify exact
 rates from either session; G3 defines the controlled conditions (ABBA,
 warm/cold controls, foreground matching, thermal soak).
 
-Matched readings (same artifact and workload; all TuckCore rows at the same
+Matched readings (same artifact and workload; all ChineCore rows at the same
 declared numerical profile, `oracle-f32`):
 
 - **Vectorization** (scalar → neon), mapped storage: ≈2.7-3.4× e2e and
@@ -189,7 +189,7 @@ Instruct models can end in their end-of-sequence token after a few tokens
 on the frozen synthetic prompts; dense Qwen3-0.6B does so after 1-2
 tokens at 512 input tokens. A decode figure over one inter-token interval
 is not a measurement. For decode comparisons on such models, run
-`tuckmill bench --ignore-eos` (harness: `IGNORE_EOS=1`):
+`chine bench --ignore-eos` (harness: `IGNORE_EOS=1`):
 
 - On every engine, EOS does not end generation. It is fed back like any
   other token and its bytes stay invisible, so all engines generate the

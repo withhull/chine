@@ -21,7 +21,7 @@ Extend the shared graph, not a per-family forward pass:
   output before the residual add (Gemma's post-attention and post-FFN
   norms).
 - `FfnSpec::GeGlu`: `down(gelu_tanh(gate x) * up x)` with ggml's tanh
-  GELU (`tm_gelu_tanh_mul_f32`).
+  GELU (`ch_gelu_tanh_mul_f32`).
 - `ModelGraph.embedding_scale`: Gemma's `sqrt(hidden)` on the embedded rows.
 - `adapters::gemma3`: a global layer every sixth, otherwise a 512-token
   window; RoPE base 10,000 on window layers and the artifact's base on

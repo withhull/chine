@@ -1,4 +1,4 @@
-//! Tuckmill inference-backend interface (ADR-005).
+//! Chine inference-backend interface (ADR-005).
 //!
 //! A narrow, versioned contract between the supervisor and execution
 //! backends. Backends own weights, kernels, samplers, and execution buffers;
@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::ExecutionPlan;
-use tuckmill_manifest::records::EngineIdentity;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::ExecutionPlan;
+use chine_manifest::records::EngineIdentity;
 
 pub mod output;
 pub mod sampling;
@@ -33,8 +33,8 @@ pub enum BackendId {
     ReferenceTest,
     /// Experimental custom native executor (ADR-005). Real weights, scalar
     /// reference kernels at Stage 0.
-    #[serde(rename = "tuckcore")]
-    TuckCore,
+    #[serde(rename = "chinecore")]
+    ChineCore,
     /// Pinned llama.cpp via the checked C shim: the compatibility backend and
     /// numerical oracle (ADR-005/ADR-006).
     #[serde(rename = "llama.cpp")]
@@ -45,7 +45,7 @@ impl BackendId {
     pub fn as_str(self) -> &'static str {
         match self {
             BackendId::ReferenceTest => "reference-test",
-            BackendId::TuckCore => "tuckcore",
+            BackendId::ChineCore => "chinecore",
             BackendId::LlamaCpp => "llama.cpp",
         }
     }
@@ -53,7 +53,7 @@ impl BackendId {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "reference-test" => Some(BackendId::ReferenceTest),
-            "tuckcore" => Some(BackendId::TuckCore),
+            "chinecore" => Some(BackendId::ChineCore),
             "llama.cpp" | "llama" => Some(BackendId::LlamaCpp),
             _ => None,
         }
@@ -69,7 +69,7 @@ pub struct BackendCapabilities {
     pub moe: bool,
     pub hybrid: bool,
     pub ternary: bool,
-    /// True when the backend requires a GPU bridge. Stage 0 TuckCore is
+    /// True when the backend requires a GPU bridge. Stage 0 ChineCore is
     /// scalar CPU; the flag exists so the supervisor can say so honestly.
     pub requires_gpu: bool,
     pub notes: Vec<String>,
@@ -203,7 +203,7 @@ impl SamplingPolicy {
     /// Validate the settings; unsupported values are typed rejections.
     pub fn validate(&self) -> Result<()> {
         if !self.temperature.is_finite() || !(0.0..=2.0).contains(&self.temperature) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "temperature {} is outside the supported range 0.0..=2.0",
@@ -213,7 +213,7 @@ impl SamplingPolicy {
         }
         if let Some(p) = self.top_p {
             if !p.is_finite() || !(0.0..=1.0).contains(&p) {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!("top_p {p} is outside the supported range 0.0..=1.0"),
                 ));
@@ -529,7 +529,7 @@ impl ArtifactRef {
     /// store's canonical payload path; hashes are the recorded identities the
     /// backend must re-verify before executing.
     pub fn from_record(
-        artifact: &tuckmill_manifest::records::ModelArtifact,
+        artifact: &chine_manifest::records::ModelArtifact,
         payload_path: &std::path::Path,
     ) -> Self {
         Self {
@@ -551,7 +551,7 @@ impl ArtifactRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineKind {
     ReferenceTest,
-    TuckCore,
+    ChineCore,
     LlamaCpp,
 }
 
@@ -559,7 +559,7 @@ impl EngineKind {
     pub fn backend_id(self) -> BackendId {
         match self {
             EngineKind::ReferenceTest => BackendId::ReferenceTest,
-            EngineKind::TuckCore => BackendId::TuckCore,
+            EngineKind::ChineCore => BackendId::ChineCore,
             EngineKind::LlamaCpp => BackendId::LlamaCpp,
         }
     }
@@ -578,7 +578,7 @@ mod tests {
     fn backend_ids_roundtrip_on_the_wire() {
         for id in [
             BackendId::ReferenceTest,
-            BackendId::TuckCore,
+            BackendId::ChineCore,
             BackendId::LlamaCpp,
         ] {
             let s = serde_json::to_string(&id).unwrap();
@@ -610,7 +610,7 @@ mod tests {
         assert!(is_synthetic_engine(
             "reference-test (kernels not implemented: K01)"
         ));
-        assert!(!is_synthetic_engine("tuckcore"));
+        assert!(!is_synthetic_engine("chinecore"));
         assert!(!is_synthetic_engine("native"));
     }
 }

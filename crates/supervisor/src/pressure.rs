@@ -84,11 +84,11 @@ impl SignalSource for MacSignalSource {
     }
 
     fn footprint_of(&self, pid: i32) -> Option<u64> {
-        tuckmill_planner::device::physical_footprint_of(pid)
+        chine_planner::device::physical_footprint_of(pid)
     }
 
     fn compressor_bytes(&self) -> Option<u64> {
-        tuckmill_planner::device::compressor_bytes()
+        chine_planner::device::compressor_bytes()
     }
 
     fn low_power_mode(&self) -> Option<bool> {

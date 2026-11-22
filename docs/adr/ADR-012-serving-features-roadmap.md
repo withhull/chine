@@ -6,7 +6,7 @@ ADR-006 (tiers), ADR-008 (Qwen3.5 contract) and ADR-011 (unified engine).
 ## Context
 
 A review of Ollama (`github.com/ollama/ollama`) showed five features that
-make a local engine usable day to day and that Tuckmill does not have:
+make a local engine usable day to day and that Chine does not have:
 
 - chat for every supported family;
 - a prefix cache;
@@ -15,7 +15,7 @@ make a local engine usable day to day and that Tuckmill does not have:
 - model lifecycle (keep-alive, several resident models, idle eviction);
 - distribution (pull and verify, Anthropic-compatible API).
 
-Ollama also makes choices Tuckmill's contract forbids. On out-of-memory it
+Ollama also makes choices Chine's contract forbids. On out-of-memory it
 shrinks the context; it admits models by an 80%-of-free-memory heuristic;
 and it writes one forward pass per family. Those are explicitly **not**
 adopted.
@@ -79,7 +79,7 @@ honest labels, and the unified engine.
   with Jinja2 3.1.6, configured as Hugging Face applies chat templates,
   from both artifacts' template bytes; both revisions agree on every case.
   Token ids come from pinned llama.cpp `llama-tokenize`, not from
-  Tuckmill's encoder.
+  Chine's encoder.
 - **Verified:**
   - the renderer reproduces all 12 prompts byte for byte and all 3
     refusals;
@@ -122,7 +122,7 @@ honest labels, and the unified engine.
   - The planner reserves the hybrid recurrent state twice in
     `kv_bytes_for`.
   - Attention-only models need nothing extra.
-- **Benchmarks.** `tuckmill bench` turns the cache off for TuckCore and
+- **Benchmarks.** `chine bench` turns the cache off for ChineCore and
   records a caveat, so warm repetitions are never hidden cache hits.
 - **Gate:**
   - fixture and pinned Qwen3.5-0.8B: request B, sharing request A's first
@@ -181,7 +181,7 @@ honest labels, and the unified engine.
   - worker end to end, pinned 0.8B: a 96-token chat continuation through
     `run --speculative` equals `run` text exactly.
   - `scripts/test.sh`: all checks passed.
-- **Measured** (pinned 0.8B, M3 8 GB, `tuckmill bench`, 512/256,
+- **Measured** (pinned 0.8B, M3 8 GB, `chine bench`, 512/256,
   `--ignore-eos`, f16 KV, three alternating pairs, locally-calibrated):
   decode 98.1-100.6 tok/s speculative vs 76.2-78.3 plain (≈1.30×); TTFT
   0.310-0.323 s vs 0.292-0.299 s (+4%, the MTP rows over the prompt).
@@ -252,7 +252,7 @@ How others do it (checked 2026-10-28):
   auto-evict of the previous JIT model.
 - **Splash:** a per-model memory plan; no documented lifecycle controls.
 
-What Tuckmill does now:
+What Chine does now:
 - **Per-request keep-alive** on `/v1/chat/completions`: `keep_alive`
   (Ollama's forms, plus `"forever"`) or `ttl` (LM Studio's seconds), never
   both. It sticks to the model until another request changes it.

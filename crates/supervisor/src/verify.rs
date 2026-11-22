@@ -1,9 +1,9 @@
 //! Equivalence verification with verification-integrity guarantees.
 //!
 //! Two modes:
-//! - **scheduling-equivalence**: resident vs forced-streaming TuckCore
+//! - **scheduling-equivalence**: resident vs forced-streaming ChineCore
 //!   (bit-exact at Stage 0; proves scheduling never changes the numbers).
-//! - **reference-comparison**: identical token IDs through TuckCore and the
+//! - **reference-comparison**: identical token IDs through ChineCore and the
 //!   pinned llama.cpp backend, teacher-forced logits compared under a
 //!   registered tolerance.
 //!
@@ -27,13 +27,13 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use tuckmill_backend::{ArtifactRef, BackendStats, EngineKind};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{hash_of, now_unix_ms, secure_random_hex, Id};
-use tuckmill_manifest::plan::ExecutionPlan;
-use tuckmill_manifest::records::Confidence;
-use tuckmill_manifest::records::EngineIdentity;
-use tuckmill_tuckcore::forward::NumericalProfile;
+use chine_backend::{ArtifactRef, BackendStats, EngineKind};
+use chine_chinecore::forward::NumericalProfile;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{hash_of, now_unix_ms, secure_random_hex, Id};
+use chine_manifest::plan::ExecutionPlan;
+use chine_manifest::records::Confidence;
+use chine_manifest::records::EngineIdentity;
 
 use crate::runtime::Runtime;
 use crate::worker::{IsolatedWorker, DEFAULT_SCORE_DEADLINE};
@@ -81,10 +81,10 @@ pub struct ReferenceCompareOptions {
     pub token_count: u64,
     pub max_score_positions: u64,
     pub generate_tokens: u64,
-    pub tuckcore_cache_bytes: u64,
-    /// Numerical profile for the TuckCore side; reference comparisons default
+    pub chinecore_cache_bytes: u64,
+    /// Numerical profile for the ChineCore side; reference comparisons default
     /// to `LlamaCpu` so both sides declare the same activation contract.
-    pub tuckcore_profile: NumericalProfile,
+    pub chinecore_profile: NumericalProfile,
     /// KV cache precision for BOTH sides ("f16" matches llama.cpp's default
     /// and is the diagnostic comparison; "f32" is available for
     /// precision-isolation runs). Recorded in the report for both engines.
@@ -95,10 +95,10 @@ pub struct ReferenceCompareOptions {
     /// Held-out qualification run: frozen inputs are derived with a different
     /// seed and a larger, disjoint workload from the calibration set.
     pub held_out: bool,
-    /// Requested kernel selection for the TuckCore side (None = default).
-    pub tuckcore_kernels: Option<tuckmill_tuckcore::KernelSelection>,
-    /// Requested weight-storage selection for the TuckCore side.
-    pub tuckcore_storage: Option<tuckmill_tuckcore::StorageSelection>,
+    /// Requested kernel selection for the ChineCore side (None = default).
+    pub chinecore_kernels: Option<chine_chinecore::KernelSelection>,
+    /// Requested weight-storage selection for the ChineCore side.
+    pub chinecore_storage: Option<chine_chinecore::StorageSelection>,
     pub score_deadline: Duration,
 }
 
@@ -108,13 +108,13 @@ impl Default for ReferenceCompareOptions {
             token_count: 12,
             max_score_positions: 6,
             generate_tokens: 8,
-            tuckcore_cache_bytes: 32 * 1024 * 1024,
-            tuckcore_profile: NumericalProfile::LlamaCpu,
+            chinecore_cache_bytes: 32 * 1024 * 1024,
+            chinecore_profile: NumericalProfile::LlamaCpu,
             kv_precision: "f16".to_string(),
             max_abs_tolerance: None,
             held_out: false,
-            tuckcore_kernels: None,
-            tuckcore_storage: None,
+            chinecore_kernels: None,
+            chinecore_storage: None,
             score_deadline: DEFAULT_SCORE_DEADLINE,
         }
     }
@@ -131,9 +131,9 @@ pub struct VerifyOptions {
     pub max_abs_tolerance: f64,
     pub require_exact: bool,
     /// Requested kernel selection for both sides (None = engine default).
-    pub kernels: Option<tuckmill_tuckcore::KernelSelection>,
+    pub kernels: Option<chine_chinecore::KernelSelection>,
     /// Requested weight-storage selection for both sides.
-    pub storage: Option<tuckmill_tuckcore::StorageSelection>,
+    pub storage: Option<chine_chinecore::StorageSelection>,
     pub score_deadline: Duration,
 }
 
@@ -211,25 +211,25 @@ pub struct VerifyConfigRecord {
     pub token_ids: Vec<u32>,
     pub positions: Vec<u64>,
     pub generate_tokens: u64,
-    pub tuckcore_profile: Option<String>,
-    pub tuckcore_cache_bytes: u64,
-    pub tuckcore_block_bytes: u64,
+    pub chinecore_profile: Option<String>,
+    pub chinecore_cache_bytes: u64,
+    pub chinecore_block_bytes: u64,
     pub streamed_cache_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llama_revision: Option<String>,
     pub kv_precision_requested: String,
-    /// Requested kernel selection for the TuckCore side ("scalar"/"neon"/
+    /// Requested kernel selection for the ChineCore side ("scalar"/"neon"/
     /// "auto"; absent = engine default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tuckcore_kernels_requested: Option<String>,
-    /// Requested weight-storage selection for the TuckCore side.
+    pub chinecore_kernels_requested: Option<String>,
+    /// Requested weight-storage selection for the ChineCore side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tuckcore_storage_requested: Option<String>,
-    /// What the TuckCore side actually acknowledged at load (resolved).
+    pub chinecore_storage_requested: Option<String>,
+    /// What the ChineCore side actually acknowledged at load (resolved).
     /// Part of the configuration hash: a run that resolved differently is a
     /// different configuration, never silently folded into the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_tuckcore: Option<crate::options::AcknowledgedExecution>,
+    pub resolved_chinecore: Option<crate::options::AcknowledgedExecution>,
     pub tolerance: f64,
     pub tolerance_source: String,
 }
@@ -292,20 +292,20 @@ fn derive_verify_inputs(
     held_out: bool,
 ) -> Result<(Vec<u32>, Vec<u64>, u64, String)> {
     let path = std::path::Path::new(&artifact.path);
-    let insp = tuckmill_manifest::gguf::inspect(path, &tuckmill_manifest::gguf::Limits::default())?;
+    let insp = chine_manifest::gguf::inspect(path, &chine_manifest::gguf::Limits::default())?;
     let embd = insp
         .tensors
         .iter()
         .find(|t| t.name == "token_embd.weight")
         .ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 "artifact is missing token_embd.weight",
             )
         })?;
     let vocab = embd.dims.get(1).copied().unwrap_or(0);
     if vocab == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "verification needs a vocabulary",
         ));
@@ -328,7 +328,7 @@ fn derive_verify_inputs(
         .filter(|p| *p < count)
         .collect();
     if positions.is_empty() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "no scoring positions fit inside the token sequence",
         ));
@@ -351,7 +351,7 @@ fn derive_verify_inputs(
 fn validate_scored_rows(positions: &[u64], rows: &[(u64, Vec<f32>)], vocab: usize) -> Result<()> {
     if rows.len() != positions.len() || !rows.iter().map(|(p, _)| *p).eq(positions.iter().copied())
     {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::WorkerFailed,
             format!(
                 "scoring result positions {:?} do not match the request {:?}",
@@ -362,7 +362,7 @@ fn validate_scored_rows(positions: &[u64], rows: &[(u64, Vec<f32>)], vocab: usiz
     }
     for (position, logits) in rows {
         if logits.len() != vocab {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!(
                     "scoring result for position {position} has {} values; the artifact vocabulary is {vocab} (truncated or oversized rows are never compared)",
@@ -371,7 +371,7 @@ fn validate_scored_rows(positions: &[u64], rows: &[(u64, Vec<f32>)], vocab: usiz
             ));
         }
         if let Some(bad) = logits.iter().position(|v| !v.is_finite()) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::IntegrityFailure,
                 format!(
                     "scoring result for position {position} contains a non-finite logit at index {bad}"
@@ -489,10 +489,10 @@ impl Drop for FootprintSampler {
 /// ids make collisions a bug, and the write fails closed if one appears).
 fn persist_report(runtime: &Runtime, report: &VerifyReport) -> Result<std::path::PathBuf> {
     let dir = runtime.layout.records_dir().join("verify");
-    std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+    std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
     let path = dir.join(format!("{}.json", report.run_id.as_str()));
     if path.exists() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::Internal,
             format!(
                 "verify record {} already exists; refusing to overwrite evidence",
@@ -500,12 +500,11 @@ fn persist_report(runtime: &Runtime, report: &VerifyReport) -> Result<std::path:
             ),
         ));
     }
-    let bytes = serde_json::to_vec_pretty(report).map_err(|e| {
-        tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "verify record")
-    })?;
+    let bytes = serde_json::to_vec_pretty(report)
+        .map_err(|e| chine_manifest::error::json_error(e, ErrorCode::Internal, "verify record"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).map_err(TuckmillError::from)?;
-    std::fs::rename(&tmp, &path).map_err(TuckmillError::from)?;
+    std::fs::write(&tmp, bytes).map_err(ChineError::from)?;
+    std::fs::rename(&tmp, &path).map_err(ChineError::from)?;
     Ok(path)
 }
 
@@ -530,17 +529,17 @@ fn identity_trio(worker: &IsolatedWorker) -> EngineIdentity {
 }
 
 impl Runtime {
-    /// Scheduling equivalence: resident vs forced-streaming TuckCore.
+    /// Scheduling equivalence: resident vs forced-streaming ChineCore.
     pub fn run_equivalence(
         &self,
         plan: &ExecutionPlan,
         artifact: &ArtifactRef,
         options: &VerifyOptions,
     ) -> Result<VerifyReport> {
-        if self.engine_kind() != EngineKind::TuckCore {
-            return Err(TuckmillError::new(
+        if self.engine_kind() != EngineKind::ChineCore {
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
-                "verify compares tuckcore scheduling configurations; open the runtime with engine tuckcore",
+                "verify compares chinecore scheduling configurations; open the runtime with engine chinecore",
             ));
         }
         self.check_plan_fresh(plan)?;
@@ -558,7 +557,7 @@ impl Runtime {
             ..Default::default()
         };
         let (resident, resident_logits, resident_ack) = self.run_side(
-            EngineKind::TuckCore,
+            EngineKind::ChineCore,
             "resident",
             plan,
             artifact,
@@ -570,7 +569,7 @@ impl Runtime {
             options.score_deadline,
         )?;
         let (streamed, streamed_logits, _) = self.run_side(
-            EngineKind::TuckCore,
+            EngineKind::ChineCore,
             "forced-streaming",
             plan,
             artifact,
@@ -639,15 +638,15 @@ impl Runtime {
             token_ids: tokens,
             positions: positions.clone(),
             generate_tokens: options.generate_tokens,
-            tuckcore_profile: None,
-            tuckcore_cache_bytes: options.resident_cache_bytes,
-            tuckcore_block_bytes: 0,
+            chinecore_profile: None,
+            chinecore_cache_bytes: options.resident_cache_bytes,
+            chinecore_block_bytes: 0,
             streamed_cache_bytes: Some(options.streamed_cache_bytes),
             llama_revision: None,
             kv_precision_requested: "f32".into(),
-            tuckcore_kernels_requested: options.kernels.map(|k| format!("{k:?}").to_lowercase()),
-            tuckcore_storage_requested: options.storage.map(|st| format!("{st:?}").to_lowercase()),
-            resolved_tuckcore: Some(resident_ack),
+            chinecore_kernels_requested: options.kernels.map(|k| format!("{k:?}").to_lowercase()),
+            chinecore_storage_requested: options.storage.map(|st| format!("{st:?}").to_lowercase()),
+            resolved_chinecore: Some(resident_ack),
             tolerance: options.max_abs_tolerance,
             tolerance_source: "scheduling bit-equality".into(),
         };
@@ -690,7 +689,7 @@ impl Runtime {
         Ok(report)
     }
 
-    /// Reference comparison: identical token IDs through TuckCore and the
+    /// Reference comparison: identical token IDs through ChineCore and the
     /// pinned llama.cpp backend under a registered tolerance.
     pub fn run_reference_comparison(
         &self,
@@ -714,7 +713,7 @@ impl Runtime {
             ),
             None => {
                 let registered = registered_tolerance_for(&dominant_dtype).ok_or_else(|| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::InvalidRequest,
                         format!(
                             "no registered tolerance exists for dominant weight dtype {dominant_dtype} under policy {TOLERANCE_POLICY}; pass an explicit --tolerance for an exploratory comparison (it will be labeled exploratory)"
@@ -751,29 +750,29 @@ impl Runtime {
                 token_ids: tokens.clone(),
                 positions: positions.clone(),
                 generate_tokens: options.generate_tokens,
-                tuckcore_profile: Some(options.tuckcore_profile.as_str().into()),
-                tuckcore_cache_bytes: options.tuckcore_cache_bytes,
-                tuckcore_block_bytes: options
-                    .tuckcore_cache_bytes
+                chinecore_profile: Some(options.chinecore_profile.as_str().into()),
+                chinecore_cache_bytes: options.chinecore_cache_bytes,
+                chinecore_block_bytes: options
+                    .chinecore_cache_bytes
                     .clamp(64 * 1024, 4 * 1024 * 1024),
                 streamed_cache_bytes: None,
-                llama_revision: Some(tuckmill_llamaref::LLAMA_REVISION.into()),
+                llama_revision: Some(chine_llamaref::LLAMA_REVISION.into()),
                 kv_precision_requested: options.kv_precision.clone(),
-                tuckcore_kernels_requested: options
-                    .tuckcore_kernels
+                chinecore_kernels_requested: options
+                    .chinecore_kernels
                     .map(|k| format!("{k:?}").to_lowercase()),
-                tuckcore_storage_requested: options
-                    .tuckcore_storage
+                chinecore_storage_requested: options
+                    .chinecore_storage
                     .map(|st| format!("{st:?}").to_lowercase()),
-                resolved_tuckcore: resolved,
+                resolved_chinecore: resolved,
                 tolerance,
                 tolerance_source: tolerance_source.clone(),
             };
 
-        let tuckcore_side = crate::options::ExecutionOptions {
-            kernels: options.tuckcore_kernels,
-            storage: options.tuckcore_storage,
-            numerical_profile: Some(options.tuckcore_profile.as_str().to_string()),
+        let chinecore_side = crate::options::ExecutionOptions {
+            kernels: options.chinecore_kernels,
+            storage: options.chinecore_storage,
+            numerical_profile: Some(options.chinecore_profile.as_str().to_string()),
             kv_precision: Some(options.kv_precision.clone()),
             ..Default::default()
         };
@@ -783,16 +782,16 @@ impl Runtime {
         };
 
         let result = (|| -> Result<(RunSide, RunSide, ScoredLogits, ScoredLogits, crate::options::AcknowledgedExecution)> {
-            let (tuckcore, tuckcore_logits, ack) = self.run_side(
-                EngineKind::TuckCore,
-                "tuckcore",
+            let (chinecore, chinecore_logits, ack) = self.run_side(
+                EngineKind::ChineCore,
+                "chinecore",
                 plan,
                 artifact,
                 &tokens,
                 &positions,
                 options.generate_tokens,
-                &tuckcore_side,
-                Some(options.tuckcore_cache_bytes),
+                &chinecore_side,
+                Some(options.chinecore_cache_bytes),
                 options.score_deadline,
             )?;
             let (llama, llamaref_logits, _) = self.run_side(
@@ -807,10 +806,10 @@ impl Runtime {
                 None,
                 options.score_deadline,
             )?;
-            Ok((tuckcore, llama, tuckcore_logits, llamaref_logits, ack))
+            Ok((chinecore, llama, chinecore_logits, llamaref_logits, ack))
         })();
 
-        let (tuckcore, llama, tuckcore_logits, llamaref_logits, ack) = match result {
+        let (chinecore, llama, chinecore_logits, llamaref_logits, ack) = match result {
             Ok(v) => v,
             Err(e) => {
                 let config = build_config(None);
@@ -851,16 +850,16 @@ impl Runtime {
         let run_id = new_run_id(&config_id)?;
 
         let vocab_usize = vocab as usize;
-        validate_scored_rows(&positions, &tuckcore_logits, vocab_usize)?;
+        validate_scored_rows(&positions, &chinecore_logits, vocab_usize)?;
         validate_scored_rows(&positions, &llamaref_logits, vocab_usize)?;
 
         let mut max_abs: f64 = 0.0;
         let mut max_rel: f64 = 0.0;
         let mut exact = true;
         let mut diffs: Vec<f64> = Vec::new();
-        for ((pos_a, la), (pos_b, lb)) in tuckcore_logits.iter().zip(llamaref_logits.iter()) {
+        for ((pos_a, la), (pos_b, lb)) in chinecore_logits.iter().zip(llamaref_logits.iter()) {
             if pos_a != pos_b || la.len() != lb.len() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     format!(
                         "scoring rows are not comparable at positions {pos_a}/{pos_b} (lengths {}/{})",
@@ -881,7 +880,7 @@ impl Runtime {
             }
         }
         if diffs.is_empty() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 "comparison produced zero compared values",
             ));
@@ -894,9 +893,9 @@ impl Runtime {
                 percentile_sorted(&mut d, 0.999),
             )
         };
-        let probs = probability_metrics(&tuckcore_logits, &llamaref_logits);
+        let probs = probability_metrics(&chinecore_logits, &llamaref_logits);
         let within_tolerance = max_abs <= tolerance;
-        let texts_equal = tuckcore.generated_text == llama.generated_text;
+        let texts_equal = chinecore.generated_text == llama.generated_text;
         let mut notes = Vec::new();
         notes.push(format!(
             "logits differ by at most {max_abs:.3e} (tolerance {tolerance:.3e}, {tolerance_source})"
@@ -933,7 +932,7 @@ impl Runtime {
             status: "completed".into(),
             error: None,
             config,
-            resident: Some(tuckcore),
+            resident: Some(chinecore),
             streamed: Some(llama),
             logits: Some(LogitComparison {
                 positions,
@@ -954,19 +953,19 @@ impl Runtime {
             caveats: vec![
                 format!(
                     "reference backend: pinned llama.cpp {} via tm shim; KV precision requested for both sides: {}",
-                    tuckmill_llamaref::LLAMA_REVISION, options.kv_precision
+                    chine_llamaref::LLAMA_REVISION, options.kv_precision
                 ),
                 format!(
-                    "TuckCore numerical profile: {} ({}); the comparison establishes a numerical envelope for this artifact, configuration, and tolerance policy — not performance and not bit-identity",
-                    options.tuckcore_profile.as_str(),
-                    match options.tuckcore_profile {
-                        tuckmill_tuckcore::forward::NumericalProfile::OracleF32 => {
+                    "ChineCore numerical profile: {} ({}); the comparison establishes a numerical envelope for this artifact, configuration, and tolerance policy — not performance and not bit-identity",
+                    options.chinecore_profile.as_str(),
+                    match options.chinecore_profile {
+                        chine_chinecore::forward::NumericalProfile::OracleF32 => {
                             "scalar FP32 reference, no additional activation rounding"
                         }
-                        tuckmill_tuckcore::forward::NumericalProfile::LlamaCpu => {
+                        chine_chinecore::forward::NumericalProfile::LlamaCpu => {
                             "mirrors pinned llama.cpp CPU activation quantization"
                         }
-                        tuckmill_tuckcore::forward::NumericalProfile::MetalF16Act => {
+                        chine_chinecore::forward::NumericalProfile::MetalF16Act => {
                             "unified-engine Metal path; batched prefill GEMMs stage operands as \
                              half with f32 accumulation (llama.cpp kernel_mul_mm numerics, \
                              ADR-010)"
@@ -1022,7 +1021,7 @@ impl Runtime {
             &worker.resolved_kernels,
             ack_stats
                 .as_ref()
-                .unwrap_or(&tuckmill_backend::BackendStats::default()),
+                .unwrap_or(&chine_backend::BackendStats::default()),
         )?;
         self.logger.info(
             "VERIFY_RESOLVED",
@@ -1060,7 +1059,7 @@ impl Runtime {
                 max_output_tokens: generate_tokens,
                 stop: Vec::new(),
                 seed: 0,
-                sampling: tuckmill_backend::SamplingPolicy::default(),
+                sampling: chine_backend::SamplingPolicy::default(),
                 ignore_eos: false,
             },
             &cancel,
@@ -1078,10 +1077,7 @@ impl Runtime {
             label: label.to_string(),
             // The cache actually applied: the Metal path keeps weights
             // resident and receives no cache geometry.
-            cache_bytes: if matches!(
-                side.kernels,
-                Some(tuckmill_tuckcore::KernelSelection::Metal)
-            ) {
+            cache_bytes: if matches!(side.kernels, Some(chine_chinecore::KernelSelection::Metal)) {
                 0
             } else {
                 cache_bytes.unwrap_or(0)
@@ -1137,7 +1133,7 @@ pub fn format_report(report: &VerifyReport) -> String {
         lines.push(format!(
             "  {} side: cache {}, kv {}, {} positioned scores, {} committed tokens",
             resident.label,
-            tuckmill_manifest::units::Bytes(resident.cache_bytes),
+            chine_manifest::units::Bytes(resident.cache_bytes),
             resident.kv_precision,
             resident.scored_positions,
             resident.committed_tokens
@@ -1147,10 +1143,10 @@ pub fn format_report(report: &VerifyReport) -> String {
         lines.push(format!(
             "  {} side: cache {}, kv {}, evictions {}, logical reads {}, {} committed",
             streamed.label,
-            tuckmill_manifest::units::Bytes(streamed.cache_bytes),
+            chine_manifest::units::Bytes(streamed.cache_bytes),
             streamed.kv_precision,
             streamed.stats.evictions,
-            tuckmill_manifest::units::Bytes(streamed.stats.logical_read_bytes),
+            chine_manifest::units::Bytes(streamed.stats.logical_read_bytes),
             streamed.committed_tokens
         ));
         if let Some(fp) = streamed.footprint_run_peak_bytes {
@@ -1159,10 +1155,10 @@ pub fn format_report(report: &VerifyReport) -> String {
                 streamed.label,
                 streamed
                     .footprint_load_peak_bytes
-                    .map(tuckmill_manifest::units::Bytes)
+                    .map(chine_manifest::units::Bytes)
                     .map(|b| b.to_string())
                     .unwrap_or_else(|| "n/a".into()),
-                tuckmill_manifest::units::Bytes(fp)
+                chine_manifest::units::Bytes(fp)
             ));
         }
     }

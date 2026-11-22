@@ -1,4 +1,4 @@
-# ADR-005: Inference-backend interface and TuckCore
+# ADR-005: Inference-backend interface and ChineCore
 
 Status: **committed** (2026-10-16). Runtime + Systems. Amends ADR-003 (the
 "one engine exists" statement) and prepares the llama.cpp integration planned
@@ -6,7 +6,7 @@ by ADR-002.
 
 **Update (2026-10-16):** the llama.cpp reference backend is integrated as
 decision 2 anticipated: pinned revision `b11695`, runtime-loaded via the
-header-checked C shim `native/llamaref/tm_llama_shim.c`
+header-checked C shim `native/llamaref/ch_llama_shim.c`
 (`scripts/fetch-llama.sh`), never vendored. `verify --reference` records
 cross-backend teacher-forced logits under a registered tolerance; the first
 profile on the fixture measured max|Δ| = 1.98e-4 against a 1e-2 registration.
@@ -16,7 +16,7 @@ The wrapper remains uncertified, and llama.cpp execution is CPU-only here
 **Update 2 (Stage A, 2026-10-16):** worker protocol v3 chunks score frames so
 real vocabularies (150k+ logits) fit the 1 MiB cap, and workers heartbeat
 during long scoring so liveness checks stay honest without loosening
-timeouts. TuckCore declares a **numerical profile** (`oracle-f32` exact
+timeouts. ChineCore declares a **numerical profile** (`oracle-f32` exact
 scalar, default; `llama-cpu` mirroring ggml's activation quantization);
 reference comparisons default to the matched profile and select a **registered
 per-dtype tolerance** (F16/F32 5e-2, Q8_0 5e-1) from measured envelopes on
@@ -38,7 +38,7 @@ ID (full resolved settings: profiles, KV precision, tolerances, identities,
 workload) is separate from a unique execution ID; interrupted executions are
 persisted with `status: "interrupted"` and no verdict; files are never
 overwritten. (3) KV cache precision is explicit and matched on both sides
-(shim sets `type_k/type_v`; TuckCore stores f16-representable values when
+(shim sets `type_k/type_v`; ChineCore stores f16-representable values when
 asked). (4) Tolerances are a versioned per-dtype policy; unmeasured dtypes
 are refused by default, explicit overrides label the run `exploratory`, and
 `--held-out` qualifies on frozen disjoint inputs (Qwen3-0.6B: Q8_0 max
@@ -56,7 +56,7 @@ statements. (7) Tokenization is reference-first: llama.cpp (vocab-only load,
 CPU-pinned, log-filtered) is the authoritative encoder; the built-in BPE is
 used only where it is exact (gpt2-style, golden-tested) and non-GPT-2
 pre-tokenizers are refused rather than approximated; streaming committed text
-uses an incremental UTF-8 decoder. (8) TuckCore verifies the artifact's full
+uses an incremental UTF-8 decoder. (8) ChineCore verifies the artifact's full
 canonical content digest before executing (drifted payloads are refused
 before any compute; disabling is an explicit recorded option).
 
@@ -65,7 +65,7 @@ named the first optimization, and profiling named the order. K01's first
 increment: an aarch64 NEON fused packed-dot kernel for Q8_0/F16 (scalar
 fallback retained per the kernel-registry gate), plus **zero-copy read-only
 `mmap` weight-block views** (the owned-read path stays as fallback). On the
-real 0.6B, TuckCore moved 0.3 → 1.5 tok/s with fusion, → 2.4 tok/s (16/8) and
+real 0.6B, ChineCore moved 0.3 → 1.5 tok/s with fusion, → 2.4 tok/s (16/8) and
 5.7 tok/s (64/64) with zero-copy; footprint halved to 512 MiB; measured
 attribution after the work: weight fetch 0.49 s → ~0 ms (mmap removed the
 copy) and matvec compute 3.43 s → 0.39 s, leaving scalar decode compute
@@ -80,7 +80,7 @@ numerical comparison. This supersedes update 1's "GPU offload is a
 separately measured milestone": the Metal baseline is now measurable; the
 next targets named by the measurements are K02 (microbatched prefill) and
 further K01 lane work or a Metal kernel, gated per the kernel registry.
-`tuckmill stats` exposes the phase counters and loader statistics behind
+`chine stats` exposes the phase counters and loader statistics behind
 these numbers.
 
 **Update 5 (K01 hardening + matched baseline, 2026-10-16):** the update-4
@@ -131,8 +131,8 @@ options (kernel, storage, numerical profile, KV precision, cache geometry),
 capture the engine identity **after** load, compare the worker's
 acknowledged resolved settings against the request, and **fail closed** on
 any substitution. `VerifyConfigRecord` now separates requested
-(`tuckcore_kernels_requested`, `tuckcore_storage_requested`) from
-acknowledged (`resolved_tuckcore`) settings, and the configuration hash
+(`chinecore_kernels_requested`, `chinecore_storage_requested`) from
+acknowledged (`resolved_chinecore`) settings, and the configuration hash
 covers both; report schema is v3. Evidence: forced `--kernels scalar
 --storage owned` and `--kernels neon --storage mapped` reference runs each
 PASS on the real 0.6B with their resolved selections recorded and
@@ -162,7 +162,7 @@ The v0.2 engineering build finished the orchestration stack with exactly one
 executable engine: the deterministic **reference test engine** (synthetic
 output, no weights). Direction from product review: keep llama.cpp/ggml as the
 *reference and compatibility backend*, and build a custom, narrowly-scoped
-streaming executor — **TuckCore** — behind an experimental backend switch,
+streaming executor — **ChineCore** — behind an experimental backend switch,
 rather than adopting either Flash-MoE's or Splash's architecture wholesale
 (both demonstrate on hardware far above the 8 GB cohort; Flash-MoE's
 demonstration also changes routing and reports quality regressions in its
@@ -184,18 +184,18 @@ not read weights even if an executor existed) and no scoring frames.
 
 ## Decision
 
-1. **Narrow, versioned backend interface.** New crate `tuckmill-backend`
+1. **Narrow, versioned backend interface.** New crate `chine-backend`
    defines `InferenceBackend` (API version 1): `identity`, `capabilities`,
    `load(plan, ArtifactRef, options)`, `generate`, `score` (teacher-forced
    bounded logits), `stats`, `shutdown`, plus the shared `RunState`,
-   `FinishReason`, `GenControl`, `GenOutcome` types. `tuckmill-manifest`
+   `FinishReason`, `GenControl`, `GenOutcome` types. `chine-manifest`
    remains dependency-free of execution concerns; supervisor and backends
-   depend on `tuckmill-backend`.
+   depend on `chine-backend`.
 2. **Backends.** `ReferenceTest` (existing synthetic engine, unchanged
-   semantics) and `TuckCore` (new crate `tuckmill-tuckcore`). llama.cpp will
+   semantics) and `ChineCore` (new crate `chine-chinecore`). llama.cpp will
    arrive as a third backend (`Reference`, `EngineAvailability::Certified`
    candidate) through the same interface — not through new coupling.
-3. **TuckCore starts narrow and honest.** Dense Qwen3 only (moe/hybrid
+3. **ChineCore starts narrow and honest.** Dense Qwen3 only (moe/hybrid
    architectures are refused with `UNSUPPORTED_ARCHITECTURE` and an action).
    Stage 0 implements, with bounded allocations:
    - a block loader reading tensor row-chunks via positioned reads, with an
@@ -214,30 +214,30 @@ not read weights even if an executor existed) and no scoring frames.
    executing) and optional backend options; new `Score`/`ScoreChunk`/
    `ScoreDone` frames provide bounded teacher-forced logits; `StatsAck`
    carries backend statistics. Plans recorded against v1 are `PLAN_STALE`.
-5. **Explicit experimental switch.** `--engine tuckcore` (run/serve/bench) is
+5. **Explicit experimental switch.** `--engine chinecore` (run/serve/bench) is
    the acceptance for real-but-uncertified execution; `reference-test` keeps
    requiring `--allow-test-engine`. Responses mark
-   `certified:false, backend:"tuckcore", synthetic_output:false`; the
+   `certified:false, backend:"chinecore", synthetic_output:false`; the
    synthetic flag is computed from the backend identity, never hardcoded.
-6. **Verification before promotion.** `tuckmill verify` runs identical token
-   IDs through resident and forced-streaming TuckCore configurations with the
+6. **Verification before promotion.** `chine verify` runs identical token
+   IDs through resident and forced-streaming ChineCore configurations with the
    same artifact (identity-verified), compares teacher-forced logits under a
    registered tolerance, and records eviction/footprint evidence, plus
    generated-token equality. Cancellation and forced eviction are unit-tested
-   inside TuckCore. Promotion criteria remain the PRD gates (G1 numerics,
+   inside ChineCore. Promotion criteria remain the PRD gates (G1 numerics,
    G2-small), and FR-06/native routing stay mandatory for any MoE work.
 7. **Deviations recorded.** (a) The supervisor keeps its std-only bounded
    HTTP subset; adopting tokio/axum now would be an unmeasured rewrite of a
    tested surface and is deferred until it earns its place (consistent with
    this repository's own principles). (b) No second general-purpose engine is
-   created: TuckCore must earn its place by capability (8 GB streaming) or a
+   created: ChineCore must earn its place by capability (8 GB streaming) or a
    measured advantage, or be retired.
 
 ## Consequences
 
 - The dispatch point stays two match arms; every future engine slots behind
   the same trait and the same frames.
-- Same-profile guarantees bind TuckCore exactly as they bind every engine:
+- Same-profile guarantees bind ChineCore exactly as they bind every engine:
   identical artifact, identical token IDs, no routing/precision/context
   changes; numerical equivalence is demonstrated, not assumed.
 - `EngineAvailability` continues to describe kernel-gate state; backend

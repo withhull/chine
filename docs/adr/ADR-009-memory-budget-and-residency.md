@@ -44,7 +44,7 @@ resident and grows speed with RAM.
    streamed remainder. The all-or-nothing split is removed.
 5. **Placement never changes arithmetic.** The same kernels and precision
    run on resident and streamed weights. Every budget in a sweep must give
-   identical greedy output, proven with `tuckmill verify` (ADR-001
+   identical greedy output, proven with `chine verify` (ADR-001
    same-profile rule).
 
 ## Consequences

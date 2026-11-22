@@ -1,6 +1,6 @@
 """Summarize one scripts/bench-baseline.sh result directory into summary.md.
 
-Inputs: environment.json, runs.tsv, records/*.json (tuckmill bench record
+Inputs: environment.json, runs.tsv, records/*.json (chine bench record
 schema v4), optional llama-bench.json and mlx.json. Every number written is
 labeled locally-calibrated (measured here, uncontrolled for thermals) and is
 never a claim. Warm statistics exclude the first repetition of each bench
@@ -83,7 +83,7 @@ def main() -> int:
     )
     md.append("")
     md.append(f"- macOS {env['macos']}, power: {env['power_source']}, memory {env['memory_bytes']} B")
-    md.append(f"- tuckmill `{env['tuckmill_commit'][:12]}` (dirty tree: {env['tuckmill_tree_dirty']}), llama.cpp {env['llama_cpp']}")
+    md.append(f"- chine `{env['chine_commit'][:12]}` (dirty tree: {env['chine_tree_dirty']}), llama.cpp {env['llama_cpp']}")
     md.append(f"- artifact `{env['artifact']}`, {env['artifact_bytes']} B, sha256 `{env['artifact_sha256']}`")
     shape = env["shape"]
     md.append(
@@ -124,12 +124,12 @@ def main() -> int:
 
     ratios_decode, ratios_ttft = [], []
     for pair in per_round.values():
-        a, b = pair.get("tuckcore-metal"), pair.get("llama-metal")
+        a, b = pair.get("chinecore-metal"), pair.get("llama-metal")
         if a and b and a["decode_warm_tps"] and b["decode_warm_tps"]:
             ratios_decode.append(a["decode_warm_tps"] / b["decode_warm_tps"])
         if a and b and a["ttft_warm_ms"] and b["ttft_warm_ms"]:
             ratios_ttft.append(a["ttft_warm_ms"] / b["ttft_warm_ms"])
-    md.append("## Paired ratios (TuckCore / llama.cpp, same round)")
+    md.append("## Paired ratios (ChineCore / llama.cpp, same round)")
     md.append("")
     md.append(
         f"- warm decode tok/s ratio: median {fmt(median(ratios_decode), 3)} over {len(ratios_decode)} paired rounds "

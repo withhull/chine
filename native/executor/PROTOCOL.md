@@ -1,10 +1,10 @@
 # Worker control protocol (v8)
 
-Wire contract between the Tuckmill supervisor and an execution worker. The
+Wire contract between the Chine supervisor and an execution worker. The
 transport is a private Unix domain socket under the store's `tmp/` directory.
 The current worker implements this protocol in Rust; the future C++/
 Objective-C++ executor implements the same frames behind
-`tuckmill_worker_abi.h`.
+`chine_worker_abi.h`.
 
 ## Framing
 
@@ -63,7 +63,7 @@ payload := UTF-8 JSON, one message object
 Every message is a JSON object with `"t"` as the tag:
 
 ```jsonc
-{ "t": "Hello", "protocol": 1, "abi": 1, "client_build": "tuckmill 0.2.0 (debug)" }
+{ "t": "Hello", "protocol": 1, "abi": 1, "client_build": "chine 0.2.0 (debug)" }
 ```
 
 ## Message catalogue

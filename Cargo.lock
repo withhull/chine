@@ -93,6 +93,121 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "chine-backend"
+version = "0.2.0"
+dependencies = [
+ "chine-manifest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "chine-chinecore"
+version = "0.2.0"
+dependencies = [
+ "chine-backend",
+ "chine-manifest",
+ "chine-metal",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "chine-cli"
+version = "0.2.0"
+dependencies = [
+ "chine-backend",
+ "chine-chinecore",
+ "chine-llamaref",
+ "chine-manifest",
+ "chine-planner",
+ "chine-store",
+ "chine-supervisor",
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "chine-llamaref"
+version = "0.2.0"
+dependencies = [
+ "chine-backend",
+ "chine-chinecore",
+ "chine-manifest",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "chine-manifest"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "chine-metal"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "chine-manifest",
+ "tempfile",
+]
+
+[[package]]
+name = "chine-planner"
+version = "0.2.0"
+dependencies = [
+ "chine-manifest",
+ "libc",
+ "objc2",
+ "objc2-foundation",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "chine-store"
+version = "0.2.0"
+dependencies = [
+ "chine-manifest",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "chine-supervisor"
+version = "0.2.0"
+dependencies = [
+ "chine-backend",
+ "chine-chinecore",
+ "chine-llamaref",
+ "chine-manifest",
+ "chine-planner",
+ "chine-store",
+ "libc",
+ "objc2-foundation",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -463,121 +578,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "tuckmill-backend"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tuckmill-manifest",
-]
-
-[[package]]
-name = "tuckmill-cli"
-version = "0.2.0"
-dependencies = [
- "clap",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tuckmill-backend",
- "tuckmill-llamaref",
- "tuckmill-manifest",
- "tuckmill-planner",
- "tuckmill-store",
- "tuckmill-supervisor",
- "tuckmill-tuckcore",
-]
-
-[[package]]
-name = "tuckmill-llamaref"
-version = "0.2.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tuckmill-backend",
- "tuckmill-manifest",
- "tuckmill-tuckcore",
-]
-
-[[package]]
-name = "tuckmill-manifest"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "tuckmill-metal"
-version = "0.2.0"
-dependencies = [
- "cc",
- "tempfile",
- "tuckmill-manifest",
-]
-
-[[package]]
-name = "tuckmill-planner"
-version = "0.2.0"
-dependencies = [
- "libc",
- "objc2",
- "objc2-foundation",
- "serde",
- "serde_json",
- "tempfile",
- "tuckmill-manifest",
-]
-
-[[package]]
-name = "tuckmill-store"
-version = "0.2.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tuckmill-manifest",
-]
-
-[[package]]
-name = "tuckmill-supervisor"
-version = "0.2.0"
-dependencies = [
- "libc",
- "objc2-foundation",
- "serde",
- "serde_json",
- "tempfile",
- "tuckmill-backend",
- "tuckmill-llamaref",
- "tuckmill-manifest",
- "tuckmill-planner",
- "tuckmill-store",
- "tuckmill-tuckcore",
-]
-
-[[package]]
-name = "tuckmill-tuckcore"
-version = "0.2.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tuckmill-backend",
- "tuckmill-manifest",
- "tuckmill-metal",
 ]
 
 [[package]]

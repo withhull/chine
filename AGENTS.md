@@ -2,7 +2,7 @@
 
 ## What this project is
 
-Tuckmill is a Mac-native, high-performance local inference framework for
+Chine is a Mac-native, high-performance local inference framework for
 Apple Silicon, from 8 GB upward. Canonical positioning and the five
 engineering goals live in `docs/adr/ADR-006-positioning-and-memory-tiers.md`;
 the product contract (local-only, same-profile execution, honest labels) is
@@ -17,9 +17,9 @@ scripts/test.sh      # fmt check + clippy -D warnings + full test suite
 scripts/demo.sh      # end-to-end demo on a generated fixture (temp data dir)
 scripts/fetch-llama.sh # pinned llama.cpp reference + tm shim into .deps/ (gitignored)
 
-cargo test -p tuckmill-tuckcore          # single crate
-TUCKMILL_DATA_DIR=$(mktemp -d) target/debug/tuckmill doctor
-cargo run -p tuckmill-manifest --example gen_fixture -- /tmp/fixture.gguf
+cargo test -p chine-chinecore          # single crate
+CHINE_DATA_DIR=$(mktemp -d) target/debug/chine doctor
+cargo run -p chine-manifest --example gen_fixture -- /tmp/fixture.gguf
 ```
 
 Always run `scripts/test.sh` before calling work done. It is the same gate
@@ -50,15 +50,15 @@ what was verified, with which command, on which artifact).
    leased through completion fences; never reclaim in-flight memory to fake
    fast cancellation.
 5. **Backends behind the interface.** New execution work implements
-   `tuckmill_backend::InferenceBackend` (ADR-005) or stays outside the
+   `chine_backend::InferenceBackend` (ADR-005) or stays outside the
    runtime. Do not couple new engines to the supervisor directly.
 6. **Comparisons are measured, not asserted.** Benchmark against
    llama.cpp / MLX / Splash only under the four-way identity rules
    (identical artifacts, token IDs, numerical profiles, declared cache
    state) with registered tolerances (`benchmarks/README.md`). Reference
-   comparisons run through `tuckmill verify --reference`; llama.cpp is
+   comparisons run through `chine verify --reference`; llama.cpp is
    pinned and loaded at runtime (`scripts/fetch-llama.sh`,
-   `TUCKMILL_LLAMA_LIB`), never vendored.
+   `CHINE_LLAMA_LIB`), never vendored.
 7. **No unmeasured rewrites.** Profile first; a custom kernel or replacement
    subsystem must demonstrate a gap or a capability the reference path lacks.
 8. **Architecture decisions get an ADR** in `docs/adr/` before restructuring
@@ -68,15 +68,15 @@ what was verified, with which command, on which artifact).
 
 - Workspace crates: `manifest` (schemas/inspection), `backend` (engine
   interface), `planner` (admission/cost), `store` (artifacts/packing),
-  `tuckcore` (custom executor), `supervisor` (runtime/API/bench/verify),
+  `chinecore` (custom executor), `supervisor` (runtime/API/bench/verify),
   `cli`. Dependencies point one way; never create cycles.
-- Typed errors only: `tuckmill_manifest::ErrorCode` (`crates/manifest/src/error.rs`),
+- Typed errors only: `chine_manifest::ErrorCode` (`crates/manifest/src/error.rs`),
   each with a safe next action. No `anyhow` in library crates.
 - Units are exact: `Bytes` (GiB != GB). JSON/serde for all records; schema
   versions bump with migration notes.
 - Upstream constants that matter are pinned by revision and re-derived, not
   hand-edited (see `crates/manifest/src/ggml.rs`).
-- Tests: fixture-based (`tuckmill_manifest::testing` writes valid tiny GGUF
+- Tests: fixture-based (`chine_manifest::testing` writes valid tiny GGUF
   files with finite values); adversarial cases belong next to the code they
   guard. Isolated-worker e2e coverage lives in `crates/cli/tests/e2e.rs`.
 - Keep the README clean and current: short sections, real states, no
@@ -84,8 +84,8 @@ what was verified, with which command, on which artifact).
 
 ## Data and secrets
 
-- Runtime data defaults to `~/Library/Application Support/Tuckmill`
-  (`TUCKMILL_DATA_DIR` overrides; tests always use temp dirs).
+- Runtime data defaults to `~/Library/Application Support/Chine`
+  (`CHINE_DATA_DIR` overrides; tests always use temp dirs).
 - API tokens live in `control/api-token` (0600). Never log prompts,
   completions, or tokens; logs are structured, rotated, and capped.
 - Never commit secrets, model weights, or generated store data.

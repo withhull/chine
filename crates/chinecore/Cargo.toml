@@ -1,15 +1,15 @@
 [package]
-name = "tuckmill-tuckcore"
+name = "chine-chinecore"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "TuckCore: experimental custom native executor (ADR-005)"
+description = "ChineCore: experimental custom native executor (ADR-005)"
 
 [dependencies]
-tuckmill-manifest.workspace = true
-tuckmill-backend.workspace = true
-tuckmill-metal.workspace = true
+chine-manifest.workspace = true
+chine-backend.workspace = true
+chine-metal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true

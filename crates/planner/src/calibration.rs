@@ -8,10 +8,10 @@
 
 use std::path::Path;
 
+use chine_manifest::error::Result;
+use chine_manifest::ids::{now_unix_ms, Id};
+use chine_manifest::records::CacheState;
 use serde::{Deserialize, Serialize};
-use tuckmill_manifest::error::Result;
-use tuckmill_manifest::ids::{now_unix_ms, Id};
-use tuckmill_manifest::records::CacheState;
 
 pub const CALIBRATION_SCHEMA_VERSION: u32 = 1;
 
@@ -65,11 +65,11 @@ impl CalibrationStore {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let bytes = std::fs::read(path).map_err(tuckmill_manifest::error::TuckmillError::from)?;
+        let bytes = std::fs::read(path).map_err(chine_manifest::error::ChineError::from)?;
         let store: CalibrationStore = serde_json::from_slice(&bytes).map_err(|e| {
-            tuckmill_manifest::error::json_error(
+            chine_manifest::error::json_error(
                 e,
-                tuckmill_manifest::ErrorCode::InvalidConfiguration,
+                chine_manifest::ErrorCode::InvalidConfiguration,
                 "calibration store",
             )
         })?;
@@ -81,19 +81,18 @@ impl CalibrationStore {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(tuckmill_manifest::error::TuckmillError::from)?;
+            std::fs::create_dir_all(parent).map_err(chine_manifest::error::ChineError::from)?;
         }
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| {
-            tuckmill_manifest::error::json_error(
+            chine_manifest::error::json_error(
                 e,
-                tuckmill_manifest::ErrorCode::Internal,
+                chine_manifest::ErrorCode::Internal,
                 "calibration serialization",
             )
         })?;
-        std::fs::write(&tmp, bytes).map_err(tuckmill_manifest::error::TuckmillError::from)?;
-        std::fs::rename(&tmp, path).map_err(tuckmill_manifest::error::TuckmillError::from)?;
+        std::fs::write(&tmp, bytes).map_err(chine_manifest::error::ChineError::from)?;
+        std::fs::rename(&tmp, path).map_err(chine_manifest::error::ChineError::from)?;
         Ok(())
     }
 
@@ -155,8 +154,8 @@ mod tests {
             artifact_id: Id::new("a".repeat(64)).unwrap(),
             adapter_id: "qwen3".into(),
             engine: engine.into(),
-            backend_abi_version: tuckmill_manifest::BACKEND_ABI_VERSION,
-            worker_protocol_version: tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+            backend_abi_version: chine_manifest::BACKEND_ABI_VERSION,
+            worker_protocol_version: chine_manifest::WORKER_PROTOCOL_VERSION,
             workload_suite: "standard-v1".into(),
             context_total: ctx,
             max_output_tokens: 256,
@@ -185,8 +184,8 @@ mod tests {
             &Id::new("a".repeat(64)).unwrap(),
             "qwen3",
             "reference-test",
-            tuckmill_manifest::BACKEND_ABI_VERSION,
-            tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+            chine_manifest::BACKEND_ABI_VERSION,
+            chine_manifest::WORKER_PROTOCOL_VERSION,
             "standard-v1",
             2048,
         );
@@ -204,8 +203,8 @@ mod tests {
             &Id::new("a".repeat(64)).unwrap(),
             "qwen3",
             "reference",
-            tuckmill_manifest::BACKEND_ABI_VERSION,
-            tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+            chine_manifest::BACKEND_ABI_VERSION,
+            chine_manifest::WORKER_PROTOCOL_VERSION,
             "standard-v1",
             1024,
         );
@@ -216,8 +215,8 @@ mod tests {
             &Id::new("a".repeat(64)).unwrap(),
             "qwen3",
             "reference",
-            tuckmill_manifest::BACKEND_ABI_VERSION,
-            tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+            chine_manifest::BACKEND_ABI_VERSION,
+            chine_manifest::WORKER_PROTOCOL_VERSION,
             "standard-v1",
             4096,
         );
@@ -236,8 +235,8 @@ mod tests {
             &Id::new("a".repeat(64)).unwrap(),
             "qwen3",
             "reference",
-            tuckmill_manifest::BACKEND_ABI_VERSION + 1,
-            tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+            chine_manifest::BACKEND_ABI_VERSION + 1,
+            chine_manifest::WORKER_PROTOCOL_VERSION,
             "standard-v1",
             1024,
         );

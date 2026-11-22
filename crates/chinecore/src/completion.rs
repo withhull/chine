@@ -108,15 +108,14 @@ mod tests {
     use super::*;
     use crate::loader::{BlockLoader, BlockPolicy, TensorEntry};
     use crate::tensor;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     fn loader_with_block() -> (tempfile::TempDir, BlockLoader) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let policy = BlockPolicy {
             block_bytes: 64 * 1024,
             cache_bytes: 128 * 1024,

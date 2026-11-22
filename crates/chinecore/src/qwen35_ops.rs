@@ -27,7 +27,7 @@
 //! against. Nothing here is wired into the loader: execution stays
 //! refused until the Q35-1 checklist passes.
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 /// `sigmoid(x) = 1 / (1 + e^-x)` (ggml's f32 sigmoid).
 pub fn sigmoid(x: f32) -> f32 {
@@ -300,7 +300,7 @@ pub fn rms_norm_weighted_in_place(x: &mut [f32], weight: &[f32], eps: f32) {
 /// or zero weights into the attention output.
 pub fn softmax_in_place(row: &mut [f32]) -> Result<()> {
     let fail = |what: &str| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::Internal,
             format!("attention score row is invalid: {what}"),
         )

@@ -1,5 +1,5 @@
 /*
- * tm_llama_shim.c — narrow C shim over the pinned llama.cpp C API.
+ * ch_llama_shim.c — narrow C shim over the pinned llama.cpp C API.
  *
  * Why a shim: llama.cpp's public API passes structs by value and grows fields
  * across revisions. Transcribing those layouts into Rust would be ABI
@@ -14,7 +14,7 @@
  *    separately measured milestone.
  *  - Errors are returned as status ints plus a bounded message; nothing aborts.
  *
- * Shrink-wrapped surface for the Tuckmill reference backend:
+ * Shrink-wrapped surface for the Chine reference backend:
  *   load/free, tokenize, token->piece, decode (append / reset), last-token
  *   logits, greedy sample, model description/size, meta values.
  */
@@ -26,9 +26,9 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define TM_SHIM_VERSION 4
+#define CH_SHIM_VERSION 4
 
-typedef struct tm_llama {
+typedef struct ch_llama {
     struct llama_model   *model;
     struct llama_context *ctx;
     const struct llama_vocab *vocab;
@@ -38,34 +38,34 @@ typedef struct tm_llama {
     int      kv_f16; /* KV cache type actually configured */
     int      n_threads;
     int      backend_initialized;
-} tm_llama;
+} ch_llama;
 
-static void tm_log_filter(enum ggml_log_level level, const char * text, void * user_data) {
+static void ch_log_filter(enum ggml_log_level level, const char * text, void * user_data) {
     (void) user_data;
     if (level >= GGML_LOG_LEVEL_WARN) {
         fputs(text, stderr);
     }
 }
 
-static void tm_set_err(char *err, int cap, const char *msg) {
+static void ch_set_err(char *err, int cap, const char *msg) {
     if (err == NULL || cap <= 0) {
         return;
     }
     snprintf(err, (size_t) cap, "%s", msg);
 }
 
-int tm_shim_version(void) {
-    return TM_SHIM_VERSION;
+int ch_shim_version(void) {
+    return CH_SHIM_VERSION;
 }
 
-const char *tm_llama_build_info(void) {
+const char *ch_llama_build_info(void) {
     return "llama.cpp pinned revision (see scripts/fetch-llama.sh)";
 }
 
-tm_llama *tm_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
+ch_llama *ch_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
                   int kv_f16, int vocab_only, char *err, int err_cap) {
     if (path == NULL) {
-        tm_set_err(err, err_cap, "null model path");
+        ch_set_err(err, err_cap, "null model path");
         return NULL;
     }
     /* Route llama.cpp logging through a filter that keeps WARN/ERROR and
@@ -73,7 +73,7 @@ tm_llama *tm_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
      * Real problems still reach stderr; product output stays clean. */
     static int log_filter_installed = 0;
     if (!log_filter_installed) {
-        llama_log_set(tm_log_filter, NULL);
+        llama_log_set(ch_log_filter, NULL);
         log_filter_installed = 1;
     }
     llama_backend_init();
@@ -95,17 +95,17 @@ tm_llama *tm_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
 
     struct llama_model *model = llama_model_load_from_file(path, mparams);
     if (model == NULL) {
-        tm_set_err(err, err_cap, "llama_model_load_from_file failed");
+        ch_set_err(err, err_cap, "llama_model_load_from_file failed");
         return NULL;
     }
 
     const struct llama_vocab *vocab = llama_model_get_vocab(model);
 
     if (vocab_only) {
-        tm_llama *h = (tm_llama *) calloc(1, sizeof(tm_llama));
+        ch_llama *h = (ch_llama *) calloc(1, sizeof(ch_llama));
         if (h == NULL) {
             llama_model_free(model);
-            tm_set_err(err, err_cap, "out of memory");
+            ch_set_err(err, err_cap, "out of memory");
             return NULL;
         }
         h->model = model;
@@ -135,7 +135,7 @@ tm_llama *tm_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
     struct llama_context *ctx = llama_init_from_model(model, cparams);
     if (ctx == NULL) {
         llama_model_free(model);
-        tm_set_err(err, err_cap, "llama_init_from_model failed");
+        ch_set_err(err, err_cap, "llama_init_from_model failed");
         return NULL;
     }
 
@@ -143,12 +143,12 @@ tm_llama *tm_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
         llama_sampler_chain_init(llama_sampler_chain_default_params());
     llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
 
-    tm_llama *h = (tm_llama *) calloc(1, sizeof(tm_llama));
+    ch_llama *h = (ch_llama *) calloc(1, sizeof(ch_llama));
     if (h == NULL) {
         llama_sampler_free(sampler);
         llama_free(ctx);
         llama_model_free(model);
-        tm_set_err(err, err_cap, "out of memory");
+        ch_set_err(err, err_cap, "out of memory");
         return NULL;
     }
     h->model = model;
@@ -164,15 +164,15 @@ tm_llama *tm_load(const char *path, int n_ctx, int n_threads, int gpu_layers,
 }
 
 /* KV cache element type in use: 1 = f16, 0 = f32. */
-int32_t tm_kv_type(const tm_llama *h) {
+int32_t ch_kv_type(const ch_llama *h) {
     return h ? h->kv_f16 : -1;
 }
 
-int32_t tm_n_threads(const tm_llama *h) {
+int32_t ch_n_threads(const ch_llama *h) {
     return h ? h->n_threads : -1;
 }
 
-void tm_free(tm_llama *h) {
+void ch_free(ch_llama *h) {
     if (h == NULL) {
         return;
     }
@@ -183,24 +183,24 @@ void tm_free(tm_llama *h) {
     free(h);
 }
 
-int32_t tm_vocab_size(const tm_llama *h) {
+int32_t ch_vocab_size(const ch_llama *h) {
     return h && h->vocab ? llama_vocab_n_tokens(h->vocab) : -1;
 }
 
-int32_t tm_bos(const tm_llama *h) {
+int32_t ch_bos(const ch_llama *h) {
     return h && h->vocab ? llama_vocab_bos(h->vocab) : -1;
 }
 
-int32_t tm_eos(const tm_llama *h) {
+int32_t ch_eos(const ch_llama *h) {
     return h && h->vocab ? llama_vocab_eos(h->vocab) : -1;
 }
 
-uint32_t tm_n_ctx(const tm_llama *h) {
+uint32_t ch_n_ctx(const ch_llama *h) {
     return h ? h->n_ctx : 0;
 }
 
 /* Tokenize text; returns token count (>=0) or a negative required capacity. */
-int32_t tm_tokenize(const tm_llama *h, const char *text, int32_t text_len,
+int32_t ch_tokenize(const ch_llama *h, const char *text, int32_t text_len,
                     int add_special, int32_t *out, int32_t out_cap) {
     if (h == NULL || text == NULL || out == NULL || text_len < 0) {
         return -1;
@@ -210,7 +210,7 @@ int32_t tm_tokenize(const tm_llama *h, const char *text, int32_t text_len,
 }
 
 /* Piece bytes for a token id; returns byte count written (no NUL). */
-int32_t tm_token_to_piece(const tm_llama *h, int32_t id, char *buf, int32_t cap) {
+int32_t ch_token_to_piece(const ch_llama *h, int32_t id, char *buf, int32_t cap) {
     if (h == NULL || buf == NULL) {
         return -1;
     }
@@ -218,7 +218,7 @@ int32_t tm_token_to_piece(const tm_llama *h, int32_t id, char *buf, int32_t cap)
 }
 
 /* Append tokens at the current position. Returns 0 on success. */
-int32_t tm_decode(tm_llama *h, const int32_t *ids, int32_t n) {
+int32_t ch_decode(ch_llama *h, const int32_t *ids, int32_t n) {
     if (h == NULL || h->ctx == NULL || ids == NULL || n <= 0) {
         return -1;
     }
@@ -244,7 +244,7 @@ int32_t tm_decode(tm_llama *h, const int32_t *ids, int32_t n) {
 }
 
 /* Forget all KV state; the next decode starts at position 0. */
-int32_t tm_reset(tm_llama *h) {
+int32_t ch_reset(ch_llama *h) {
     if (h == NULL || h->ctx == NULL) {
         return -1;
     }
@@ -255,7 +255,7 @@ int32_t tm_reset(tm_llama *h) {
 }
 
 /* Copy the logits of the last decoded token into out; returns vocab size. */
-int32_t tm_logits(tm_llama *h, float *out, int32_t cap) {
+int32_t ch_logits(ch_llama *h, float *out, int32_t cap) {
     if (h == NULL || h->ctx == NULL || out == NULL) {
         return -1;
     }
@@ -272,7 +272,7 @@ int32_t tm_logits(tm_llama *h, float *out, int32_t cap) {
 }
 
 /* Greedy sample from the last decoded token's logits. */
-int32_t tm_sample_greedy(tm_llama *h, int32_t *out_token) {
+int32_t ch_sample_greedy(ch_llama *h, int32_t *out_token) {
     if (h == NULL || h->ctx == NULL || out_token == NULL) {
         return -1;
     }
@@ -282,20 +282,20 @@ int32_t tm_sample_greedy(tm_llama *h, int32_t *out_token) {
     return 0;
 }
 
-int32_t tm_model_desc(const tm_llama *h, char *buf, int32_t cap) {
+int32_t ch_model_desc(const ch_llama *h, char *buf, int32_t cap) {
     if (h == NULL || buf == NULL) {
         return -1;
     }
     return llama_model_desc(h->model, buf, (size_t) cap);
 }
 
-int32_t tm_meta(const tm_llama *h, const char *key, char *buf, int32_t cap) {
+int32_t ch_meta(const ch_llama *h, const char *key, char *buf, int32_t cap) {
     if (h == NULL || key == NULL || buf == NULL) {
         return -1;
     }
     return llama_model_meta_val_str(h->model, key, buf, (size_t) cap);
 }
 
-uint64_t tm_model_size(const tm_llama *h) {
+uint64_t ch_model_size(const ch_llama *h) {
     return h ? llama_model_size(h->model) : 0;
 }

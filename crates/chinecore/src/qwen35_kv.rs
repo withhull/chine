@@ -12,7 +12,7 @@
 //! Reads decode into caller-provided scratch; nothing here allocates
 //! per-read except the exact scratch the caller owns.
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 use crate::tensor::{f16_to_f32, f32_to_f16_bits};
 
@@ -98,7 +98,7 @@ impl Qwen35KvCache {
         precision: KvPrecision,
     ) -> Result<Self> {
         let overflow = || {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidPlan,
                 "KV cache element count overflows for this plan",
             )
@@ -203,7 +203,7 @@ impl Qwen35KvCache {
     ) -> Result<()> {
         let (stride, plane_len) = self.shape()?;
         if layer >= self.keys.len() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "KV write for attention layer {layer} with only {} layers allocated",
@@ -212,7 +212,7 @@ impl Qwen35KvCache {
             ));
         }
         if token != self.written[layer] {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "KV writes must be sequential: layer {layer} has {} tokens written, got token {token}",
@@ -221,7 +221,7 @@ impl Qwen35KvCache {
             ));
         }
         if token >= self.capacity {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 format!(
                     "KV write at token {token} exceeds the {}-position plan",
@@ -264,12 +264,14 @@ impl Qwen35KvCache {
     }
 
     fn shape(&self) -> Result<(usize, usize)> {
-        let stride = self.kv_heads.checked_mul(self.head_dim).ok_or_else(|| {
-            TuckmillError::new(ErrorCode::Internal, "KV stride geometry overflows")
-        })?;
-        let plane_len = self.capacity.checked_mul(stride).ok_or_else(|| {
-            TuckmillError::new(ErrorCode::Internal, "KV plane geometry overflows")
-        })?;
+        let stride = self
+            .kv_heads
+            .checked_mul(self.head_dim)
+            .ok_or_else(|| ChineError::new(ErrorCode::Internal, "KV stride geometry overflows"))?;
+        let plane_len = self
+            .capacity
+            .checked_mul(stride)
+            .ok_or_else(|| ChineError::new(ErrorCode::Internal, "KV plane geometry overflows"))?;
         Ok((stride, plane_len))
     }
 
@@ -283,13 +285,13 @@ impl Qwen35KvCache {
     ) -> Result<()> {
         let (stride, plane_len) = self.shape()?;
         if layer >= planes.len() || head >= self.kv_heads || token >= self.capacity {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("KV read out of range (layer {layer}, head {head}, token {token})"),
             ));
         }
         if token >= self.written[layer] {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "KV position {token} in layer {layer} was never written ({} initialized)",
@@ -298,7 +300,7 @@ impl Qwen35KvCache {
             ));
         }
         if out.len() != self.head_dim {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "KV row read wants {} values, got {}",
@@ -316,8 +318,8 @@ impl Qwen35KvCache {
     }
 }
 
-fn shape_error(stride: usize, k: usize, v: usize) -> TuckmillError {
-    TuckmillError::new(
+fn shape_error(stride: usize, k: usize, v: usize) -> ChineError {
+    ChineError::new(
         ErrorCode::Internal,
         format!("KV write wants head rows of {stride} values each, got k={k} v={v}"),
     )
@@ -328,16 +330,16 @@ mod tests {
     use super::*;
     use crate::qwen35::{resolve, Qwen35Config, Qwen35StateLayout};
     use crate::qwen35_ops::{gqa_cache_attention, ConvState, GdnState, GqaGeometry};
-    use tuckmill_manifest::adapter::AdapterRegistry;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::adapter::AdapterRegistry;
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn fixture() -> (Qwen35Config, Qwen35StateLayout) {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen35());
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        let insp = tuckmill_manifest::gguf::inspect_reader(
+        let insp = chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )
         .unwrap();

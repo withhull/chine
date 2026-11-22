@@ -11,18 +11,18 @@ use crate::CacheCmd;
 use crate::Cmd;
 use crate::INTERRUPTED;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::{self, GgufValue};
-use tuckmill_manifest::records::CapabilityStatusKind;
-use tuckmill_manifest::units::Bytes;
-use tuckmill_planner::device;
-use tuckmill_store::aliases;
-use tuckmill_store::cache;
-use tuckmill_store::import::{import_local, ImportOptions};
-use tuckmill_store::layout::StoreLayout;
-use tuckmill_store::pack::{pack_artifact, PackOptions};
-use tuckmill_supervisor::bench::{format_summary, run_and_record, BenchOptions};
-use tuckmill_supervisor::runtime::{EngineMode, RunEvent, Runtime, RuntimeOptions};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::{self, GgufValue};
+use chine_manifest::records::CapabilityStatusKind;
+use chine_manifest::units::Bytes;
+use chine_planner::device;
+use chine_store::aliases;
+use chine_store::cache;
+use chine_store::import::{import_local, ImportOptions};
+use chine_store::layout::StoreLayout;
+use chine_store::pack::{pack_artifact, PackOptions};
+use chine_supervisor::bench::{format_summary, run_and_record, BenchOptions};
+use chine_supervisor::runtime::{EngineMode, RunEvent, Runtime, RuntimeOptions};
 
 pub const DEFAULT_PRUNE_AGE_SECS: u64 = 3600;
 
@@ -121,7 +121,7 @@ pub fn dispatch(cmd: &Cmd, json: bool, data_dir: Option<&Path>) -> Result<ExitCo
             generate,
             reference,
             tolerance,
-            tuckcore_profile,
+            chinecore_profile,
             kv_precision,
             held_out,
             kernels,
@@ -134,7 +134,7 @@ pub fn dispatch(cmd: &Cmd, json: bool, data_dir: Option<&Path>) -> Result<ExitCo
             *generate,
             *reference,
             *tolerance,
-            tuckcore_profile,
+            chinecore_profile,
             kv_precision,
             *held_out,
             kernels.as_deref(),
@@ -197,24 +197,20 @@ pub fn dispatch(cmd: &Cmd, json: bool, data_dir: Option<&Path>) -> Result<ExitCo
             CacheCmd::Prune { dry_run } => cache_prune(*dry_run, json, data_dir),
         },
         Cmd::WorkerReference { socket, engine } => {
-            let kind = match tuckmill_backend::BackendId::parse(engine) {
-                Some(tuckmill_backend::BackendId::ReferenceTest) => {
-                    tuckmill_backend::EngineKind::ReferenceTest
+            let kind = match chine_backend::BackendId::parse(engine) {
+                Some(chine_backend::BackendId::ReferenceTest) => {
+                    chine_backend::EngineKind::ReferenceTest
                 }
-                Some(tuckmill_backend::BackendId::TuckCore) => {
-                    tuckmill_backend::EngineKind::TuckCore
-                }
-                Some(tuckmill_backend::BackendId::LlamaCpp) => {
-                    tuckmill_backend::EngineKind::LlamaCpp
-                }
+                Some(chine_backend::BackendId::ChineCore) => chine_backend::EngineKind::ChineCore,
+                Some(chine_backend::BackendId::LlamaCpp) => chine_backend::EngineKind::LlamaCpp,
                 None => {
-                    return Err(TuckmillError::new(
+                    return Err(ChineError::new(
                         ErrorCode::InvalidRequest,
                         format!("unknown worker engine {engine:?}"),
                     ))
                 }
             };
-            tuckmill_supervisor::worker_host::run_worker(socket, kind)?;
+            chine_supervisor::worker_host::run_worker(socket, kind)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -241,19 +237,19 @@ fn open_layout(data_dir: Option<&Path>) -> Result<StoreLayout> {
 /// Parse the `--engine` selection into (backend kind, placement).
 /// - "isolated" / "reference-test": reference test engine in a worker process
 /// - "in-process": reference test engine in the CLI process (debugging)
-/// - "tuckcore": experimental custom executor (isolated worker)
+/// - "chinecore": experimental custom executor (isolated worker)
 /// - "llama" / "llama.cpp": pinned llama.cpp reference (isolated worker)
-fn parse_engine(engine: &str) -> Result<(tuckmill_backend::EngineKind, EngineMode)> {
-    use tuckmill_backend::EngineKind;
+fn parse_engine(engine: &str) -> Result<(chine_backend::EngineKind, EngineMode)> {
+    use chine_backend::EngineKind;
     match engine {
         "isolated" | "reference-test" => Ok((EngineKind::ReferenceTest, EngineMode::Isolated)),
         "in-process" => Ok((EngineKind::ReferenceTest, EngineMode::InProcess)),
-        "tuckcore" => Ok((EngineKind::TuckCore, EngineMode::Isolated)),
+        "chinecore" => Ok((EngineKind::ChineCore, EngineMode::Isolated)),
         "llama" | "llama.cpp" => Ok((EngineKind::LlamaCpp, EngineMode::Isolated)),
-        other => Err(TuckmillError::new(
+        other => Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!(
-                "unknown engine {other:?}; use 'reference-test' (alias 'isolated'), 'in-process', 'tuckcore', or 'llama'"
+                "unknown engine {other:?}; use 'reference-test' (alias 'isolated'), 'in-process', 'chinecore', or 'llama'"
             ),
         )),
     }
@@ -268,7 +264,7 @@ fn open_runtime(
         data_dir,
         engine,
         allow_test_engine,
-        tuckmill_supervisor::options::ExecutionOptions::default(),
+        chine_supervisor::options::ExecutionOptions::default(),
     )
 }
 
@@ -276,7 +272,7 @@ fn open_runtime_with_options(
     data_dir: Option<&Path>,
     engine: &str,
     allow_test_engine: bool,
-    execution: tuckmill_supervisor::options::ExecutionOptions,
+    execution: chine_supervisor::options::ExecutionOptions,
 ) -> Result<Arc<Runtime>> {
     let (engine_kind, engine_mode) = parse_engine(engine)?;
     Runtime::open(RuntimeOptions {
@@ -295,7 +291,7 @@ fn open_runtime_with_options(
 /// `0`, seconds, or `s`/`m`/`h` suffixes). `None` keeps an idle model
 /// until it must make room.
 fn parse_keep_alive(value: &str) -> Result<Option<std::time::Duration>> {
-    tuckmill_supervisor::runtime::parse_keep_alive(value)
+    chine_supervisor::runtime::parse_keep_alive(value)
 }
 
 /// Build the typed execution options for run/bench/stats/verify from CLI
@@ -307,12 +303,12 @@ fn execution_options(
     kernels: Option<&str>,
     storage: Option<&str>,
     speculative: bool,
-) -> Result<tuckmill_supervisor::options::ExecutionOptions> {
-    use tuckmill_supervisor::options::ExecutionOptions;
+) -> Result<chine_supervisor::options::ExecutionOptions> {
+    use chine_supervisor::options::ExecutionOptions;
     let (kind, _) = parse_engine(engine)?;
     let kernels = match kernels {
-        Some(k) => Some(tuckmill_tuckcore::KernelSelection::parse(k).ok_or_else(|| {
-            TuckmillError::new(
+        Some(k) => Some(chine_chinecore::KernelSelection::parse(k).ok_or_else(|| {
+            ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("unknown --kernels {k:?}; use auto, scalar, neon, or metal"),
             )
@@ -320,14 +316,12 @@ fn execution_options(
         None => None,
     };
     let storage = match storage {
-        Some(st) => Some(
-            tuckmill_tuckcore::StorageSelection::parse(st).ok_or_else(|| {
-                TuckmillError::new(
-                    ErrorCode::InvalidRequest,
-                    format!("unknown --storage {st:?}; use auto, mapped, or owned"),
-                )
-            })?,
-        ),
+        Some(st) => Some(chine_chinecore::StorageSelection::parse(st).ok_or_else(|| {
+            ChineError::new(
+                ErrorCode::InvalidRequest,
+                format!("unknown --storage {st:?}; use auto, mapped, or owned"),
+            )
+        })?),
         None => None,
     };
     let options = ExecutionOptions {
@@ -346,9 +340,9 @@ fn execution_options(
 fn doctor(probe_storage: bool, json: bool, data_dir: Option<&Path>) -> Result<ExitCode> {
     let layout = open_layout(data_dir)?;
     let profile = device::detect(layout.root())?;
-    let kernels = tuckmill_planner::kernel_registry::KernelRegistry::builtin()?;
-    let adapters = tuckmill_manifest::adapter::AdapterRegistry::builtin()?;
-    let curl = tuckmill_store::download::CurlFetcher::discover()
+    let kernels = chine_planner::kernel_registry::KernelRegistry::builtin()?;
+    let adapters = chine_manifest::adapter::AdapterRegistry::builtin()?;
+    let curl = chine_store::download::CurlFetcher::discover()
         .map(|f| f.path().display().to_string())
         .unwrap_or_else(|_| "unavailable".to_string());
 
@@ -359,7 +353,7 @@ fn doctor(probe_storage: bool, json: bool, data_dir: Option<&Path>) -> Result<Ex
 
     if json {
         let mut value = serde_json::to_value(&profile)
-            .map_err(|e| tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "device"))?;
+            .map_err(|e| chine_manifest::error::json_error(e, ErrorCode::Internal, "device"))?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert(
                 "kernels".into(),
@@ -395,14 +389,14 @@ fn doctor(probe_storage: bool, json: bool, data_dir: Option<&Path>) -> Result<Ex
         println!(
             "{}",
             serde_json::to_string_pretty(&value).map_err(|e| {
-                tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
             })?
         );
         return Ok(ExitCode::SUCCESS);
     }
 
     println!(
-        "Tuckmill doctor — {} ({} cores, {} RAM), {} {} ({})",
+        "Chine doctor — {} ({} cores, {} RAM), {} {} ({})",
         profile.chip,
         profile.cpu_cores_total,
         Bytes(profile.memory_bytes),
@@ -476,22 +470,22 @@ fn run_storage_probe(layout: &StoreLayout) -> Result<StorageProbe> {
     let payload = vec![0xA5u8; 1024 * 1024];
     let t0 = Instant::now();
     {
-        let mut f = std::fs::File::create(&path).map_err(TuckmillError::from)?;
+        let mut f = std::fs::File::create(&path).map_err(ChineError::from)?;
         let mut written = 0u64;
         while written < PROBE_BYTES {
-            f.write_all(&payload).map_err(TuckmillError::from)?;
+            f.write_all(&payload).map_err(ChineError::from)?;
             written += payload.len() as u64;
         }
-        f.sync_all().map_err(TuckmillError::from)?;
+        f.sync_all().map_err(ChineError::from)?;
     }
     let write_s = t0.elapsed().as_secs_f64().max(1e-9);
     let t1 = Instant::now();
     {
-        let mut f = std::fs::File::open(&path).map_err(TuckmillError::from)?;
+        let mut f = std::fs::File::open(&path).map_err(ChineError::from)?;
         let mut buf = vec![0u8; payload.len()];
         let mut read = 0u64;
         while read < PROBE_BYTES {
-            f.read_exact(&mut buf).map_err(TuckmillError::from)?;
+            f.read_exact(&mut buf).map_err(ChineError::from)?;
             read += buf.len() as u64;
         }
     }
@@ -520,16 +514,16 @@ fn kv_summary(v: &GgufValue) -> serde_json::Value {
 
 fn inspect(path: &Path, json: bool) -> Result<ExitCode> {
     let mut file = std::fs::File::open(path).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidRequest,
             format!("cannot open {}: {e}", path.display()),
         )
         .with_source(e)
     })?;
     let mut magic = [0u8; 4];
-    let read = file.read(&mut magic).map_err(TuckmillError::from)?;
+    let read = file.read(&mut magic).map_err(ChineError::from)?;
     if read != 4 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             "file is smaller than any known model header",
         ));
@@ -585,7 +579,7 @@ fn inspect(path: &Path, json: bool) -> Result<ExitCode> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&out).map_err(|e| {
-                    tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                    chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
                 })?
             );
         } else {
@@ -620,12 +614,12 @@ fn inspect(path: &Path, json: bool) -> Result<ExitCode> {
         }
         Ok(ExitCode::SUCCESS)
     } else {
-        let insp = tuckmill_manifest::safetensors::inspect(path)?;
+        let insp = chine_manifest::safetensors::inspect(path)?;
         if json {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&insp).map_err(|e| {
-                    tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                    chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
                 })?
             );
         } else {
@@ -655,7 +649,7 @@ fn import(
     data_dir: Option<&Path>,
 ) -> Result<ExitCode> {
     let layout = open_layout(data_dir)?;
-    let registry = tuckmill_manifest::adapter::AdapterRegistry::builtin()?;
+    let registry = chine_manifest::adapter::AdapterRegistry::builtin()?;
     let outcome = import_local(
         &layout,
         &registry,
@@ -677,9 +671,11 @@ fn import(
         });
         println!(
             "{}",
-            serde_json::to_string_pretty(&out).map_err(
-                |e| tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
-            )?
+            serde_json::to_string_pretty(&out).map_err(|e| chine_manifest::error::json_error(
+                e,
+                ErrorCode::Internal,
+                "json"
+            ))?
         );
     } else {
         println!(
@@ -731,7 +727,7 @@ fn pack(model: &str, json: bool, data_dir: Option<&Path>) -> Result<ExitCode> {
                 "already_packed": outcome.already_packed,
                 "resumed": outcome.resumed,
             }))
-            .map_err(|e| tuckmill_manifest::error::json_error(
+            .map_err(|e| chine_manifest::error::json_error(
                 e,
                 ErrorCode::Internal,
                 "json"
@@ -773,18 +769,18 @@ fn plan(
 
     // Persist the plan record (inspectable, immutable).
     let dir = runtime.layout.plans_dir();
-    std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+    std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
     let path = dir.join(format!("{}.json", plan.plan_id.as_str()));
     let bytes = serde_json::to_vec_pretty(&plan).map_err(|e| {
-        tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "plan serialization")
+        chine_manifest::error::json_error(e, ErrorCode::Internal, "plan serialization")
     })?;
-    std::fs::write(&path, bytes).map_err(TuckmillError::from)?;
+    std::fs::write(&path, bytes).map_err(ChineError::from)?;
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&plan).map_err(|e| {
-                tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
             })?
         );
         runtime.shutdown();
@@ -897,9 +893,9 @@ fn run(
             let mut buf = String::new();
             std::io::stdin()
                 .read_to_string(&mut buf)
-                .map_err(TuckmillError::from)?;
+                .map_err(ChineError::from)?;
             if buf.trim().is_empty() {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidRequest,
                     "no prompt: pass --prompt or pipe text on stdin",
                 ));
@@ -908,28 +904,28 @@ fn run(
         }
     };
     let identity = runtime.engine_identity();
-    let synthetic = tuckmill_backend::is_synthetic_engine(&identity.engine);
+    let synthetic = chine_backend::is_synthetic_engine(&identity.engine);
     // Raw completion stays distinct from chat completion: the prompt is
     // tokenized as-is and no chat template is applied. Real backends go
     // through the model bundle (reference-first tokenizer; special-token
     // spellings map to their vocabulary ids); the synthetic engine keeps
     // deterministic synthetic tokens (no vocabulary executes).
     let prompt_tokens = if synthetic {
-        let tokens = tuckmill_supervisor::engine::synthetic_prompt_tokens(&prompt, 4096);
-        tuckmill_supervisor::bundle::check_allowance(tokens.len() as u64, max_output, context)?;
+        let tokens = chine_supervisor::engine::synthetic_prompt_tokens(&prompt, 4096);
+        chine_supervisor::bundle::check_allowance(tokens.len() as u64, max_output, context)?;
         tokens
     } else {
-        let bundle = tuckmill_supervisor::bundle::ModelBundle::open(&runtime.layout, &artifact)?;
+        let bundle = chine_supervisor::bundle::ModelBundle::open(&runtime.layout, &artifact)?;
         if !quiet {
             eprintln!("note: {}", bundle.note);
         }
-        let spec = tuckmill_supervisor::bundle::RequestSpec::raw(
+        let spec = chine_supervisor::bundle::RequestSpec::raw(
             &bundle,
             prompt.clone(),
             max_output,
             Vec::new(),
             0,
-            tuckmill_backend::SamplingPolicy::default(),
+            chine_backend::SamplingPolicy::default(),
             false,
             context,
         )?;
@@ -954,7 +950,7 @@ fn run(
         }
     }
 
-    let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+    let artifact_ref = chine_backend::ArtifactRef::from_record(
         &artifact,
         &runtime.layout.artifact_payload_path(&artifact.artifact_id),
     );
@@ -963,12 +959,12 @@ fn run(
         &ticket,
         plan.clone(),
         artifact_ref,
-        tuckmill_supervisor::runtime::RunRequest {
+        chine_supervisor::runtime::RunRequest {
             prompt_tokens,
             max_output_tokens: max_output,
             stop: Vec::new(),
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
             keep_alive: None,
         },
@@ -1032,11 +1028,11 @@ fn run(
                             "error": {"code": code, "message": message, "action": action},
                         }))
                         .map_err(|e| {
-                            tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                            chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
                         })?
                     );
                 }
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     serde_json::from_value::<ErrorCode>(serde_json::Value::String(code))
                         .unwrap_or(ErrorCode::WorkerFailed),
                     message,
@@ -1070,7 +1066,7 @@ fn run(
                 "certified": identity.certified,
                 "synthetic_output": synthetic,
             }))
-            .map_err(|e| tuckmill_manifest::error::json_error(
+            .map_err(|e| chine_manifest::error::json_error(
                 e,
                 ErrorCode::Internal,
                 "json"
@@ -1127,9 +1123,9 @@ fn serve(
         pressure_unload: !no_pressure_unload,
         ..Default::default()
     })?;
-    let server = tuckmill_supervisor::api::ApiServer::bind(runtime.clone(), port, None)?;
+    let server = chine_supervisor::api::ApiServer::bind(runtime.clone(), port, None)?;
     let addr = server.local_addr();
-    let token_file = tuckmill_supervisor::api::token_file_path(&runtime);
+    let token_file = chine_supervisor::api::token_file_path(&runtime);
 
     let identity = runtime.engine_identity();
     if json {
@@ -1144,14 +1140,14 @@ fn serve(
                 "certified": identity.certified,
                 "default_budget_bytes": runtime.default_budget.bytes(),
             }))
-            .map_err(|e| tuckmill_manifest::error::json_error(
+            .map_err(|e| chine_manifest::error::json_error(
                 e,
                 ErrorCode::Internal,
                 "json"
             ))?
         );
     } else {
-        println!("tuckmill serve: listening on http://{addr}");
+        println!("chine serve: listening on http://{addr}");
         println!(
             "token file: {} (Authorization: Bearer <token>)",
             token_file.display()
@@ -1167,7 +1163,7 @@ fn serve(
                 "no"
             }
         );
-        if !tuckmill_backend::is_synthetic_engine(&identity.engine) {
+        if !chine_backend::is_synthetic_engine(&identity.engine) {
             println!(
                 "note: experimental backend — real weights, scalar reference kernels, uncertified"
             );
@@ -1220,7 +1216,7 @@ fn bench(
     data_dir: Option<&Path>,
 ) -> Result<ExitCode> {
     if suite != "standard-v1" {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!("unknown suite {suite:?}; this build provides standard-v1"),
         ));
@@ -1228,16 +1224,16 @@ fn bench(
     let mut execution = execution_options(engine, gpu_layers, kernels, storage, speculative)?;
     if let Some(kv) = kv_precision {
         if !matches!(kv, "f32" | "f16") {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("unknown --kv-precision {kv:?}; use f32 or f16"),
             ));
         }
         execution.kv_precision = Some(kv.to_string());
     }
-    // Benchmarks repeat the same prompt: TuckCore's prefix cache would turn
+    // Benchmarks repeat the same prompt: ChineCore's prefix cache would turn
     // warm repetitions into hidden cache hits, so it is off for bench.
-    if parse_engine(engine)?.0 == tuckmill_backend::EngineKind::TuckCore {
+    if parse_engine(engine)?.0 == chine_backend::EngineKind::ChineCore {
         execution.prefix_cache = Some(false);
     }
     let runtime = open_runtime_with_options(data_dir, engine, allow_test_engine, execution)?;
@@ -1255,7 +1251,7 @@ fn bench(
         ignore_eos,
         ..Default::default()
     };
-    let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+    let artifact_ref = chine_backend::ArtifactRef::from_record(
         &artifact,
         &runtime.layout.artifact_payload_path(&artifact.artifact_id),
     );
@@ -1264,7 +1260,7 @@ fn bench(
         println!(
             "{}",
             serde_json::to_string_pretty(&record).map_err(|e| {
-                tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
             })?
         );
     } else {
@@ -1293,7 +1289,7 @@ fn verify(
     generate: u64,
     reference: bool,
     tolerance: f64,
-    tuckcore_profile: &str,
+    chinecore_profile: &str,
     kv_precision: &str,
     held_out: bool,
     kernels: Option<&str>,
@@ -1301,27 +1297,27 @@ fn verify(
     json: bool,
     data_dir: Option<&Path>,
 ) -> Result<ExitCode> {
-    let selection = execution_options("tuckcore", None, kernels, storage, false)?;
-    let runtime = open_runtime_with_options(data_dir, "tuckcore", false, selection.clone())?;
+    let selection = execution_options("chinecore", None, kernels, storage, false)?;
+    let runtime = open_runtime_with_options(data_dir, "chinecore", false, selection.clone())?;
     let budget = resolve_budget(&runtime, memory_budget)?;
     let (artifact, adapter) = runtime.resolve_artifact(model)?;
     let plan = runtime.plan_for(&artifact, &adapter, budget, context, generate.max(1))?;
     runtime.plan_admitted(&plan)?;
-    let artifact_ref = tuckmill_backend::ArtifactRef::from_record(
+    let artifact_ref = chine_backend::ArtifactRef::from_record(
         &artifact,
         &runtime.layout.artifact_payload_path(&artifact.artifact_id),
     );
     let report = if reference {
-        let profile = tuckmill_tuckcore::forward::NumericalProfile::parse(tuckcore_profile)
+        let profile = chine_chinecore::forward::NumericalProfile::parse(chinecore_profile)
             .ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidRequest,
                     format!(
-                        "unknown tuckcore profile {tuckcore_profile:?}; use \"llama-cpu\", \"oracle-f32\" or \"metal-f16-act\" (the unified engine's Metal GEMM profile; with --kernels metal the default resolves to it)"
+                        "unknown chinecore profile {chinecore_profile:?}; use \"llama-cpu\", \"oracle-f32\" or \"metal-f16-act\" (the unified engine's Metal GEMM profile; with --kernels metal the default resolves to it)"
                     ),
                 )
             })?;
-        let options = tuckmill_supervisor::verify::ReferenceCompareOptions {
+        let options = chine_supervisor::verify::ReferenceCompareOptions {
             max_score_positions: positions,
             generate_tokens: generate,
             max_abs_tolerance: if tolerance > 0.0 {
@@ -1329,16 +1325,16 @@ fn verify(
             } else {
                 None
             },
-            tuckcore_profile: profile,
+            chinecore_profile: profile,
             kv_precision: kv_precision.to_string(),
             held_out,
-            tuckcore_kernels: selection.kernels,
-            tuckcore_storage: selection.storage,
+            chinecore_kernels: selection.kernels,
+            chinecore_storage: selection.storage,
             ..Default::default()
         };
         runtime.run_reference_comparison(&plan, &artifact_ref, &options)?
     } else {
-        let options = tuckmill_supervisor::verify::VerifyOptions {
+        let options = chine_supervisor::verify::VerifyOptions {
             max_score_positions: positions,
             generate_tokens: generate,
             kernels: selection.kernels,
@@ -1352,11 +1348,11 @@ fn verify(
         println!(
             "{}",
             serde_json::to_string_pretty(&report).map_err(|e| {
-                tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
             })?
         );
     } else {
-        println!("{}", tuckmill_supervisor::verify::format_report(&report));
+        println!("{}", chine_supervisor::verify::format_report(&report));
         println!(
             "record: {}",
             runtime
@@ -1408,18 +1404,18 @@ fn stats(
         .map(|i| ((i * 37 + 5) % vocab) as u32)
         .collect();
 
-    let artifact_ref = tuckmill_backend::ArtifactRef::from_record(&artifact, &payload);
+    let artifact_ref = chine_backend::ArtifactRef::from_record(&artifact, &payload);
     let ticket = runtime.submit()?;
     let run = runtime.start_run(
         &ticket,
         plan.clone(),
         artifact_ref,
-        tuckmill_supervisor::runtime::RunRequest {
+        chine_supervisor::runtime::RunRequest {
             prompt_tokens: prompt,
             max_output_tokens: tokens.max(1),
             stop: Vec::new(),
             seed: 0,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
             keep_alive: None,
         },
@@ -1427,9 +1423,9 @@ fn stats(
     let committed;
     let reason = loop {
         match run.events.recv_timeout(std::time::Duration::from_secs(900)) {
-            Ok(tuckmill_supervisor::runtime::RunEvent::Token { .. }) => {}
-            Ok(tuckmill_supervisor::runtime::RunEvent::State(_)) => {}
-            Ok(tuckmill_supervisor::runtime::RunEvent::Done {
+            Ok(chine_supervisor::runtime::RunEvent::Token { .. }) => {}
+            Ok(chine_supervisor::runtime::RunEvent::State(_)) => {}
+            Ok(chine_supervisor::runtime::RunEvent::Done {
                 reason,
                 committed: c,
                 generated: _,
@@ -1438,13 +1434,13 @@ fn stats(
                 committed = c;
                 break reason;
             }
-            Ok(tuckmill_supervisor::runtime::RunEvent::Error {
+            Ok(chine_supervisor::runtime::RunEvent::Error {
                 code,
                 message,
                 action,
             }) => {
                 runtime.shutdown();
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     serde_json::from_value::<ErrorCode>(serde_json::Value::String(code))
                         .unwrap_or(ErrorCode::WorkerFailed),
                     message,
@@ -1453,7 +1449,7 @@ fn stats(
             }
             Err(e) => {
                 runtime.shutdown();
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     format!("probe run ended without Done: {e}"),
                 ));
@@ -1484,7 +1480,7 @@ fn stats(
         println!(
             "{}",
             serde_json::to_string_pretty(&value).map_err(|e| {
-                tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
             })?
         );
     } else {
@@ -1541,9 +1537,11 @@ fn cache_list(json: bool, data_dir: Option<&Path>) -> Result<ExitCode> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&inv).map_err(
-                |e| tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
-            )?
+            serde_json::to_string_pretty(&inv).map_err(|e| chine_manifest::error::json_error(
+                e,
+                ErrorCode::Internal,
+                "json"
+            ))?
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -1588,7 +1586,7 @@ fn cache_prune(dry_run: bool, json: bool, data_dir: Option<&Path>) -> Result<Exi
         println!(
             "{}",
             serde_json::to_string_pretty(&report).map_err(|e| {
-                tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "json")
+                chine_manifest::error::json_error(e, ErrorCode::Internal, "json")
             })?
         );
         return Ok(ExitCode::SUCCESS);

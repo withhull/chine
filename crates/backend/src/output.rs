@@ -412,7 +412,7 @@ mod tests {
     /// ordinal counts exactly once across all decoded runs.
     mod composition {
         use super::*;
-        use tuckmill_manifest::utf8::Utf8StreamDecoder;
+        use chine_manifest::utf8::Utf8StreamDecoder;
 
         fn feed(
             decoder: &mut Utf8StreamDecoder,

@@ -16,10 +16,10 @@ use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-use tuckmill_backend::{ArtifactRef, BackendStats};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::ExecutionPlan;
-use tuckmill_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
+use chine_backend::{ArtifactRef, BackendStats};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::ExecutionPlan;
+use chine_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
 
 /// Maximum accepted frame payload (1 MiB). Larger frames are a protocol
 /// violation, not something to buffer.
@@ -70,7 +70,7 @@ pub enum WorkerFrame {
         /// v7: typed sampler settings. Absent (older clients) means greedy;
         /// the worker validates the values before any compute.
         #[serde(default)]
-        sampling: tuckmill_backend::SamplingPolicy,
+        sampling: chine_backend::SamplingPolicy,
         /// v8: benchmark-only; EOS does not end generation (see
         /// `GenerateRequest::ignore_eos`).
         #[serde(default)]
@@ -93,7 +93,7 @@ pub enum WorkerFrame {
         /// Worker-side timing for this request (v6); absent for backends
         /// that do not measure it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        timing: Option<tuckmill_backend::RequestTiming>,
+        timing: Option<chine_backend::RequestTiming>,
     },
     Error {
         code: String,
@@ -149,10 +149,10 @@ pub enum WorkerFrame {
 impl WorkerFrame {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let payload = serde_json::to_vec(self).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "frame encoding")
+            chine_manifest::error::json_error(e, ErrorCode::Internal, "frame encoding")
         })?;
         if payload.len() as u64 > MAX_FRAME_BYTES as u64 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("frame payload {} bytes exceeds the cap", payload.len()),
             ));
@@ -165,8 +165,8 @@ impl WorkerFrame {
 
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         let bytes = self.encode()?;
-        writer.write_all(&bytes).map_err(TuckmillError::from)?;
-        writer.flush().map_err(TuckmillError::from)
+        writer.write_all(&bytes).map_err(ChineError::from)?;
+        writer.flush().map_err(ChineError::from)
     }
 
     /// Read one frame. Returns Ok(None) on clean EOF before any byte of a
@@ -178,20 +178,20 @@ impl WorkerFrame {
         }
         let len = u32::from_le_bytes(len_buf);
         if len == 0 || len > MAX_FRAME_BYTES {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("worker frame length {len} is outside 1..={MAX_FRAME_BYTES}"),
             ));
         }
         let mut payload = vec![0u8; len as usize];
         reader.read_exact(&mut payload).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("worker frame truncated: {e}"),
             )
         })?;
         let frame: WorkerFrame = serde_json::from_slice(&payload).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::WorkerFailed,
                 format!("worker frame is not a valid message: {e}"),
             )
@@ -208,14 +208,14 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<bool> {
                 if filled == 0 {
                     return Ok(false);
                 }
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::WorkerFailed,
                     "worker disconnected mid-frame",
                 ));
             }
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(TuckmillError::from(e)),
+            Err(e) => return Err(ChineError::from(e)),
         }
     }
     Ok(true)
@@ -224,7 +224,7 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<bool> {
 /// Validate a handshake pair. Both sides must agree on protocol and ABI.
 pub fn validate_handshake(protocol: u16, abi: u32) -> Result<()> {
     if protocol != WORKER_PROTOCOL_VERSION {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::WorkerFailed,
             format!(
                 "worker protocol mismatch: worker {protocol}, supervisor {WORKER_PROTOCOL_VERSION}"
@@ -232,7 +232,7 @@ pub fn validate_handshake(protocol: u16, abi: u32) -> Result<()> {
         ));
     }
     if abi != BACKEND_ABI_VERSION {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::WorkerFailed,
             format!("backend ABI mismatch: worker {abi}, supervisor {BACKEND_ABI_VERSION}"),
         ));
@@ -277,15 +277,15 @@ mod tests {
 
     fn frames() -> Vec<WorkerFrame> {
         vec![
-            hello("tuckmill-test"),
-            hello_ack("tuckmill-test", "reference-test", false),
+            hello("chine-test"),
+            hello_ack("chine-test", "reference-test", false),
             WorkerFrame::Generate {
                 request_id: "req_1".into(),
                 prompt_tokens: vec![1, 2, 3],
                 max_output_tokens: 16,
                 stop: vec!["</s>".into()],
                 seed: 42,
-                sampling: tuckmill_backend::SamplingPolicy {
+                sampling: chine_backend::SamplingPolicy {
                     temperature: 0.7,
                     top_p: Some(0.95),
                 },
@@ -310,7 +310,7 @@ mod tests {
                 reason: "stop".into(),
                 committed: 5,
                 generated: 7,
-                timing: Some(tuckmill_backend::RequestTiming {
+                timing: Some(chine_backend::RequestTiming {
                     total_ms: 12.5,
                     prefill_ms: Some(3.0),
                     first_token_ms: Some(4.0),
@@ -339,7 +339,7 @@ mod tests {
                     in_flight_leases: 0,
                     buffer_releases: Some(9),
                     released_bytes: Some(8192),
-                    storage: Some(tuckmill_backend::StorageStats {
+                    storage: Some(chine_backend::StorageStats {
                         mode: "mapped".into(),
                         owned_cache_bytes: 0,
                         owned_in_flight_bytes: 0,
@@ -392,11 +392,11 @@ mod tests {
     #[test]
     fn load_frame_carries_artifact_and_options() {
         let mut plan = ExecutionPlan::new_skeleton(
-            tuckmill_manifest::Id::new("a".repeat(64)).unwrap(),
-            tuckmill_manifest::Id::new("b".repeat(64)).unwrap(),
+            chine_manifest::Id::new("a".repeat(64)).unwrap(),
+            chine_manifest::Id::new("b".repeat(64)).unwrap(),
             "qwen3".into(),
         );
-        plan.mode = tuckmill_manifest::plan::ExecutionMode::Resident;
+        plan.mode = chine_manifest::plan::ExecutionMode::Resident;
         plan.plan_id = plan.compute_id().unwrap();
         let frame = WorkerFrame::Load {
             plan: Box::new(plan),

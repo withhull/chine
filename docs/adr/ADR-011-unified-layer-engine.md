@@ -1,6 +1,6 @@
 # ADR-011: One unified layer engine for every model family
 
-Status: **accepted** (2026-10-26). Extends ADR-005 (TuckCore behind
+Status: **accepted** (2026-10-26). Extends ADR-005 (ChineCore behind
 `InferenceBackend`) and ADR-007 (Metal ABI). Supersedes the per-family
 forward passes (`forward.rs`/`gpu.rs` for dense Qwen3, `qwen35_forward.rs`
 /`qwen35_gpu.rs` for Qwen3.5) once their migration gates pass.
@@ -77,7 +77,7 @@ never in a family-specific path.
 - One place to optimize: every gain reaches every family.
 - The migration costs some performance work now (rebuilding today's
   Qwen3.5 speed on blocks). The bit-identical gate makes that safe.
-- The CLI, worker protocol and planner contracts do not change; TuckCore
+- The CLI, worker protocol and planner contracts do not change; ChineCore
   still implements `InferenceBackend`.
 
 ## Step 1 record (2026-10-26): Qwen3.5 served through the engine
@@ -106,7 +106,7 @@ never in a family-specific path.
   - The derived RoPE tables are now priced as scratch, not weights. The
     planner reserves exactly the artifact's bytes, and on the 2B (no MTP
     block, so no slack) the old classing was rightly refused by 768 B.
-- **2B evidence:** `tuckmill run` (unified engine) and pinned llama.cpp
+- **2B evidence:** `chine run` (unified engine) and pinned llama.cpp
   Metal produce the same 16 greedy tokens for "The capital of France
   is".
 - Next: step 2 (dense Qwen3 on the same blocks), and the graph-driven CPU
@@ -114,11 +114,11 @@ never in a family-specific path.
 
 ## Engine note (2026-10-26): greedy decoding on the device, pipelined
 
-- `tm_metal_argmax_f32` chooses the greedy token on the GPU with exactly
+- `ch_metal_argmax_f32` chooses the greedy token on the GPU with exactly
   the CPU rule (`sampling::argmax`: NaN skipped, ties to the lowest index;
   the order is associative, so the two-pass reduction gives the
   sequential answer). It writes one of two alternating token slots.
-  `tm_metal_row_indirect_f32` embeds a token id read from such a slot; the
+  `ch_metal_row_indirect_f32` embeds a token id read from such a slot; the
   all-NaN marker writes zeros and the host fails the request when it
   reads the marker.
 - `EngineModel::submit_greedy` / `collect_greedy`: the executor queues step
@@ -132,7 +132,7 @@ never in a family-specific path.
   produce the CPU rule's tokens at every step (fixture and pinned, 40
   steps). In-process the step is GPU-bound (14.2–15.0 ms for all three
   paths: the logits download was not the cost). Served decode via
-  `tuckmill bench` (128 in / 256 out, ABAB): 56.5 → 64.0 and 51.0 → 59.0
+  `chine bench` (128 in / 256 out, ABAB): 56.5 → 64.0 and 51.0 → 59.0
   tok/s (+13–16%), locally-calibrated.
 
 ## Engine note (2026-10-26): chunk-wide mixer cores in prefill
@@ -146,7 +146,7 @@ never in a family-specific path.
     walks the chunk's tokens inside each (head, column) thread.
   - **Gated attention:** row-batched gate split and Q/K norms, then RoPE,
     packed-f16 KV store and causal attention for all chunk queries.
-    Attention uses one shared inline body (`tm_q35_attend`) for the
+    Attention uses one shared inline body (`ch_q35_attend`) for the
     per-token and chunk kernels.
 - Every chunk kernel keeps its per-token counterpart's per-element
   arithmetic. Gate: with `set_chunk_core(false)` (the per-token cores) as
@@ -162,7 +162,7 @@ never in a family-specific path.
 - The chunk recurrence was memory-traffic bound: it re-read each 128-float
   state column from device memory twice per token and wrote it once
   (~48 MB per 16-token launch, ~27 GB per 512-token prompt).
-  `tm_qwen35_gdn_chunk_k128` (a template instance for key dim 128) keeps
+  `ch_qwen35_gdn_chunk_k128` (a template instance for key dim 128) keeps
   the column in registers for the whole chunk: read once, written once.
   Other key dims keep the generic kernel.
 - **Fast-math caveat.** The kernel library is compiled with Metal's
@@ -186,7 +186,7 @@ never in a family-specific path.
 
 ## Engine note (2026-10-26): 32-token matrix-unit GEMM tile
 
-- `tm_q8_0_gemm_mma` now owns a 32-row x 32-token tile (4 accumulators per
+- `ch_q8_0_gemm_mma` now owns a 32-row x 32-token tile (4 accumulators per
   SIMD group instead of 2), so each dequantized weight tile serves twice as
   many tokens; prefill chunks are 32 tokens (`PREFILL_BATCH`). Per-token
   summation order over K is unchanged.
@@ -206,9 +206,9 @@ never in a family-specific path.
   kept: the GEMM was short of threadgroups, not of math per tile. With a
   32-token chunk a 1,024-row matrix gets 32 threadgroups, and each chunk
   re-reads every weight.
-- `tm_q8_0_gemm_mma` now covers a whole batch in one launch: a 1-D grid
+- `ch_q8_0_gemm_mma` now covers a whole batch in one launch: a 1-D grid
   of 32-row x 32-token tiles, with neighbouring threadgroups sharing a
-  weight tile (batch up to `TM_METAL_GEMM_MMA_MAX_BATCH` = 512). Per-tile
+  weight tile (batch up to `CH_METAL_GEMM_MMA_MAX_BATCH` = 512). Per-tile
   arithmetic is unchanged. `Matrix::gemm` slices F16 and batch-1 GEMMs
   into <= 32-token pieces through the existing offsets. Prefill chunks
   are 128 tokens.
@@ -235,8 +235,8 @@ never in a family-specific path.
 
 ## Engine note (2026-10-26): GEMM kernel variants measured, none kept
 
-Isolated timing (`q8_0_gemm_batch_timing` with `TUCKMILL_PROFILE=1
-TUCKMILL_GEMM_MMA=1`, now batches 32 and 128 after a warm-up, 100
+Isolated timing (`q8_0_gemm_batch_timing` with `CHINE_PROFILE=1
+CHINE_GEMM_MMA=1`, now batches 32 and 128 after a warm-up, 100
 iterations; M3 8 GB, alternating prebuilt binaries, two passes). Baseline
 at 128 tokens: 3584x1024 470-500 us, 6144x1024 787-830 us, 1024x3584
 500-556 us, about 2 TFLOP/s f32. Variants, all tolerance-passing:
@@ -271,7 +271,7 @@ at 128 tokens: 3584x1024 470-500 us, 6144x1024 787-830 us, 1024x3584
   operators. The recurrence ran one thread per (head, state column):
   16 x 128 = 2,048 threads walking every token with two 128-long dot
   products, so it was latency-bound.
-- `tm_qwen35_gdn_chunk_k128` now splits each column across P = 8 lanes
+- `ch_qwen35_gdn_chunk_k128` now splits each column across P = 8 lanes
   of one SIMD group (16 rows each, in registers). Lane partial dot
   products are combined with XOR shuffles, so every lane of a column sees
   the same total. A SIMD group covers 4 adjacent columns, and lane l works
@@ -305,7 +305,7 @@ at 128 tokens: 3584x1024 470-500 us, 6144x1024 787-830 us, 1024x3584
   four query heads sharing a KV head each re-read the K/V prefix, each
   thread walked every key serially for its two output dims, and both
   softmax reductions used threadgroup barriers.
-- `tm_qwen35_attention_gqa<HD, G>` runs one threadgroup per (KV head,
+- `ch_qwen35_attention_gqa<HD, G>` runs one threadgroup per (KV head,
   row) for all G heads:
   - each K and V row is read once;
   - lanes hold contiguous head dims of every head's query in registers;
@@ -362,7 +362,7 @@ three passes each; full prefill ~330 ms):
   dispatches, wall time per dispatch.
   - llama.cpp: `benchmarks/tools/ggml-mul-mat.c`, which runs the pinned
     ggml's `mul_mat` (it selects `kernel_mul_mm_q8_0_f32`).
-  - TuckCore: `q8_0_gemm_mma_grouped_wall_timing_when_requested`.
+  - ChineCore: `q8_0_gemm_mma_grouped_wall_timing_when_requested`.
   - Cross-check: the ggml per-node cost from 2-node minus 1-node graphs
     matches its serial 16-node figure, so concurrency does not explain it.
 - **llama.cpp was 1.3-1.4x faster.** At 128 tokens: 3584x1024 391-420 vs
@@ -379,7 +379,7 @@ three passes each; full prefill ~330 ms):
     in either layout, so the oracle-f32 profile stays. Removing bounds
     branches, forced unrolling and aligned activation loads also changed
     nothing measurable.
-- **`tm_q8_0_gemm_mma` now uses that structure in f32.** Isolated time at
+- **`ch_q8_0_gemm_mma` now uses that structure in f32.** Isolated time at
   128 tokens: 3584x1024 462-490 us, 6144x1024 792-853 us. About half the
   gap is closed; the remaining ~15% is unexplained and close to run-to-run
   noise.
@@ -415,7 +415,7 @@ three passes each; full prefill ~330 ms):
 - **The remaining ~6% is precision.** The same kernel with f16 operand
   tiles (information only) matches llama.cpp exactly: 388-392 / 639-674 /
   441 us. llama.cpp rounds dequantized weights and activations to f16
-  before multiplying; TuckCore keeps f32 (the oracle-f32 profile).
+  before multiplying; ChineCore keeps f32 (the oracle-f32 profile).
   Adopting f16 operands would be a declared profile change (ADR-010) and
   a product decision, not an optimization.
 - **In the model** (pinned 0.8B, M3 8 GB idle, prebuilt binaries
@@ -468,8 +468,8 @@ three passes each; full prefill ~330 ms):
     RoPE is the partial-RoPE kernel with `rope_dims == head_dim`.
   - KV cache precision is a load option (`KvCache::{F16, F32}`):
     `alloc_plan_with` / `EngineModel::load_with`.
-  - f32 KV uses new chunk kernels (`tm_qwen35_kv_store_f32_chunk`,
-    `tm_qwen35_attention_f32_chunk`, GQA instances for float caches).
+  - f32 KV uses new chunk kernels (`ch_qwen35_kv_store_f32_chunk`,
+    `ch_qwen35_attention_f32_chunk`, GQA instances for float caches).
     Decode runs them with n = 1, so prefill and decode stay
     bit-identical.
   - GQA instances added for head_dim 128 with group 2 and 4 (Qwen3
@@ -499,7 +499,7 @@ three passes each; full prefill ~330 ms):
   - The CLI completion is unchanged.
   - Qwen3.5 numbers are unchanged.
 - **Retired:**
-  - `crates/tuckcore/src/gpu.rs`;
+  - `crates/chinecore/src/gpu.rs`;
   - the operators only it used: f32 per-token and batched `rope`,
     `kv_store` and `attention`, and `rmsnorm_f16w` (kernels, C ABI,
     pipelines, Rust wrappers and their operator tests);
@@ -530,7 +530,7 @@ three passes each; full prefill ~330 ms):
 - **Tried and not kept:** R = 4 query rows per threadgroup sharing K/V
   loads. It was bit-identical but slower (attention 77 -> 131 ms): 4x
   fewer threadgroups while the per-key reductions stayed serial.
-- **Kept, both in `tm_qwen35_attention_gqa`:**
+- **Kept, both in `ch_qwen35_attention_gqa`:**
   - The G queries are staged in threadgroup memory, and each thread owns
     whole keys: one sequential dot product per (key, head), with no
     cross-lane reduction.
@@ -567,9 +567,9 @@ three passes each; full prefill ~330 ms):
   (`numerical_profile`) and in every `verify` caveat; nothing is silently
   substituted. Decode GEMVs, the exact speculative verify, F16-weight
   matrices and every CPU path are unchanged.
-- **Kernel.** `tm_q8_0_gemm_mma_f16op` (`native/metal/kernels.metal`):
+- **Kernel.** `ch_q8_0_gemm_mma_f16op` (`native/metal/kernels.metal`):
   same 64x32 fragment tiling, layout, summation order and edge handling as
-  `tm_q8_0_gemm_mma`; sa/sb stage as half, the edge output stage keeps its
+  `ch_q8_0_gemm_mma`; sa/sb stage as half, the edge output stage keeps its
   own f32 buffer (accumulators never round through it).
 - **Qualification (all on this M3 8 GB).**
   - Kernel vs the f32 CPU reference, half-domain boundary data (see
@@ -631,13 +631,13 @@ three passes each; full prefill ~330 ms):
     up from 94% (two AC runs with f32 operands) and 86% (noisy battery
     run). The Phase 1 prefill bar is met on the 2B in this run;
     reproduction pending by the repo's convention. Both engines were
-    steady this run (TuckCore 600-602 ms, llama.cpp 587-588 ms).
+    steady this run (ChineCore 600-602 ms, llama.cpp 587-588 ms).
   - Gemma 3 1B (f16 KV, ignore-EOS, `…-gemma3-1b-f16op-quiet`): warm
     TTFT 330 vs 290 ms, paired 1.14× (~88%, within the recorded 85-90%
     band — the residual is the 5% kernel gap at its 6912x1152 FFN
     shapes above); warm decode 65.04 vs 75.89 tok/s, paired 0.857 —
     llama.cpp's fastest recorded decode round (75.9-76.1 tok/s; it
-    swings 61-76 across runs) while TuckCore is unchanged and steady
+    swings 61-76 across runs) while ChineCore is unchanged and steady
     (64.90-65.19, median 65.04, identical to every prior run). The
     profile does not touch decode.
 
@@ -673,7 +673,7 @@ three passes each; full prefill ~330 ms):
   `5f242d0`, all rounds valid, zero swap,
   `…-gemma3-1b-f16op-tuned-quiet`).** Warm TTFT 326 vs llama.cpp 289 ms
   — paired 1.13x, prefill **~88.5%** (pairs 1.128 / 1.128 / 1.062);
-  paired decode 0.860 (TuckCore steady 65.0 ± 0.2 as in every recorded
+  paired decode 0.860 (ChineCore steady 65.0 ± 0.2 as in every recorded
   run; llama.cpp swung to 62.5 tok/s in round 3). The >= 90% prefill
   bar is **not crossed** on Gemma 3 by the median. Correction, recorded
   plainly: the -9.5% quoted above from in-process profiles compared
@@ -691,7 +691,7 @@ three passes each; full prefill ~330 ms):
 - **Follow-up (2026-11-22): the fused post-block norm + residual add, and
   the merged Q/K norms.** Two structural cuts to the non-GEMM stack
   identified as Gemma 3's remaining prefill gap:
-  - `tm_norm_add_f32`: one pass for the engine's post-block pair
+  - `ch_norm_add_f32`: one pass for the engine's post-block pair
     (`rmsnorm(out)` then `y += normed`, where y is the residual stream).
     The pair reads and writes the row three times; the fused kernel reads
     twice and writes once. Metal fast math contracts the fused
@@ -706,9 +706,9 @@ three passes each; full prefill ~330 ms):
     (-40%), 71.0 -> 50.3 us at 128x2048 (-29%); the first (contracted)
     version was 15-25% slower at decode rows and is recorded as
     tried-not-kept before the optnone fix.
-  - `tm_qk_norm_f32`: one launch for the per-head Q and K RMS norms
+  - `ch_qk_norm_f32`: one launch for the per-head Q and K RMS norms
     (rows [0, q_rows) for q, the rest for k); per-row arithmetic is
-    exactly `tm_rmsnorm_f32`'s — bit-identical, pinned by a metal-crate
+    exactly `ch_rmsnorm_f32`'s — bit-identical, pinned by a metal-crate
     gate. 208 fewer launches per 512-token prefill, 52 fewer per decode
     token.
   - Applied at the two prefill sites only (decode keeps the pair: at
@@ -734,7 +734,7 @@ three passes each; full prefill ~330 ms):
   `6abf2a8`, all rounds valid, zero swap,
   `…-gemma3-1b-fusednorm-quiet`).** Warm TTFT 326/326/325 ms —
   **identical to the run before the fusion** (paired 1.13x, prefill
-  ~88.5%; pairs 1.128/1.128/1.126). Paired decode 0.862, TuckCore
+  ~88.5%; pairs 1.128/1.128/1.126). Paired decode 0.862, ChineCore
   steady 65.2-65.4, llama.cpp in its fast mode (75.7-76.0). The bar is
   not crossed, and the projection (~6-7 ms off the TTFT) was wrong.
   **Recorded plainly: this is the second projection from ungrouped
@@ -825,7 +825,7 @@ three passes each; full prefill ~330 ms):
   at parity; the gap is the decode attention; two attempts, one anomaly,
   honestly recorded.**
 - **Isolated GEMV parity (the question as posed).** A wall-timing harness
-  (TUCKMILL_PROFILE=1, `q8_0_gemv_timing_when_requested`) measured our
+  (CHINE_PROFILE=1, `q8_0_gemv_timing_when_requested`) measured our
   per-row Q8_0 GEMV against pinned llama.cpp `mul_mv` at the Gemma decode
   shapes, same window: 6912x1152 152 vs 156 us, 1152x6912 132 vs 135,
   1024x1152 33.5 vs 28.8, 256x1152 23.6 vs 22.9, head 262144x1152 4445 vs
@@ -872,7 +872,7 @@ three passes each; full prefill ~330 ms):
   to chase).
 
 - **The "x128 grid anomaly" is resolved (2026-11-22): it was never an
-  anomaly.** `tm_dispatch_args` encodes with `dispatchThreads` - its
+  anomaly.** `ch_dispatch_args` encodes with `dispatchThreads` - its
   MTLSize is TOTAL THREADS, not threadgroups - so the historical
   `kv_heads x 128` / `heads x 128` grids are the correct "N groups of
   128 threads" encoding of one-group-per-(head, row). There was no

@@ -7,7 +7,7 @@
 //! Do not hand-edit sizes: re-derive them from a new pinned revision and note
 //! the change.
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TensorTypeInfo {
@@ -91,13 +91,13 @@ pub fn type_name(type_id: u32) -> String {
 /// not block-aligned is a malformed artifact, not something to round up.
 pub fn tensor_bytes(type_id: u32, elems: u64) -> Result<u64> {
     let info = lookup(type_id).ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::UnsupportedQuantization,
             format!("unknown GGML tensor type id {type_id}"),
         )
     })?;
     if !elems.is_multiple_of(info.block_elems) {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             format!(
                 "tensor element count {elems} is not a multiple of {} block size {} for type {}",
@@ -107,7 +107,7 @@ pub fn tensor_bytes(type_id: u32, elems: u64) -> Result<u64> {
     }
     let blocks = elems / info.block_elems;
     blocks.checked_mul(info.block_bytes).ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidArtifact,
             format!(
                 "tensor byte size overflows for {} x {elems} elements",

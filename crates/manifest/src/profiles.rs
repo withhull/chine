@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 use crate::ids::Id;
 
 /// The parent model identity: weights, tokenizer, architecture, license.
@@ -77,7 +77,7 @@ pub enum ProfileChange {
 /// policy. Returns the user-facing error for disallowed automatic changes.
 pub fn check_change(change: ProfileChange) -> Result<()> {
     match change {
-        ProfileChange::Quality => Err(TuckmillError::new(
+        ProfileChange::Quality => Err(ChineError::new(
             ErrorCode::InvalidConfiguration,
             "quality profile changes (weights, transforms, precision) may not happen automatically",
         )
@@ -89,7 +89,7 @@ pub fn check_change(change: ProfileChange) -> Result<()> {
         } => Ok(()),
         ProfileChange::Packing {
             lossless_layout_only: false,
-        } => Err(TuckmillError::new(
+        } => Err(ChineError::new(
             ErrorCode::InvalidConfiguration,
             "a packing change that alters quantization values is a new quality profile",
         )

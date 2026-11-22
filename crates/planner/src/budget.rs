@@ -5,9 +5,9 @@
 //! admission and allocation policy, not an operating-system guarantee; the
 //! plan says so.
 
-use tuckmill_manifest::plan::{PlanBudget, PlanContext};
-use tuckmill_manifest::records::{ReservationBreakdown, ReserveClass, TensorStats};
-use tuckmill_manifest::units::{Bytes, GIB};
+use chine_manifest::plan::{PlanBudget, PlanContext};
+use chine_manifest::records::{ReservationBreakdown, ReserveClass, TensorStats};
+use chine_manifest::units::{Bytes, GIB};
 
 use crate::kv::estimate_kv_bytes;
 use crate::PlannerPolicy;
@@ -156,13 +156,13 @@ pub fn make_plan_budget(
 /// needs no extra reservation for the prefix cache: reused rows are the
 /// session's own.
 pub fn kv_bytes_for(
-    geometry: Option<&tuckmill_manifest::records::ModelGeometry>,
+    geometry: Option<&chine_manifest::records::ModelGeometry>,
     context: &PlanContext,
     bytes_per_element: u32,
 ) -> Option<u64> {
     let g = geometry?;
     let attention_layers = g.attention_layers.unwrap_or(g.layers);
-    let kv_geometry = tuckmill_manifest::adapter::KvGeometry {
+    let kv_geometry = chine_manifest::adapter::KvGeometry {
         layers: attention_layers,
         attention_layers,
         state_bytes: 0,
@@ -180,8 +180,8 @@ pub fn kv_bytes_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chine_manifest::records::TensorStats;
     use std::collections::BTreeMap;
-    use tuckmill_manifest::records::TensorStats;
 
     fn stats() -> TensorStats {
         let mut by_class = BTreeMap::new();
@@ -271,7 +271,7 @@ mod tests {
     /// reserves the constant recurrent state exactly once (ADR-008).
     #[test]
     fn hybrid_kv_prices_attention_layers_plus_state_and_its_prefix_snapshot() {
-        use tuckmill_manifest::records::ModelGeometry;
+        use chine_manifest::records::ModelGeometry;
         let ctx = PlanContext::new(2048, 256);
         let hybrid = ModelGeometry {
             layers: 24,

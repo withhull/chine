@@ -7,17 +7,17 @@
 //! `EngineIdentity.certified` stays false.
 //!
 //! Shared backend types (RunState, FinishReason, GenControl, ...) live in
-//! `tuckmill-backend` (ADR-005) and are re-exported here for compatibility.
+//! `chine-backend` (ADR-005) and are re-exported here for compatibility.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::ExecutionPlan;
-use tuckmill_manifest::records::EngineIdentity;
-use tuckmill_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::ExecutionPlan;
+use chine_manifest::records::EngineIdentity;
+use chine_manifest::{BACKEND_ABI_VERSION, WORKER_PROTOCOL_VERSION};
 
-pub use tuckmill_backend::{
+pub use chine_backend::{
     is_synthetic_engine, BackendCapabilities, BackendId, BackendStats, FinishReason, GenControl,
     GenOutcome, GenerateRequest, RunState, BACKEND_API_VERSION,
 };
@@ -41,7 +41,7 @@ pub fn reference_test_identity() -> EngineIdentity {
 
 pub fn build_id() -> String {
     format!(
-        "tuckmill {} ({})",
+        "chine {} ({})",
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) {
             "debug"
@@ -55,7 +55,7 @@ pub fn build_id() -> String {
 /// No vocabulary or tokenizer executes in this build; exact token IDs from a
 /// real tokenizer arrive with a certified executor. Bounded to `max_tokens`.
 pub fn synthetic_prompt_tokens(text: &str, max_tokens: usize) -> Vec<u32> {
-    let mut h = tuckmill_manifest::ids::sha256_hex(text.as_bytes());
+    let mut h = chine_manifest::ids::sha256_hex(text.as_bytes());
     let mut ids = Vec::new();
     while h.len() >= 8 && ids.len() < max_tokens {
         if let Ok(v) = u32::from_str_radix(&h[..8], 16) {
@@ -103,8 +103,8 @@ impl ReferenceTestEngine {
     /// Load a plan (inherent form used by the in-process path and tests).
     pub fn load(&mut self, plan: &ExecutionPlan) -> Result<String> {
         plan.validate()?;
-        if plan.mode == tuckmill_manifest::plan::ExecutionMode::Rejected {
-            return Err(TuckmillError::new(
+        if plan.mode == chine_manifest::plan::ExecutionMode::Rejected {
+            return Err(ChineError::new(
                 ErrorCode::InvalidPlan,
                 "refusing to load a rejected plan",
             ));
@@ -129,19 +129,20 @@ impl ReferenceTestEngine {
         req: &EngineRequest,
         ctl: &mut GenControl<'_>,
     ) -> Result<GenOutcome> {
-        let plan = self.loaded_plan.as_ref().ok_or_else(|| {
-            TuckmillError::new(ErrorCode::WorkerFailed, "engine has no loaded plan")
-        })?;
+        let plan = self
+            .loaded_plan
+            .as_ref()
+            .ok_or_else(|| ChineError::new(ErrorCode::WorkerFailed, "engine has no loaded plan"))?;
         let prompt_len = req.prompt_tokens.len() as u64;
         if prompt_len == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "prompt must contain at least one token",
             ));
         }
         let total = prompt_len.saturating_add(req.max_output_tokens);
         if total > plan.context.total_context {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "prompt {prompt_len} + max output {} exceeds admitted context {}",
@@ -150,7 +151,7 @@ impl ReferenceTestEngine {
             ));
         }
         if req.max_output_tokens == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "max_output_tokens must be positive",
             ));
@@ -160,7 +161,7 @@ impl ReferenceTestEngine {
         // and is refused rather than ignored (greedy requests still work).
         req.sampling.validate()?;
         if !req.sampling.is_greedy() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 format!(
                     "temperature {} cannot be honored: the reference test engine produces synthetic tokens, not samples from a distribution",
@@ -168,7 +169,7 @@ impl ReferenceTestEngine {
                 ),
             )
             .with_action(
-                "Use a real backend (for example --engine tuckcore) for sampling; greedy requests run on the synthetic engine.",
+                "Use a real backend (for example --engine chinecore) for sampling; greedy requests run on the synthetic engine.",
             ));
         }
 
@@ -183,7 +184,7 @@ impl ReferenceTestEngine {
                                   first: Option<Instant>,
                                   last: Option<Instant>| {
             let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
-            outcome.with_timing(tuckmill_backend::RequestTiming {
+            outcome.with_timing(chine_backend::RequestTiming {
                 total_ms: ms(t0, Instant::now()),
                 prefill_ms,
                 first_token_ms: first.map(|f| ms(t0, f)),
@@ -217,7 +218,7 @@ impl ReferenceTestEngine {
         // Bounded pending-output buffering: a stop sequence may span
         // tokens, so text is held until a stop can no longer complete; a
         // completed stop sequence is never visible.
-        let mut buffer = tuckmill_backend::output::VisibleOutputBuffer::new(&req.stop);
+        let mut buffer = chine_backend::output::VisibleOutputBuffer::new(&req.stop);
         let mut release_index: u64 = 0;
         let emit = |text: &str, release_index: &mut u64, ctl: &mut GenControl<'_>| -> bool {
             if text.is_empty() {
@@ -284,7 +285,7 @@ impl ReferenceTestEngine {
     }
 }
 
-impl tuckmill_backend::InferenceBackend for ReferenceTestEngine {
+impl chine_backend::InferenceBackend for ReferenceTestEngine {
     fn backend_id(&self) -> BackendId {
         BackendId::ReferenceTest
     }
@@ -312,14 +313,14 @@ impl tuckmill_backend::InferenceBackend for ReferenceTestEngine {
     fn load(
         &mut self,
         plan: &ExecutionPlan,
-        _artifact: &tuckmill_backend::ArtifactRef,
+        _artifact: &chine_backend::ArtifactRef,
         options: Option<&serde_json::Value>,
     ) -> Result<String> {
         // Benchmark/test aid only: an explicit per-token production delay so
         // measured latency can be proven to include worker-side pacing.
         if let Some(value) = options.and_then(|o| o.get("per_token_delay_ms")) {
             let ms = value.as_u64().ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidRequest,
                     "per_token_delay_ms must be a non-negative integer",
                 )
@@ -340,9 +341,9 @@ impl tuckmill_backend::InferenceBackend for ReferenceTestEngine {
         _cancelled: &dyn Fn() -> bool,
         _sink: &mut dyn FnMut(u64, &[f32]) -> bool,
     ) -> Result<u64> {
-        Err(TuckmillError::new(
+        Err(ChineError::new(
             ErrorCode::Unavailable,
-            "the reference test engine produces no logits; teacher-forced scoring requires a real backend (for example tuckcore)",
+            "the reference test engine produces no logits; teacher-forced scoring requires a real backend (for example chinecore)",
         ))
     }
 
@@ -387,10 +388,10 @@ fn pause_loop(ctl: &mut GenControl<'_>, mut remaining: Duration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chine_manifest::ids::Id;
+    use chine_manifest::plan::{ExecutionMode, ExecutionPlan};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
-    use tuckmill_manifest::ids::Id;
-    use tuckmill_manifest::plan::{ExecutionMode, ExecutionPlan};
 
     fn admitted_plan() -> ExecutionPlan {
         let mut p = ExecutionPlan::new_skeleton(
@@ -399,7 +400,7 @@ mod tests {
             "qwen3".into(),
         );
         p.mode = ExecutionMode::Resident;
-        p.context = tuckmill_manifest::plan::PlanContext::new(256, 64);
+        p.context = chine_manifest::plan::PlanContext::new(256, 64);
         p.plan_id = p.compute_id().unwrap();
         p
     }
@@ -411,7 +412,7 @@ mod tests {
             max_output_tokens: max_output,
             stop: Vec::new(),
             seed: 7,
-            sampling: tuckmill_backend::SamplingPolicy::default(),
+            sampling: chine_backend::SamplingPolicy::default(),
             ignore_eos: false,
         }
     }
@@ -506,7 +507,7 @@ mod tests {
         engine.per_token_delay = Duration::ZERO;
         engine.load(&admitted_plan()).unwrap();
         let mut req = request(4);
-        req.sampling = tuckmill_backend::SamplingPolicy {
+        req.sampling = chine_backend::SamplingPolicy {
             temperature: 1.0,
             top_p: None,
         };
@@ -574,7 +575,7 @@ mod tests {
         let mut engine = ReferenceTestEngine::new();
         let mut plan = admitted_plan();
         plan.mode = ExecutionMode::Rejected;
-        plan.rejection = Some(tuckmill_manifest::plan::PlanRejection {
+        plan.rejection = Some(chine_manifest::plan::PlanRejection {
             code: "CONTEXT_EXCEEDS_BUDGET".into(),
             message: "nope".into(),
         });
@@ -593,11 +594,11 @@ mod tests {
 
     #[test]
     fn trait_impl_accepts_pipeline_plans_for_any_arch() {
-        use tuckmill_backend::InferenceBackend;
+        use chine_backend::InferenceBackend;
         let mut engine = ReferenceTestEngine::new();
         let caps = engine.capabilities();
         assert!(caps.architectures.is_empty(), "empty list = pipeline-only");
-        let artifact = tuckmill_backend::ArtifactRef {
+        let artifact = chine_backend::ArtifactRef {
             path: "/nonexistent".into(),
             file_bytes: 1,
             metadata_hash: "0".repeat(64),
@@ -606,13 +607,9 @@ mod tests {
             arch_id: None,
             content_hash: None,
         };
-        let note = tuckmill_backend::InferenceBackend::load(
-            &mut engine,
-            &admitted_plan(),
-            &artifact,
-            None,
-        )
-        .expect("synthetic load ignores the artifact");
+        let note =
+            chine_backend::InferenceBackend::load(&mut engine, &admitted_plan(), &artifact, None)
+                .expect("synthetic load ignores the artifact");
         assert!(note.contains("synthetic"));
         assert!(engine
             .score(&[1, 2], &[1], &|| false, &mut |_, _| true)

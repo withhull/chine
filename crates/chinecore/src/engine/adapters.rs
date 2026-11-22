@@ -6,8 +6,8 @@ use super::graph::{
 };
 use crate::model::{Qwen3Config, TensorNames};
 use crate::qwen35::{Qwen35AttentionTensors, Qwen35Config, Qwen35Layout};
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::GgufInspection;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::GgufInspection;
 
 fn t(r: &crate::qwen35::TensorRef) -> Tensor {
     Tensor { index: r.index }
@@ -129,7 +129,7 @@ fn qwen35_graph(
 /// `insp` (every tensor present).
 pub fn qwen3(cfg: &Qwen3Config, names: &TensorNames, insp: &GgufInspection) -> Result<ModelGraph> {
     if cfg.key_length != cfg.value_length {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "dense Qwen3 with key length {} != value length {} has no engine block; attention heads are square",
@@ -144,7 +144,7 @@ pub fn qwen3(cfg: &Qwen3Config, names: &TensorNames, insp: &GgufInspection) -> R
             .position(|t| t.name == name)
             .map(|index| Tensor { index })
             .ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!("artifact is missing required tensor {name:?} for dense Qwen3"),
                 )
@@ -213,7 +213,7 @@ const GEMMA3_SWA_ROPE_BASE: f32 = 10_000.0;
 /// (RoPE scaling, logit soft-capping, another layer pattern) are refused.
 pub fn gemma3(insp: &GgufInspection) -> Result<ModelGraph> {
     let refuse = |what: String| {
-        TuckmillError::new(ErrorCode::UnsupportedArchitecture, what)
+        ChineError::new(ErrorCode::UnsupportedArchitecture, what)
             .with_action("Use a Gemma 3 text artifact this graph expresses exactly; variants are never approximated.")
     };
     let num = |key: &str| -> Result<usize> {

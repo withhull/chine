@@ -7,7 +7,7 @@
 //! seed produce the same token. The RNG is xorshift64*: reproducible across
 //! platforms and runs.
 //!
-//! This module moved here from TuckCore when the supervisor's sampling
+//! This module moved here from ChineCore when the supervisor's sampling
 //! policy became part of the backend contract: the same transforms must
 //! apply no matter which engine executes the artifact.
 

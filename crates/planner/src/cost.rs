@@ -6,8 +6,8 @@
 //! synchronization; we do not subtract I/O time merely because two queues
 //! exist. Every output is a projection carrying the assumptions used.
 
+use chine_manifest::plan::ExecutionMode;
 use serde::{Deserialize, Serialize};
-use tuckmill_manifest::plan::ExecutionMode;
 
 use crate::budget::WeightSplit;
 use crate::PlannerPolicy;

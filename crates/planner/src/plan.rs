@@ -5,14 +5,14 @@
 //! A plan can be capacity-feasible while no certified engine exists; that is
 //! recorded honestly instead of being conflated.
 
-use tuckmill_manifest::adapter::AdapterSpec;
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::plan::{
+use chine_manifest::adapter::AdapterSpec;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::plan::{
     CachePolicy, EngineAvailability, EnginePlan, ExecutionMode, ExecutionPlan, PlanBudget,
     PlanContext, PlanRejection,
 };
-use tuckmill_manifest::records::{Confidence, DeviceProfile, LatencyClass, ModelArtifact};
-use tuckmill_manifest::units::Bytes;
+use chine_manifest::records::{Confidence, DeviceProfile, LatencyClass, ModelArtifact};
+use chine_manifest::units::Bytes;
 
 use crate::budget::{
     kv_bytes_for, make_plan_budget, reservation_total, reserve_resident, reserve_streamed_dense,
@@ -39,7 +39,7 @@ pub struct PlanRequest {
     pub requested_budget: Bytes,
     pub policy: PlannerPolicy,
     /// Bytes per KV element in the *actual* storage representation of the
-    /// backend that will execute (for example 4 for the current TuckCore
+    /// backend that will execute (for example 4 for the current ChineCore
     /// f32 KV store, 2 for an f16 llama.cpp cache). The runtime resolves
     /// this from the selected engine and its acknowledged execution
     /// options; the planner never assumes a representation on its own.
@@ -127,13 +127,13 @@ pub fn build_plan(
 
     // ---- identity and request validation ----
     let artifact_arch = artifact.arch_id.as_deref().ok_or_else(|| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             "artifact has no resolved architecture; re-inspect it with a matching adapter",
         )
     })?;
     if artifact_arch != adapter.architecture {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::UnsupportedArchitecture,
             format!(
                 "adapter {} targets architecture {:?} but the artifact is {:?}",
@@ -142,7 +142,7 @@ pub fn build_plan(
         ));
     }
     if request.requested_budget.bytes() > device.memory_bytes {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!(
                 "requested budget {} exceeds the device's physical memory {}",
@@ -152,20 +152,20 @@ pub fn build_plan(
         ));
     }
     if request.context.total_context == 0 || request.context.max_output_tokens == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             "context and max output tokens must be positive",
         ));
     }
     if request.context.max_output_tokens > request.context.total_context {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::ContextExceedsBudget,
             "max output tokens exceed the total context allowance",
         ));
     }
     if let Some(advertised) = artifact.advertised_context_length {
         if request.context.total_context > advertised {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "requested context {} exceeds the artifact's advertised context {}",
@@ -393,8 +393,8 @@ pub fn build_plan(
                 &artifact.artifact_id,
                 &adapter.id,
                 "reference",
-                tuckmill_manifest::BACKEND_ABI_VERSION,
-                tuckmill_manifest::WORKER_PROTOCOL_VERSION,
+                chine_manifest::BACKEND_ABI_VERSION,
+                chine_manifest::WORKER_PROTOCOL_VERSION,
                 PLAN_WORKLOAD_SUITE,
                 request.context.total_context,
             ) {
@@ -404,7 +404,7 @@ pub fn build_plan(
                     plan.assumptions.push(format!(
                         "latency from {}-sample local calibration recorded {} (device/artifact matched)",
                         entry.samples,
-                        tuckmill_manifest::ids::iso8601(entry.recorded_unix_ms)
+                        chine_manifest::ids::iso8601(entry.recorded_unix_ms)
                     ));
                 }
                 None => {
@@ -541,8 +541,8 @@ fn push_standard_assumptions(
 mod tests {
     use super::*;
     use crate::testing::{mock_artifact, mock_device, mock_geometry};
-    use tuckmill_manifest::adapter::AdapterRegistry;
-    use tuckmill_manifest::plan::EngineAvailability;
+    use chine_manifest::adapter::AdapterRegistry;
+    use chine_manifest::plan::EngineAvailability;
 
     fn registry() -> AdapterRegistry {
         AdapterRegistry::builtin().unwrap()
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn kv_pricing_follows_the_resolved_representation() {
         // The same request must be priced from the backend's actual KV
-        // representation: 4 bytes per element (TuckCore's f32 store) must
+        // representation: 4 bytes per element (ChineCore's f32 store) must
         // reserve twice the bytes of a 2-byte (f16) assumption and can flip
         // admission. This is the corrected Gate B memory model.
         let artifact = mock_artifact("qwen3", 400 * 1024 * 1024, 0, Some(mock_geometry(true)));

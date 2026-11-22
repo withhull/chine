@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::GgufInspection;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::GgufInspection;
 
 use crate::completion::CompletionTracker;
 use crate::kernels::ResolvedKernels;
@@ -59,7 +59,7 @@ impl ModelWeights {
     pub fn prepare(loader: &BlockLoader, cfg: Qwen3Config, names: TensorNames) -> Result<Self> {
         let need = |name: &str| -> Result<usize> {
             loader.tensor_index(name).ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::UnsupportedArchitecture,
                     format!("artifact is missing required tensor {name:?}"),
                 )
@@ -85,7 +85,7 @@ impl ModelWeights {
             (k_norm.first().unwrap_or(&vec![]), cfg.key_length),
         ] {
             if v.len() as u64 != expect {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!(
                         "norm tensor has {} elements but geometry declares {expect}",
@@ -216,7 +216,7 @@ impl KvState {
     pub fn new(cfg: &Qwen3Config, cap: u64, precision: KvPrecision) -> Result<Self> {
         let total = Self::bytes_for(cfg, cap);
         if total > Self::MAX_KV_BYTES {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!(
                     "stage-0 KV state for {cap} tokens across {} layers needs {} bytes, beyond the executor's {} bound",
@@ -288,7 +288,7 @@ pub enum NumericalProfile {
     /// Mirrors llama.cpp CPU kernels (pinned b11695): activations are
     /// quantized per weight dtype — q8_0 (amax/127, f16 scale, nearest-even)
     /// for Q8_0 weights, f16 rounding for F16 weights — and dots accumulate
-    /// per block. This is the profile under which TuckCore and llama.cpp can
+    /// per block. This is the profile under which ChineCore and llama.cpp can
     /// be compared as the same declared numerical contract.
     LlamaCpu,
     /// The declared `metal-f16-act` profile (ADR-010): on the unified
@@ -407,7 +407,7 @@ impl<'a> Forward<'a> {
     ) -> Result<Vec<f32>> {
         let cfg = &self.weights.cfg;
         if (token as u64) >= cfg.vocab {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "token id {token} is outside the vocabulary (0..{})",
@@ -416,7 +416,7 @@ impl<'a> Forward<'a> {
             ));
         }
         if pos >= kv.cap {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::ContextExceedsBudget,
                 format!("position {pos} exceeds KV capacity {}", kv.cap),
             ));
@@ -593,7 +593,7 @@ impl<'a> Forward<'a> {
     ) -> Result<()> {
         let entry: &TensorEntry = self.loader.entry(tensor);
         let row = entry.row.as_ref().ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::UnsupportedQuantization,
                 format!(
                     "tensor {:?} cannot be streamed row-wise in this build (rows are not block aligned)",
@@ -602,7 +602,7 @@ impl<'a> Forward<'a> {
             )
         })?;
         if row.elems_per_row as usize != x.len() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!(
                     "tensor {:?} expects input width {} but the forward pass produced {}",
@@ -888,7 +888,7 @@ impl<'a> Forward<'a> {
         cancelled: CancelledFn<'_>,
     ) -> Result<Vec<f32>> {
         if tokens.is_empty() || position >= tokens.len() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "scoring position is outside the token sequence",
             ));
@@ -906,8 +906,8 @@ fn seq_len(old_len: usize, pos: usize) -> usize {
     old_len.max(pos + 1)
 }
 
-fn cancelled_error() -> TuckmillError {
-    TuckmillError::new(
+fn cancelled_error() -> ChineError {
+    ChineError::new(
         ErrorCode::Cancelled,
         "generation cancelled at a safe boundary",
     )
@@ -989,8 +989,8 @@ mod tests {
     use super::*;
     use crate::loader::BlockPolicy;
     use crate::model;
-    use tuckmill_manifest::adapter::AdapterRegistry;
-    use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+    use chine_manifest::adapter::AdapterRegistry;
+    use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -1004,8 +1004,7 @@ mod tests {
         let path = dir.path().join("f.gguf");
         write_synthetic(&path, &SyntheticConfig::tiny_qwen3()).unwrap();
         let insp =
-            tuckmill_manifest::gguf::inspect(&path, &tuckmill_manifest::gguf::Limits::default())
-                .unwrap();
+            chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let registry = AdapterRegistry::builtin().unwrap();
         let (cfg, _adapter) = model::resolve(&insp, &registry).unwrap();
         let entries = tensor_entries(&insp, policy.block_bytes);

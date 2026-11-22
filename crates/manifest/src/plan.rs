@@ -294,8 +294,8 @@ impl ExecutionPlan {
 
     /// Validate internal consistency; used when loading plan documents.
     pub fn validate(&self) -> crate::Result<()> {
-        use crate::error::{ErrorCode, TuckmillError};
-        let err = |msg: String| TuckmillError::new(ErrorCode::InvalidPlan, msg);
+        use crate::error::{ChineError, ErrorCode};
+        let err = |msg: String| ChineError::new(ErrorCode::InvalidPlan, msg);
         if self.schema_version != SCHEMA_VERSION {
             return Err(err(format!(
                 "plan schema version {} is not supported (want {})",
@@ -303,7 +303,7 @@ impl ExecutionPlan {
             )));
         }
         if self.backend_abi_version != BACKEND_ABI_VERSION {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::PlanStale,
                 format!(
                     "plan was built for backend ABI {} but this build is {}",
@@ -312,7 +312,7 @@ impl ExecutionPlan {
             ));
         }
         if self.worker_protocol_version != WORKER_PROTOCOL_VERSION {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::PlanStale,
                 format!(
                     "plan was built for worker protocol {} but this build is {}",

@@ -2,7 +2,7 @@
 
 Status: **committed** (2026-10-16). Runtime.
 **Amended by ADR-005**: more than one backend now exists behind a versioned
-`InferenceBackend` interface (reference-test, TuckCore, later llama.cpp); the
+`InferenceBackend` interface (reference-test, ChineCore, later llama.cpp); the
 disclosure rules below apply to every backend.
 
 ## Context
@@ -15,8 +15,8 @@ model output.
 
 ## Decision
 
-1. **Worker isolation is the default.** `tuckmill run`, `tuckmill bench`, and
-   `tuckmill serve` spawn a dedicated worker process (`tuckmill
+1. **Worker isolation is the default.** `chine run`, `chine bench`, and
+   `chine serve` spawn a dedicated worker process (`chine
    __worker-reference`) that owns the engine. The supervisor communicates
    over a versioned, length-framed JSON protocol on a private Unix socket
    (`native/executor/PROTOCOL.md`, 1 MiB frame cap, NUL-free message schema).
@@ -29,7 +29,7 @@ model output.
 3. **Explicit acceptance gate.** Any profile without a certified executor is
    refused (`UNAVAILABLE`) unless the caller passes `--allow-test-engine` /
    starts `serve` with it. SSE/JSON responses carry
-   `"synthetic_output": true` in the `tuckmill` extension object.
+   `"synthetic_output": true` in the `chine` extension object.
 4. **Failure semantics.** Worker crash ⇒ `WORKER_FAILED` with the last
    acknowledged committed position retained; the supervisor never fabricates
    continuation state. Cancellation is cooperative at committed-token
@@ -42,7 +42,7 @@ model output.
 
 ## Consequences
 
-- The C ABI header (`native/executor/tuckmill_worker_abi.h`) defines the
+- The C ABI header (`native/executor/chine_worker_abi.h`) defines the
   surface a real executor must implement; the protocol document is the wire
   contract. Replacing the reference engine means implementing that ABI, not
   changing the supervisor.

@@ -16,9 +16,9 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use tuckmill_manifest::adapter::AdapterRegistry;
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::gguf::{self, GgufTensor, Limits};
+use chine_manifest::adapter::AdapterRegistry;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::gguf::{self, GgufTensor, Limits};
 
 use crate::qwen35::{resolve, Qwen35AttentionTensors, Qwen35Config, Qwen35Layout};
 use crate::qwen35_kv::{KvPrecision, Qwen35KvCache};
@@ -41,7 +41,7 @@ pub(crate) struct TensorMeta {
 }
 
 pub(crate) fn build_tensor_meta(
-    insp: &tuckmill_manifest::gguf::GgufInspection,
+    insp: &chine_manifest::gguf::GgufInspection,
 ) -> Result<Vec<TensorMeta>> {
     let mut meta = Vec::with_capacity(insp.tensors.len());
     for t in &insp.tensors {
@@ -56,23 +56,23 @@ impl TensorMeta {
             1 => (t.dims[0], 1),
             2 => (t.dims[0], t.dims[1]),
             n => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!(
-                        "tensor {:?} has {n} dims; TuckCore reads 1-D and 2-D tensors only",
+                        "tensor {:?} has {n} dims; ChineCore reads 1-D and 2-D tensors only",
                         t.name
                     ),
                 ));
             }
         };
         if in_dim == 0 || out_dim == 0 || t.byte_size == 0 {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!("tensor {:?} is empty", t.name),
             ));
         }
         if !t.byte_size.is_multiple_of(out_dim) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!(
                     "tensor {:?} bytes {} are not a whole number of rows of {out_dim}",
@@ -88,7 +88,7 @@ impl TensorMeta {
                     .is_some_and(|e| e <= file_len)
             })
             .ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {:?} lies outside the artifact", t.name),
                 )
@@ -155,7 +155,7 @@ pub struct ArtifactTensorSource {
 impl ArtifactTensorSource {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::StorageLost,
                 format!("cannot open artifact {}: {e}", path.display()),
             )
@@ -169,7 +169,7 @@ impl ArtifactTensorSource {
         let len = file
             .metadata()
             .map_err(|e| {
-                TuckmillError::new(ErrorCode::StorageLost, format!("cannot stat artifact: {e}"))
+                ChineError::new(ErrorCode::StorageLost, format!("cannot stat artifact: {e}"))
             })?
             .len();
         // The handle's cursor is shared with every clone (a content-digest
@@ -177,7 +177,7 @@ impl ArtifactTensorSource {
         // explicitly rather than wherever the last reader stopped.
         let mut reader = file;
         std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0)).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::StorageLost,
                 format!("cannot rewind the verified artifact handle: {e}"),
             )
@@ -302,12 +302,12 @@ fn scratch_bound(cfg: &Qwen35Config, capacity: u64) -> Result<u64> {
         .saturating_add(hidden * 2); // dequant row buffers (generous)
     elems
         .checked_mul(4)
-        .ok_or_else(|| TuckmillError::new(ErrorCode::InvalidPlan, "qwen35 scratch bound overflows"))
+        .ok_or_else(|| ChineError::new(ErrorCode::InvalidPlan, "qwen35 scratch bound overflows"))
 }
 
 /// Preflight the byte budget for a context before anything allocates.
 pub fn required_bytes(
-    insp: &tuckmill_manifest::gguf::GgufInspection,
+    insp: &chine_manifest::gguf::GgufInspection,
     capacity: u64,
     precision: KvPrecision,
 ) -> Result<Qwen35Budget> {
@@ -320,10 +320,10 @@ pub fn required_bytes(
         .and_then(|v| v.checked_mul(cfg.head_dim))
         .and_then(|v| v.checked_mul(2)) // key + value
         .and_then(|v| v.checked_mul(precision.element_bytes() as u64))
-        .ok_or_else(|| TuckmillError::new(ErrorCode::InvalidPlan, "qwen35 KV budget overflows"))?;
+        .ok_or_else(|| ChineError::new(ErrorCode::InvalidPlan, "qwen35 KV budget overflows"))?;
     let kv_state = per_token
         .checked_mul(capacity)
-        .ok_or_else(|| TuckmillError::new(ErrorCode::InvalidPlan, "qwen35 KV budget overflows"))?;
+        .ok_or_else(|| ChineError::new(ErrorCode::InvalidPlan, "qwen35 KV budget overflows"))?;
     let recurrent_state = layout.state.bytes_for(&cfg, 0, 0)?;
     let weights_payload = insp.tensors.iter().map(|t| t.byte_size).sum();
     Ok(Qwen35Budget {
@@ -340,7 +340,7 @@ impl Qwen35Model {
     /// precision, plus the recurrent/convolution state of every GDN layer.
     pub fn open(path: &Path, capacity: usize, precision: KvPrecision) -> Result<Self> {
         let file = File::open(path).map_err(|e| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::StorageLost,
                 format!("cannot open artifact {}: {e}", path.display()),
             )
@@ -348,7 +348,7 @@ impl Qwen35Model {
         let len = file
             .metadata()
             .map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::StorageLost,
                     format!("cannot stat artifact {}: {e}", path.display()),
                 )
@@ -365,7 +365,7 @@ impl Qwen35Model {
     /// pathname reopen).
     pub fn open_with_handle(
         file: &File,
-        insp: &tuckmill_manifest::gguf::GgufInspection,
+        insp: &chine_manifest::gguf::GgufInspection,
         capacity: usize,
         precision: KvPrecision,
     ) -> Result<Self> {
@@ -381,7 +381,7 @@ impl Qwen35Model {
         // pinned model and the fixture satisfy this; a variant that does
         // not needs an explicit split rule before it can execute).
         if cfg.gdn.groups * cfg.gdn.state_size != cfg.gdn.inner {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::UnsupportedArchitecture,
                 format!(
                     "qwen35: QKV split geometry (groups {} x state_size {}) does not equal inner_size {}",
@@ -403,7 +403,7 @@ impl Qwen35Model {
             cfg,
             layout,
             file: file.try_clone().map_err(|e| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::StorageLost,
                     format!("cannot clone the verified artifact handle: {e}"),
                 )
@@ -448,7 +448,7 @@ impl Qwen35Model {
 
     fn ensure_valid(&self) -> Result<()> {
         if !self.session_valid {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "qwen35 session was interrupted and its partial state was discarded",
             )
@@ -562,7 +562,7 @@ impl Qwen35Model {
     ) -> Result<()> {
         self.ensure_valid()?;
         if tokens.is_empty() {
-            return self.finish(Err(TuckmillError::new(
+            return self.finish(Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "forward needs at least one token id",
             )));
@@ -617,7 +617,7 @@ impl Qwen35Model {
         let hidden = self.cfg.hidden as usize;
         let vocab = self.cfg.vocab as usize;
         if token as u64 >= self.cfg.vocab {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "token id {token} is outside the {}-entry vocabulary",
@@ -668,13 +668,13 @@ impl Qwen35Model {
                 .file
                 .read_at(&mut out[done..], offset + done as u64)
                 .map_err(|e| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::StorageLost,
                         format!("artifact read failed at offset {offset}: {e}"),
                     )
                 })?;
             if n == 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::StorageLost,
                     format!("artifact ended early at offset {}", offset + done as u64),
                 ));
@@ -686,7 +686,7 @@ impl Qwen35Model {
 
     fn meta_of(&self, tensor_index: usize) -> Result<&TensorMeta> {
         self.meta.get(tensor_index).ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::Internal,
                 format!("tensor index {tensor_index} is outside the inspected range"),
             )
@@ -697,7 +697,7 @@ impl Qwen35Model {
     fn read_row(&self, tensor_index: usize, row: usize, out: &mut Vec<f32>) -> Result<()> {
         let m = *self.meta_of(tensor_index)?;
         if row as u64 >= m.out_dim {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("row {row} is outside the {}-row tensor", m.out_dim),
             ));
@@ -711,7 +711,7 @@ impl Qwen35Model {
         out.clear();
         tensor::dequant_into(m.type_id, &bytes, out)?;
         if out.len() as u64 != m.in_dim {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!(
                     "row {row} dequantized to {} values, expected {}",
@@ -727,7 +727,7 @@ impl Qwen35Model {
     fn matvec(&self, tensor_index: usize, x: &[f32], out: &mut [f32]) -> Result<()> {
         let m = *self.meta_of(tensor_index)?;
         if x.len() as u64 != m.in_dim || out.len() as u64 != m.out_dim {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "matvec shape mismatch: x {} (want {}), out {} (want {})",
@@ -773,7 +773,7 @@ impl Qwen35Model {
         let mut row = Vec::new();
         self.read_row(self.layout.token_embd.index, token as usize, &mut row)?;
         if row.len() != out.len() {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 format!(
                     "embedding row has {} values, hidden is {}",
@@ -924,7 +924,7 @@ impl Qwen35Model {
         let mut conv_out = vec![0.0f32; qkv_mixed.len()];
         {
             let LayerState::Linear { conv, .. } = &mut self.state[l] else {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Internal,
                     "layer state kind disagrees with the resolved layer kind",
                 ));
@@ -960,7 +960,7 @@ impl Qwen35Model {
         let mut o = vec![0.0f32; inner];
         {
             let LayerState::Linear { gdn, .. } = &mut self.state[l] else {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Internal,
                     "layer state kind disagrees with the resolved layer kind",
                 ));
@@ -1031,7 +1031,7 @@ impl Qwen35Model {
         let kv_slot = match &self.state[l] {
             LayerState::Full { kv_slot } => *kv_slot,
             LayerState::Linear { .. } => {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::Internal,
                     "layer state kind disagrees with the resolved layer kind",
                 ));
@@ -1070,8 +1070,8 @@ impl Qwen35Model {
     }
 }
 
-fn cancelled_error() -> TuckmillError {
-    TuckmillError::new(
+fn cancelled_error() -> ChineError {
+    ChineError::new(
         ErrorCode::Cancelled,
         "qwen35 forward cancelled; the session was discarded",
     )
@@ -1121,7 +1121,7 @@ impl TensorSource for Qwen35Model {
     fn read_tensor_into(&self, tensor_index: usize, offset: u64, dst: &mut [u8]) -> Result<()> {
         let m = *self.meta_of(tensor_index)?;
         if offset + dst.len() as u64 > m.byte_size {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Internal,
                 format!("tensor {tensor_index} read past its {} bytes", m.byte_size),
             ));
@@ -1132,13 +1132,13 @@ impl TensorSource for Qwen35Model {
                 .file
                 .read_at(&mut dst[done..], m.offset + offset + done as u64)
                 .map_err(|e| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::StorageLost,
                         format!("artifact read failed at offset {}: {e}", m.offset + offset),
                     )
                 })?;
             if n == 0 {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::StorageLost,
                     "artifact ended early while reading a tensor",
                 ));
@@ -1156,7 +1156,7 @@ impl TensorSource for Qwen35Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn fixture_model(tokens_hint: usize) -> (tempfile::TempDir, Qwen35Model) {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen35());
@@ -1251,7 +1251,7 @@ mod tests {
         let bytes = synthetic_qwen3_bytes(&SyntheticConfig::tiny_qwen35());
         let (_dir, model) = fixture_model(12);
         let mut cursor = std::io::Cursor::new(bytes.clone());
-        let insp = tuckmill_manifest::gguf::inspect_reader(
+        let insp = chine_manifest::gguf::inspect_reader(
             &mut cursor,
             bytes.len() as u64,
             &Limits::default(),
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     fn real_artifact_path() -> Option<std::path::PathBuf> {
-        let p = std::env::var("TUCKMILL_QWEN35_GGUF").ok()?;
+        let p = std::env::var("CHINE_QWEN35_GGUF").ok()?;
         let p = std::path::PathBuf::from(p);
         p.exists().then_some(p)
     }
@@ -1334,16 +1334,15 @@ mod tests {
     #[test]
     fn real_artifact_forward_when_available() {
         let Some(path) = real_artifact_path() else {
-            eprintln!("skipping: TUCKMILL_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
             return;
         };
         // Static budget on the pinned geometry, before any allocation.
         let file = std::fs::File::open(&path).unwrap();
         let len = file.metadata().unwrap().len();
         let mut reader = &file;
-        let insp =
-            tuckmill_manifest::gguf::inspect_reader(&mut reader, len, &Limits::default(), None)
-                .unwrap();
+        let insp = chine_manifest::gguf::inspect_reader(&mut reader, len, &Limits::default(), None)
+            .unwrap();
         let budget = required_bytes(&insp, 2048, KvPrecision::F16).unwrap();
         assert_eq!(budget.kv_state, 25_165_824);
         assert_eq!(budget.recurrent_state, 20_201_472);

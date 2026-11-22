@@ -1,6 +1,6 @@
-//! Tuckmill manifest: validated model and plan schemas.
+//! Chine manifest: validated model and plan schemas.
 //!
-//! This crate owns the immutable records described in the Tuckmill PRD
+//! This crate owns the immutable records described in the Chine PRD
 //! (ModelArtifact, DeviceProfile, ExecutionPlan, Session, BenchmarkRun), the
 //! typed error vocabulary, exact byte units, content identities, model format
 //! inspection (GGUF, Safetensors), architecture adapter specifications, and
@@ -26,7 +26,7 @@ pub mod testing;
 pub mod units;
 pub mod utf8;
 
-pub use error::{ErrorCode, Result, TuckmillError};
+pub use error::{ChineError, ErrorCode, Result};
 pub use ids::Id;
 pub use units::Bytes;
 
@@ -34,7 +34,7 @@ pub use units::Bytes;
 /// docs/adr and a compatibility decision.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Version of the native worker ABI (native/executor/tuckmill_worker_abi.h).
+/// Version of the native worker ABI (native/executor/chine_worker_abi.h).
 /// Plans record this so cached plans cannot be reused across ABI changes.
 pub const BACKEND_ABI_VERSION: u32 = 1;
 

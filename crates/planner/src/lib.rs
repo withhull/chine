@@ -1,4 +1,4 @@
-//! Tuckmill planner: feasibility, memory admission, and the deterministic
+//! Chine planner: feasibility, memory admission, and the deterministic
 //! cost model.
 //!
 //! The planner combines artifact metadata, adapter capabilities, device
@@ -111,8 +111,8 @@ impl PlannerPolicy {
 
 /// Test-only construction helpers shared by other crates' test suites.
 pub mod testing {
-    use tuckmill_manifest::records::*;
-    use tuckmill_manifest::Id;
+    use chine_manifest::records::*;
+    use chine_manifest::Id;
 
     /// Deterministic mock device for unit tests.
     pub fn mock_device(memory_bytes: u64) -> DeviceProfile {
@@ -178,7 +178,7 @@ pub mod testing {
         if expert_bytes > 0 {
             by_class.insert("moe_expert".to_string(), expert_bytes);
         }
-        let artifact_id = Id::new(tuckmill_manifest::ids::sha256_hex(
+        let artifact_id = Id::new(chine_manifest::ids::sha256_hex(
             format!("{arch}:{total_bytes}:{expert_bytes}").as_bytes(),
         ))
         .unwrap();

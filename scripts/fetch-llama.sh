@@ -1,13 +1,13 @@
 #!/bin/sh
 # Fetch the pinned llama.cpp reference build (ADR-005/ADR-006), verify its
-# checksum, compile the Tuckmill shim against the pinned headers, and print
+# checksum, compile the Chine shim against the pinned headers, and print
 # the environment needed to use the resulting library.
 #
 # The llama.cpp build is a *build dependency*: it is downloaded into .deps/
 # (gitignored), never vendored into the repository.
 #
 # Usage: scripts/fetch-llama.sh
-# Then:  export TUCKMILL_LLAMA_LIB="$PWD/.deps/llama/libtm_llama.dylib"
+# Then:  export CHINE_LLAMA_LIB="$PWD/.deps/llama/libchine_llama.dylib"
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -47,10 +47,10 @@ curl -fsSL -o "${LLAMA_DIR}/include/gguf.h"           "${RAW_BASE}/ggml/include/
 curl -fsSL -o "${LLAMA_DIR}/include/ggml-alloc.h"     "${RAW_BASE}/ggml/include/ggml-alloc.h"
 curl -fsSL -o "${LLAMA_DIR}/include/ggml-cpp.h"       "${RAW_BASE}/ggml/include/ggml-cpp.h"
 
-echo "compiling the Tuckmill shim against the pinned headers..."
+echo "compiling the Chine shim against the pinned headers..."
 clang -O2 -fPIC -shared \
-    -o "${LLAMA_DIR}/libtm_llama.dylib" \
-    native/llamaref/tm_llama_shim.c \
+    -o "${LLAMA_DIR}/libchine_llama.dylib" \
+    native/llamaref/ch_llama_shim.c \
     -I "${LLAMA_DIR}/include" \
     -L "${LLAMA_DIR}" \
     -lllama -lggml -lggml-base \
@@ -58,4 +58,4 @@ clang -O2 -fPIC -shared \
 
 echo
 echo "llama.cpp reference build ready (revision ${TAG})."
-echo "  export TUCKMILL_LLAMA_LIB=\"$(pwd)/${LLAMA_DIR}/libtm_llama.dylib\""
+echo "  export CHINE_LLAMA_LIB=\"$(pwd)/${LLAMA_DIR}/libchine_llama.dylib\""

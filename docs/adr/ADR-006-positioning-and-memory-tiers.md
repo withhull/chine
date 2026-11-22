@@ -7,14 +7,14 @@ ADR-001/ADR-004 (8 GB was treated as *the* target; it is the *floor*).
 
 The v0.2 engineering context revolved around an 8 GB machine (the PRD's
 development cohort, and this repository's first physical test device). That
-context leaked into framing: several documents read as if Tuckmill were an
+context leaked into framing: several documents read as if Chine were an
 inference engine specifically for 8 GB Macs. It is not — 8 GB is the minimum
 supported target.
 
 ## Decision
 
 1. **Positioning (canonical).**
-   > llama.cpp is a general-purpose inference engine. Tuckmill is a Mac-native,
+   > llama.cpp is a general-purpose inference engine. Chine is a Mac-native,
    > high-performance inference framework engineered to run large models as
    > efficiently as possible across Apple Silicon hardware, from 8 GB MacBook
    > Airs to high-memory MacBook Pros and Mac Studios.
@@ -55,7 +55,7 @@ supported target.
       profile; compressed models are evaluated separately from runtime
       changes.
 
-5. **Benchmark mandate.** Tuckmill is measured against llama.cpp, MLX, and
+5. **Benchmark mandate.** Chine is measured against llama.cpp, MLX, and
    Splash across all memory tiers — not only "it works on 8 GB". Comparisons
    are valid only under the four-way identity rules (identical artifacts,
    token IDs, numerical profiles, declared cache state) with registered

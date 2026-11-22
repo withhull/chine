@@ -1,5 +1,5 @@
 #!/bin/sh
-# Phase 0 baseline: the same artifact through TuckCore and the pinned
+# Phase 0 baseline: the same artifact through ChineCore and the pinned
 # llama.cpp reference under one harness, plus the pinned llama-bench tool
 # and an MLX availability probe. Writes one result directory per run under
 # benchmarks/results/<tier>/ (records, environment, summary.md).
@@ -15,14 +15,14 @@
 #   KV_PRECISION=       KV cache precision passed to BOTH engines (f32 or
 #                       f16; default: each engine's own default). Set it
 #                       whenever the engines' defaults differ (dense Qwen3:
-#                       TuckCore f32, llama.cpp f16) — identity rules.
+#                       ChineCore f32, llama.cpp f16) — identity rules.
 #   IGNORE_EOS=1        decode-throughput workload: EOS does not end
 #                       generation on either engine (instruct models that
 #                       end early on the frozen prompts); recorded.
 #   MIN_RECLAIMABLE_MIB=1536      refuse to start a model process below this
 #   SWAP_DISCARD_MIB=64 a run that grows swap by more than this is discarded
 #                       (and retried once after a pause; both attempts are listed)
-#   TUCKMILL_LLAMA_LIB  pinned shim (default .deps/llama/libtm_llama.dylib)
+#   CHINE_LLAMA_LIB  pinned shim (default .deps/llama/libchine_llama.dylib)
 #   SKIP_LLAMA_BENCH=1  skip the llama-bench vendor-tool row
 #
 # Rules (benchmarks/README.md): one model process at a time; ABBA ordering;
@@ -45,15 +45,15 @@ KV_PRECISION="${KV_PRECISION:-}"
 IGNORE_EOS="${IGNORE_EOS:-0}"
 MIN_RECLAIMABLE_MIB="${MIN_RECLAIMABLE_MIB:-1536}"
 SWAP_DISCARD_MIB="${SWAP_DISCARD_MIB:-64}"
-export TUCKMILL_LLAMA_LIB="${TUCKMILL_LLAMA_LIB:-$ROOT/.deps/llama/libtm_llama.dylib}"
+export CHINE_LLAMA_LIB="${CHINE_LLAMA_LIB:-$ROOT/.deps/llama/libchine_llama.dylib}"
 LLAMA_BENCH="$ROOT/.deps/llama/llama-bench"
 MLX_PY="$ROOT/.deps/mlx-venv/bin/python"
 
 [ -f "$GGUF" ] || { echo "no such artifact: $GGUF" >&2; exit 2; }
-[ -f "$TUCKMILL_LLAMA_LIB" ] || { echo "missing $TUCKMILL_LLAMA_LIB; run scripts/fetch-llama.sh" >&2; exit 2; }
+[ -f "$CHINE_LLAMA_LIB" ] || { echo "missing $CHINE_LLAMA_LIB; run scripts/fetch-llama.sh" >&2; exit 2; }
 
-cargo build -q --release -p tuckmill-cli
-BIN="$ROOT/target/release/tuckmill"
+cargo build -q --release -p chine-cli
+BIN="$ROOT/target/release/chine"
 
 # ---- tier and identity ----
 mem_bytes=$(sysctl -n hw.memsize)
@@ -72,15 +72,15 @@ commit=$(git rev-parse HEAD)
 dirty=$(git status --porcelain | grep -qv '^??' && echo true || echo false)
 cat > "$OUT/environment.json" <<EOF
 {
-  "schema": "tuckmill-baseline-env-v1",
+  "schema": "chine-baseline-env-v1",
   "started_utc": "$stamp",
   "tier": "$tier",
   "chip": "$(sysctl -n machdep.cpu.brand_string)",
   "memory_bytes": $mem_bytes,
   "macos": "$(sw_vers -productVersion) ($(sw_vers -buildVersion))",
   "power_source": "$(pmset -g batt | head -1 | sed 's/.*from //; s/'"'"'//g')",
-  "tuckmill_commit": "$commit",
-  "tuckmill_tree_dirty": $dirty,
+  "chine_commit": "$commit",
+  "chine_tree_dirty": $dirty,
   "llama_cpp": "b11695 (pinned, scripts/fetch-llama.sh)",
   "artifact": "$(basename "$GGUF")",
   "artifact_bytes": $(stat -f %z "$GGUF"),
@@ -111,15 +111,15 @@ wait_for_memory() {
     done
 }
 no_model_processes() {
-    if pgrep -f "tuckmill __worker|llama-bench|llama-server|mlx_lm" >/dev/null 2>&1; then
+    if pgrep -f "chine __worker|llama-bench|llama-server|mlx_lm" >/dev/null 2>&1; then
         echo "another model process is running; one model process at a time" >&2
         exit 3
     fi
 }
 
 DATA="$(mktemp -d)"
-trap 'rm -rf "$DATA"; pkill -f "tuckmill __worker" 2>/dev/null || true' EXIT
-export TUCKMILL_DATA_DIR="$DATA"
+trap 'rm -rf "$DATA"; pkill -f "chine __worker" 2>/dev/null || true' EXIT
+export CHINE_DATA_DIR="$DATA"
 "$BIN" import "$GGUF" --alias bench-model >/dev/null
 
 RUNS="$OUT/runs.tsv"
@@ -148,7 +148,7 @@ run_engine_once() { # round slot engine attempt
         rec="$OUT/records/r${round}-${slot}-${engine}-attempt${attempt}.json"
     fi
     case "$engine" in
-        tuckcore-metal) set -- --engine tuckcore --kernels metal ;;
+        chinecore-metal) set -- --engine chinecore --kernels metal ;;
         llama-metal) set -- --engine llama --gpu-layers 99 ;;
     esac
     if [ -n "$MEMORY_BUDGET" ]; then
@@ -178,11 +178,11 @@ run_engine_once() { # round slot engine attempt
 r=1
 while [ "$r" -le "$ROUNDS" ]; do
     if [ $((r % 2)) -eq 1 ]; then
-        run_engine "$r" A tuckcore-metal
+        run_engine "$r" A chinecore-metal
         run_engine "$r" B llama-metal
     else
         run_engine "$r" A llama-metal
-        run_engine "$r" B tuckcore-metal
+        run_engine "$r" B chinecore-metal
     fi
     r=$((r + 1))
 done

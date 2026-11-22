@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +41,7 @@ impl KernelRegistry {
     pub fn builtin() -> Result<Self> {
         let src = include_str!("../../../kernels/registry.json");
         let registry: KernelRegistry = serde_json::from_str(src).map_err(|e| {
-            tuckmill_manifest::error::json_error(
+            chine_manifest::error::json_error(
                 e,
                 ErrorCode::InvalidConfiguration,
                 "builtin kernel registry",
@@ -52,7 +52,7 @@ impl KernelRegistry {
                 && k.id.starts_with('K')
                 && k.id[1..].chars().all(|c| c.is_ascii_digit()))
             {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidConfiguration,
                     format!("kernel registry contains invalid id {:?}", k.id),
                 ));

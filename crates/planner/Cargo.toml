@@ -1,13 +1,13 @@
 [package]
-name = "tuckmill-planner"
+name = "chine-planner"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Tuckmill feasibility, memory admission, and cost planning"
+description = "Chine feasibility, memory admission, and cost planning"
 
 [dependencies]
-tuckmill-manifest.workspace = true
+chine-manifest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true

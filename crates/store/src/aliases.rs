@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::Id;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::Id;
 
 use crate::layout::StoreLayout;
 
@@ -41,13 +41,9 @@ impl AliasRegistry {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let bytes = std::fs::read(&path).map_err(TuckmillError::from)?;
+        let bytes = std::fs::read(&path).map_err(ChineError::from)?;
         let registry: AliasRegistry = serde_json::from_slice(&bytes).map_err(|e| {
-            tuckmill_manifest::error::json_error(
-                e,
-                ErrorCode::InvalidConfiguration,
-                "alias registry",
-            )
+            chine_manifest::error::json_error(e, ErrorCode::InvalidConfiguration, "alias registry")
         })?;
         if registry.schema_version != ALIASES_SCHEMA_VERSION {
             return Ok(Self::default());
@@ -59,17 +55,17 @@ impl AliasRegistry {
         let path = layout.aliases_path();
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| {
-            tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "alias serialization")
+            chine_manifest::error::json_error(e, ErrorCode::Internal, "alias serialization")
         })?;
-        std::fs::write(&tmp, bytes).map_err(TuckmillError::from)?;
-        std::fs::rename(&tmp, &path).map_err(TuckmillError::from)?;
+        std::fs::write(&tmp, bytes).map_err(ChineError::from)?;
+        std::fs::rename(&tmp, &path).map_err(ChineError::from)?;
         crate::layout::fsync_dir(layout.root());
         Ok(())
     }
 
     pub fn set(&mut self, alias: &str, id: Id) -> Result<()> {
         if !valid_alias(alias) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "alias {alias:?} is invalid: use 1-64 characters of ASCII letters, digits, '-', '_' or '.'"
@@ -103,38 +99,34 @@ pub fn resolve_reference(layout: &StoreLayout, reference: &str) -> Result<Id> {
         if layout.artifact_manifest_path(id).exists() {
             return Ok(id.clone());
         }
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::StorageLost,
             format!("alias {reference:?} points to artifact {id} which is not installed"),
         ));
     }
-    Err(TuckmillError::new(
+    Err(ChineError::new(
         ErrorCode::InvalidRequest,
         format!("no installed artifact or alias matches {reference:?}"),
     )
-    .with_action("Run 'tuckmill cache list' to see installed models; import one first."))
+    .with_action("Run 'chine cache list' to see installed models; import one first."))
 }
 
 /// Read a model artifact manifest from the store.
 pub fn load_manifest(
     layout: &StoreLayout,
     id: &Id,
-) -> Result<tuckmill_manifest::records::ModelArtifact> {
+) -> Result<chine_manifest::records::ModelArtifact> {
     let path = layout.artifact_manifest_path(id);
     let bytes = std::fs::read(&path).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::StorageLost,
             format!("cannot read manifest for artifact {id}: {e}"),
         )
         .with_source(e)
     })?;
-    let artifact: tuckmill_manifest::records::ModelArtifact = serde_json::from_slice(&bytes)
-        .map_err(|e| {
-            tuckmill_manifest::error::json_error(
-                e,
-                ErrorCode::IntegrityFailure,
-                "artifact manifest",
-            )
+    let artifact: chine_manifest::records::ModelArtifact =
+        serde_json::from_slice(&bytes).map_err(|e| {
+            chine_manifest::error::json_error(e, ErrorCode::IntegrityFailure, "artifact manifest")
         })?;
     Ok(artifact)
 }
@@ -142,25 +134,23 @@ pub fn load_manifest(
 /// Atomically write a model artifact manifest.
 pub fn save_manifest(
     layout: &StoreLayout,
-    artifact: &tuckmill_manifest::records::ModelArtifact,
+    artifact: &chine_manifest::records::ModelArtifact,
 ) -> Result<()> {
     let path = layout.artifact_manifest_path(&artifact.artifact_id);
     let dir = layout.artifact_dir(&artifact.artifact_id);
-    std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+    std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(artifact).map_err(|e| {
-        tuckmill_manifest::error::json_error(e, ErrorCode::Internal, "artifact serialization")
+        chine_manifest::error::json_error(e, ErrorCode::Internal, "artifact serialization")
     })?;
-    std::fs::write(&tmp, bytes).map_err(TuckmillError::from)?;
-    std::fs::rename(&tmp, &path).map_err(TuckmillError::from)?;
+    std::fs::write(&tmp, bytes).map_err(ChineError::from)?;
+    std::fs::rename(&tmp, &path).map_err(ChineError::from)?;
     crate::layout::fsync_dir(&dir);
     Ok(())
 }
 
 /// List every installed artifact manifest.
-pub fn list_manifests(
-    layout: &StoreLayout,
-) -> Result<Vec<tuckmill_manifest::records::ModelArtifact>> {
+pub fn list_manifests(layout: &StoreLayout) -> Result<Vec<chine_manifest::records::ModelArtifact>> {
     let dir = layout.artifacts_dir();
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(&dir) {
@@ -172,7 +162,7 @@ pub fn list_manifests(
         if manifest.exists() {
             if let Ok(bytes) = std::fs::read(&manifest) {
                 if let Ok(artifact) =
-                    serde_json::from_slice::<tuckmill_manifest::records::ModelArtifact>(&bytes)
+                    serde_json::from_slice::<chine_manifest::records::ModelArtifact>(&bytes)
                 {
                     out.push(artifact);
                 }
@@ -190,7 +180,7 @@ pub fn manifest_path_exists(layout: &StoreLayout, id: &Id) -> bool {
 pub fn ensure_alias_free(aliases: &AliasRegistry, alias: &str, id: &Id) -> Result<()> {
     if let Some(existing) = aliases.resolve(alias) {
         if existing != id {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!("alias {alias:?} already refers to artifact {existing}"),
             )

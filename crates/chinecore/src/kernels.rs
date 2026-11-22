@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
 
 use crate::tensor::{f16_to_f32, f32_to_f16_bits, quantize_row_q8_0};
 
@@ -37,7 +37,7 @@ pub enum KernelSelection {
     Auto,
     Scalar,
     Neon,
-    /// TuckCore's Metal resident path (ADR-007): the whole dense-Qwen3 step
+    /// ChineCore's Metal resident path (ADR-007): the whole dense-Qwen3 step
     /// executes on the GPU. Forced selection never falls back silently — a
     /// machine without a usable Metal device gets a typed refusal at load.
     Metal,
@@ -64,7 +64,7 @@ impl KernelSelection {
                 if cfg!(target_os = "macos") {
                     Ok(ResolvedKernels::Metal)
                 } else {
-                    Err(TuckmillError::new(
+                    Err(ChineError::new(
                         ErrorCode::Unavailable,
                         "the Metal kernel implementation requires macOS",
                     )
@@ -75,7 +75,7 @@ impl KernelSelection {
                 if cfg!(target_arch = "aarch64") {
                     Ok(ResolvedKernels::Neon)
                 } else {
-                    Err(TuckmillError::new(
+                    Err(ChineError::new(
                         ErrorCode::InvalidRequest,
                         "the NEON kernel implementation requires an aarch64 target",
                     )
@@ -116,8 +116,8 @@ impl ResolvedKernels {
 // Shape validation (the checked boundary)
 // ---------------------------------------------------------------------------
 
-fn packed_row_error(row: &[u8], block_bytes: usize, what: &str) -> TuckmillError {
-    TuckmillError::new(
+fn packed_row_error(row: &[u8], block_bytes: usize, what: &str) -> ChineError {
+    ChineError::new(
         ErrorCode::InvalidArtifact,
         format!(
             "packed {what} row length {} is not a positive multiple of {block_bytes} bytes",
@@ -127,8 +127,8 @@ fn packed_row_error(row: &[u8], block_bytes: usize, what: &str) -> TuckmillError
     .with_action("Re-import the artifact; block geometry is validated at inspection.")
 }
 
-fn activation_error(expected: usize, got: usize, what: &str) -> TuckmillError {
-    TuckmillError::new(
+fn activation_error(expected: usize, got: usize, what: &str) -> ChineError {
+    ChineError::new(
         ErrorCode::Internal,
         format!("{what} dot expects {expected} activation elements, got {got}"),
     )

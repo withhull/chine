@@ -10,12 +10,12 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use tuckmill_manifest::adapter::AdapterRegistry;
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_manifest::ids::{now_unix_ms, Id};
-use tuckmill_manifest::records::{ArtifactSource, ModelArtifact, ModelFormat, ModelGeometry};
-use tuckmill_manifest::units::Bytes;
-use tuckmill_manifest::SCHEMA_VERSION;
+use chine_manifest::adapter::AdapterRegistry;
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_manifest::ids::{now_unix_ms, Id};
+use chine_manifest::records::{ArtifactSource, ModelArtifact, ModelFormat, ModelGeometry};
+use chine_manifest::units::Bytes;
+use chine_manifest::SCHEMA_VERSION;
 
 use crate::aliases::{self, AliasRegistry};
 use crate::digester::{prefix_hash, ChunkedDigester, DigestJournal};
@@ -61,7 +61,7 @@ struct SourceIdentity {
 }
 
 fn source_identity(path: &Path) -> Result<SourceIdentity> {
-    let meta = std::fs::metadata(path).map_err(TuckmillError::from)?;
+    let meta = std::fs::metadata(path).map_err(ChineError::from)?;
     Ok(SourceIdentity {
         len: meta.len(),
         prefix_sha256: prefix_hash(path, 1024 * 1024)?,
@@ -77,27 +77,27 @@ pub fn import_local(
 ) -> Result<ImportOutcome> {
     layout.ensure()?;
     let meta = std::fs::metadata(source).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidRequest,
             format!("cannot open source {}: {e}", source.display()),
         )
         .with_source(e)
     })?;
     if !meta.is_file() {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidRequest,
             format!("source {} is not a regular file", source.display()),
         ));
     }
     if meta.len() == 0 {
-        return Err(TuckmillError::new(
+        return Err(ChineError::new(
             ErrorCode::InvalidArtifact,
             "source file is empty",
         ));
     }
 
     // Lock per source path so concurrent imports of the same file serialize.
-    let lock_name = tuckmill_manifest::ids::sha256_hex(source.to_string_lossy().as_bytes());
+    let lock_name = chine_manifest::ids::sha256_hex(source.to_string_lossy().as_bytes());
     let lock_path = layout
         .tmp_dir()
         .join(format!("import-{}.lock", &lock_name[..16]));
@@ -138,9 +138,9 @@ pub fn import_local(
                         let f = std::fs::OpenOptions::new()
                             .write(true)
                             .open(&partial)
-                            .map_err(TuckmillError::from)?;
+                            .map_err(ChineError::from)?;
                         f.set_len(journal.recorded_bytes())
-                            .map_err(TuckmillError::from)?;
+                            .map_err(ChineError::from)?;
                         digester.journal = journal;
                         resume_from = digester.journal.recorded_bytes();
                         resumed = true;
@@ -162,21 +162,21 @@ pub fn import_local(
     }
 
     // Copy + hash.
-    let mut src = std::fs::File::open(source).map_err(TuckmillError::from)?;
+    let mut src = std::fs::File::open(source).map_err(ChineError::from)?;
     let mut dst = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&partial)
-        .map_err(TuckmillError::from)?;
+        .map_err(ChineError::from)?;
     if resume_from > 0 {
         src.seek(SeekFrom::Start(resume_from))
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
         dst.seek(SeekFrom::Start(resume_from))
-            .map_err(TuckmillError::from)?;
+            .map_err(ChineError::from)?;
     }
     let content_hash = copy_and_hash(&mut src, &mut dst, &mut digester)?;
-    dst.sync_all().map_err(TuckmillError::from)?;
+    dst.sync_all().map_err(ChineError::from)?;
     drop(dst);
 
     // Duplicate detection: identical content already installed.
@@ -272,11 +272,11 @@ pub fn import_local(
 
     // Atomic publish: directory first (payload), then manifest.
     let dir = layout.artifact_dir(&artifact_id);
-    std::fs::create_dir_all(&dir).map_err(TuckmillError::from)?;
+    std::fs::create_dir_all(&dir).map_err(ChineError::from)?;
     let payload_path = layout.artifact_payload_path(&artifact_id);
     // rename within the same filesystem is atomic; both live under the store
     // root, and ensure() created tmp/ and artifacts/ under it.
-    std::fs::rename(&partial, &payload_path).map_err(TuckmillError::from)?;
+    std::fs::rename(&partial, &payload_path).map_err(ChineError::from)?;
     crate::layout::fsync_dir(&dir);
     let _ = std::fs::remove_file(&journal_path);
     aliases::save_manifest(layout, &artifact)?;
@@ -315,11 +315,11 @@ fn copy_and_hash(
     let mut buf = vec![0u8; COPY_BUFFER];
     let mut copied: u64 = 0;
     loop {
-        let n = src.read(&mut buf).map_err(TuckmillError::from)?;
+        let n = src.read(&mut buf).map_err(ChineError::from)?;
         if n == 0 {
             break;
         }
-        dst.write_all(&buf[..n]).map_err(TuckmillError::from)?;
+        dst.write_all(&buf[..n]).map_err(ChineError::from)?;
         acc.update(
             &buf[..n],
             &mut digester.journal,
@@ -327,7 +327,7 @@ fn copy_and_hash(
         )?;
         copied += n as u64;
     }
-    dst.sync_all().map_err(TuckmillError::from)?;
+    dst.sync_all().map_err(ChineError::from)?;
     acc.finish(&mut digester.journal, digester.journal_path.as_deref())?;
     digester.journal.total_bytes = recorded + copied;
     if let Some(path) = &digester.journal_path {
@@ -372,7 +372,7 @@ impl ChunkAccumulator {
                 let digest = self.hasher.finalize_reset();
                 journal.chunks.push(crate::digester::ChunkRecord {
                     len: self.len,
-                    sha256: tuckmill_manifest::ids::hex(&digest),
+                    sha256: chine_manifest::ids::hex(&digest),
                 });
                 if let Some(path) = journal_path {
                     journal.save(path)?;
@@ -389,7 +389,7 @@ impl ChunkAccumulator {
             let digest = self.hasher.finalize_reset();
             journal.chunks.push(crate::digester::ChunkRecord {
                 len: self.len,
-                sha256: tuckmill_manifest::ids::hex(&digest),
+                sha256: chine_manifest::ids::hex(&digest),
             });
             self.len = 0;
             if let Some(path) = journal_path {
@@ -409,28 +409,28 @@ pub struct InspectionSummary {
     pub arch_id: Option<String>,
     pub model_name: Option<String>,
     pub advertised_context_length: Option<u64>,
-    pub tensor_stats: tuckmill_manifest::records::TensorStats,
+    pub tensor_stats: chine_manifest::records::TensorStats,
     pub quant_label: Option<String>,
-    pub gguf: Option<tuckmill_manifest::gguf::GgufInspection>,
+    pub gguf: Option<chine_manifest::gguf::GgufInspection>,
 }
 
 fn validate_payload(path: &Path) -> Result<InspectionSummary> {
-    let mut file = std::fs::File::open(path).map_err(TuckmillError::from)?;
-    let len = file.metadata().map_err(TuckmillError::from)?.len();
+    let mut file = std::fs::File::open(path).map_err(ChineError::from)?;
+    let len = file.metadata().map_err(ChineError::from)?.len();
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic).map_err(|_| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::InvalidArtifact,
             "payload is smaller than a header",
         )
     })?;
-    file.seek(SeekFrom::Start(0)).map_err(TuckmillError::from)?;
-    if &magic == tuckmill_manifest::gguf::GGUF_MAGIC {
+    file.seek(SeekFrom::Start(0)).map_err(ChineError::from)?;
+    if &magic == chine_manifest::gguf::GGUF_MAGIC {
         let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
-        let insp = tuckmill_manifest::gguf::inspect_reader(
+        let insp = chine_manifest::gguf::inspect_reader(
             &mut reader,
             len,
-            &tuckmill_manifest::gguf::Limits::default(),
+            &chine_manifest::gguf::Limits::default(),
             None,
         )?;
         Ok(InspectionSummary {
@@ -450,33 +450,29 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
         // only the 8-byte prefix + header is needed.
         let mut prefix = [0u8; 8];
         file.read_exact(&mut prefix).map_err(|_| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidArtifact,
                 "payload is smaller than a header",
             )
         })?;
         let header_len = u64::from_le_bytes(prefix);
         if header_len == 0 || header_len > 64 * 1024 * 1024 || 8 + header_len > len {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidArtifact,
                 "file is neither GGUF nor a valid safetensors container",
             ));
         }
-        file.seek(SeekFrom::Start(0)).map_err(TuckmillError::from)?;
+        file.seek(SeekFrom::Start(0)).map_err(ChineError::from)?;
         let mut head = vec![0u8; (8 + header_len) as usize];
-        file.read_exact(&mut head).map_err(TuckmillError::from)?;
+        file.read_exact(&mut head).map_err(ChineError::from)?;
         // inspect_bytes needs the tail for bounds checks; reconstruct with a
         // synthetic full buffer only for the header portion by validating the
         // offsets against the true length directly.
         let header_json: serde_json::Value = serde_json::from_slice(&head[8..]).map_err(|e| {
-            tuckmill_manifest::error::json_error(
-                e,
-                ErrorCode::InvalidArtifact,
-                "safetensors header",
-            )
+            chine_manifest::error::json_error(e, ErrorCode::InvalidArtifact, "safetensors header")
         })?;
         let obj = header_json.as_object().ok_or_else(|| {
-            TuckmillError::new(
+            ChineError::new(
                 ErrorCode::InvalidArtifact,
                 "safetensors header is not an object",
             )
@@ -491,25 +487,25 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
             }
             tensor_count += 1;
             let t = value.as_object().ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} entry is not an object"),
                 )
             })?;
             let dtype = t.get("dtype").and_then(|v| v.as_str()).ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} has no dtype"),
                 )
             })?;
-            let elem = tuckmill_manifest::safetensors::dtype_size(dtype).ok_or_else(|| {
-                TuckmillError::new(
+            let elem = chine_manifest::safetensors::dtype_size(dtype).ok_or_else(|| {
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} has unknown dtype {dtype:?}"),
                 )
             })?;
             let shape = t.get("shape").and_then(|v| v.as_array()).ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} has no shape"),
                 )
@@ -517,7 +513,7 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
             let mut elems: u64 = 1;
             for d in shape {
                 elems = elems.checked_mul(d.as_u64().unwrap_or(0)).ok_or_else(|| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::InvalidArtifact,
                         format!("tensor {name:?} element count overflows"),
                     )
@@ -528,7 +524,7 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
                 .and_then(|v| v.as_array())
                 .filter(|a| a.len() == 2)
                 .ok_or_else(|| {
-                    TuckmillError::new(
+                    ChineError::new(
                         ErrorCode::InvalidArtifact,
                         format!("tensor {name:?} has no valid data_offsets"),
                     )
@@ -536,26 +532,26 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
             let start = offsets[0].as_u64().unwrap_or(u64::MAX);
             let end = offsets[1].as_u64().unwrap_or(u64::MAX);
             let bytes = end.checked_sub(start).ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} offsets are invalid"),
                 )
             })?;
             let expect = elems.checked_mul(elem).ok_or_else(|| {
-                TuckmillError::new(
+                ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} size overflows"),
                 )
             })?;
             if bytes != expect {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} claims {bytes} bytes but {dtype} x {shape:?} requires {expect}"),
                 ));
             }
             let data_len = len - (8 + header_len);
             if end > data_len {
-                return Err(TuckmillError::new(
+                return Err(ChineError::new(
                     ErrorCode::InvalidArtifact,
                     format!("tensor {name:?} extends beyond the data section"),
                 ));
@@ -563,13 +559,13 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
             data_end = data_end.max(end);
             *by_type.entry(dtype.to_string()).or_default() += bytes;
         }
-        let stats = tuckmill_manifest::records::TensorStats {
+        let stats = chine_manifest::records::TensorStats {
             total_tensors: tensor_count,
             total_bytes: data_end,
             by_class: Default::default(),
             by_type,
         };
-        let header_hash = tuckmill_manifest::ids::sha256_hex(&head[8..]);
+        let header_hash = chine_manifest::ids::sha256_hex(&head[8..]);
         let metadata_hash = Id::new(header_hash).expect("sha256 hex");
         Ok(InspectionSummary {
             format: ModelFormat::Safetensors,
@@ -586,7 +582,7 @@ fn validate_payload(path: &Path) -> Result<InspectionSummary> {
     }
 }
 
-fn dominant_quant_label(stats: &tuckmill_manifest::records::TensorStats) -> Option<String> {
+fn dominant_quant_label(stats: &chine_manifest::records::TensorStats) -> Option<String> {
     stats
         .by_type
         .iter()
@@ -597,7 +593,7 @@ fn dominant_quant_label(stats: &tuckmill_manifest::records::TensorStats) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuckmill_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
+    use chine_manifest::testing::{synthetic_qwen3_bytes, SyntheticConfig};
 
     fn registry() -> AdapterRegistry {
         AdapterRegistry::builtin().unwrap()
@@ -708,7 +704,7 @@ mod tests {
         // Simulate an interrupted import: partial file holding the first two
         // chunks (chunk = 4096) and a matching journal.
         let chunk = 4096u64;
-        let lock_name = tuckmill_manifest::ids::sha256_hex(src.to_string_lossy().as_bytes());
+        let lock_name = chine_manifest::ids::sha256_hex(src.to_string_lossy().as_bytes());
         let partial = layout
             .tmp_dir()
             .join(format!("import-{}.partial", &lock_name[..16]));
@@ -743,7 +739,7 @@ mod tests {
         let src = write_fixture(dir.path(), "model.gguf");
 
         // Journal claims a different prefix than the current source.
-        let lock_name = tuckmill_manifest::ids::sha256_hex(src.to_string_lossy().as_bytes());
+        let lock_name = chine_manifest::ids::sha256_hex(src.to_string_lossy().as_bytes());
         let journal_path = layout
             .tmp_dir()
             .join(format!("import-{}.journal.json", &lock_name[..16]));

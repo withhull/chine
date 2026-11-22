@@ -1,4 +1,4 @@
-//! Tuckmill store: downloads, packing, cache metadata, and the artifact
+//! Chine store: downloads, packing, cache metadata, and the artifact
 //! lifecycle (FR-07, FR-08, TM-007).
 //!
 //! Canonical model data lives under the user's Application Support directory

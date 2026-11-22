@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorCode, Result, TuckmillError};
+use crate::error::{ChineError, ErrorCode, Result};
 
 /// A 64-character lowercase hex SHA-256 identity.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ impl Id {
         {
             Ok(Id(s))
         } else {
-            Err(TuckmillError::new(
+            Err(ChineError::new(
                 ErrorCode::Internal,
                 format!(
                     "invalid id: expected 64 lowercase hex chars, got {:?}",
@@ -148,14 +148,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 pub fn secure_random_hex(n: usize) -> Result<String> {
     let mut buf = vec![0u8; n];
     let mut f = std::fs::File::open("/dev/urandom").map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::Internal,
             "secure randomness source unavailable (/dev/urandom)".to_string(),
         )
         .with_source(e)
     })?;
     f.read_exact(&mut buf).map_err(|e| {
-        TuckmillError::new(
+        ChineError::new(
             ErrorCode::Internal,
             "failed reading /dev/urandom".to_string(),
         )

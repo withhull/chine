@@ -12,8 +12,8 @@
 //! (correct-first; per-head arithmetic order matches the CPU rule) and is
 //! numerically qualified before any prefill batching work.
 
-use tuckmill_manifest::error::{ErrorCode, Result, TuckmillError};
-use tuckmill_metal::{probe, MetalBuffer, MetalContext};
+use chine_manifest::error::{ChineError, ErrorCode, Result};
+use chine_metal::{probe, MetalBuffer, MetalContext};
 
 pub(crate) fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -51,7 +51,7 @@ impl Qwen35Gpu {
     pub fn open() -> Result<Self> {
         let probe = probe();
         if !probe.available {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::Unavailable,
                 format!("no Metal device is available ({})", probe.info),
             ));
@@ -371,7 +371,7 @@ impl GdnGpu {
     /// Conv weights in GGUF memory order (`ssm_conv1d`, taps fastest).
     pub fn upload_conv_weights(&self, w: &[f32]) -> Result<()> {
         if w.len() != self.conv_kernel * self.conv_channels {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "conv weights have {} values, expected {}",
@@ -386,7 +386,7 @@ impl GdnGpu {
     /// One decode step of the causal convolution plus history advance.
     pub fn conv_step(&self, x: &[f32], out: &mut [f32]) -> Result<()> {
         if x.len() != self.conv_channels || out.len() != self.conv_channels {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "conv_step row size must equal the channel count",
             ));
@@ -409,7 +409,7 @@ impl GdnGpu {
     /// Per-head L2 norm over `rows x cols` (cols = head dim).
     pub fn l2norm_heads(&self, x: &[f32], cols: usize, out: &mut [f32], eps: f32) -> Result<()> {
         if cols == 0 || x.len() != out.len() || !x.len().is_multiple_of(cols) {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "l2norm_heads operands must be whole rows",
             ));
@@ -442,13 +442,13 @@ impl GdnGpu {
     ) -> Result<()> {
         let n = raw_beta.len();
         if alpha.len() != n || dt_bias.len() != n || ssm_a.len() != n {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "beta_decay operands must share the head count",
             ));
         }
         if beta_out.len() != n || gate_out.len() != n {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "beta_decay outputs must match the head count",
             ));
@@ -490,13 +490,13 @@ impl GdnGpu {
             || v.len() != self.heads * self.v_dim
             || out.len() != self.heads * self.v_dim
         {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "gdn_step operand geometry must match the operator",
             ));
         }
         if gate.len() != self.heads || beta.len() != self.heads {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "gdn_step gates must be per head",
             ));
@@ -542,7 +542,7 @@ impl GdnGpu {
             || weight.len() != cols
             || !o.len().is_multiple_of(cols)
         {
-            return Err(TuckmillError::new(
+            return Err(ChineError::new(
                 ErrorCode::InvalidRequest,
                 "gated_norm operands must be whole rows with a full weight row",
             ));
@@ -628,8 +628,8 @@ mod tests {
         let probe = probe();
         if !probe.available {
             assert!(
-                std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-                "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+                std::env::var("CHINE_REQUIRE_METAL").is_err(),
+                "CHINE_REQUIRE_METAL is set but no Metal device is available"
             );
             eprintln!("skipping: no Metal device");
             return None;
@@ -854,8 +854,8 @@ mod attention_tests {
         let probe = probe();
         if !probe.available {
             assert!(
-                std::env::var("TUCKMILL_REQUIRE_METAL").is_err(),
-                "TUCKMILL_REQUIRE_METAL is set but no Metal device is available"
+                std::env::var("CHINE_REQUIRE_METAL").is_err(),
+                "CHINE_REQUIRE_METAL is set but no Metal device is available"
             );
             eprintln!("skipping: no Metal device");
             return None;
@@ -1079,7 +1079,7 @@ mod attention_tests {
             let v_cache = gpu.buffer(hkv * cap * hd * 2).unwrap();
             // One decode row (n = 1) routes to the split-K kernels: the
             // scratch holds [m, l, acc] partials for every (head, slice).
-            let sk_partials = hq * tuckmill_metal::ATTENTION_SK_SLICES as usize * (hd + 2) * 4;
+            let sk_partials = hq * chine_metal::ATTENTION_SK_SLICES as usize * (hd + 2) * 4;
             let scratch = gpu.buffer((hq * cap * 4).max(sk_partials)).unwrap();
             let out_buf = gpu.buffer(hq * hd * 4).unwrap();
 

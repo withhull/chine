@@ -4,7 +4,7 @@ Status: **committed** (2026-10-16). Product + Runtime.
 
 ## Context
 
-Tuckmill is a local-first inference framework for Apple Silicon Macs. The PRD
+Chine is a local-first inference framework for Apple Silicon Macs. The PRD
 (v0.2) fixes a product contract that every layer must enforce, not merely
 advertise. This ADR is the binding statement of that contract for this
 repository.

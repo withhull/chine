@@ -1,7 +1,7 @@
 {
  "source": "Qwen3-0.6B-Q8_0.gguf tokenizer.chat_template (sha256 57f1fd00f0013a2be96aa79b857391f27e23df5b5f847072b524c897e24d0361)",
  "method": "prompts rendered with canonical Jinja2 (the template's own semantics, as Hugging Face applies them) under the chat-completions context (tools=None, add_generation_prompt=True); tokens recorded from pinned llama.cpp b11695 (llama-server /tokenize, add_special=false) on the canonical prompt",
- "llama_server_note": "llama.cpp's bundled jinja executes the trailing-assistant reasoning path differently (it does not apply the .split('</think>') / .lstrip('\n')/rstrip steps there); 'tokens_llama_jinja' records what the pinned server's own rendering tokenizes to, for honest divergence tracking. tuckmill renders the template's canonical semantics. Divergent conversations: assistant_reasoning_split_last, assistant_newline_trimming, assistant_only_think_marker.",
+ "llama_server_note": "llama.cpp's bundled jinja executes the trailing-assistant reasoning path differently (it does not apply the .split('</think>') / .lstrip('\n')/rstrip steps there); 'tokens_llama_jinja' records what the pinned server's own rendering tokenizes to, for honest divergence tracking. chine renders the template's canonical semantics. Divergent conversations: assistant_reasoning_split_last, assistant_newline_trimming, assistant_only_think_marker.",
  "conversations": [
   {
    "id": "single_user",

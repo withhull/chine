@@ -1,15 +1,15 @@
 //! Generate a small, valid synthetic GGUF fixture for local development.
 //!
 //! Usage:
-//!   cargo run -p tuckmill-manifest --example gen_fixture -- out.gguf [--moe] [--layers N] [--hidden N]
+//!   cargo run -p chine-manifest --example gen_fixture -- out.gguf [--moe] [--layers N] [--hidden N]
 //!
 //! The fixture proves code paths (parsing, planning, packing, pipeline). It
 //! is not evidence about any real model's behavior.
 
 use std::process::ExitCode;
 
-use tuckmill_manifest::gguf::{inspect, Limits};
-use tuckmill_manifest::testing::{write_synthetic, SyntheticConfig};
+use chine_manifest::gguf::{inspect, Limits};
+use chine_manifest::testing::{write_synthetic, SyntheticConfig};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
