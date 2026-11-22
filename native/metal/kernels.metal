@@ -649,16 +649,8 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
     /* This SIMD group's fragment bases; each k-block of 8 advances them. */
     const threadgroup float *lsa = sa + 64u * sg_r;
     const threadgroup float *lsb = sb + 64u * sg_t;
-    /* Software pipeline (2026-11-22, the at-512 M-scaling deficit):
-     * block blk's device values live in registers - primed here for
-     * block 0, re-filled under block blk-1's mma - so each iteration
-     * stores fragments then multiplies, and block blk+1's device loads
-     * are issued between the fragment barrier and the mma, retiring
-     * under it instead of serially before it. Accumulation order,
-     * fragment layout and edge handling are untouched. */
-    float wv[16];
-    float4 xv0, xv1;
-    {
+    for (uint blk = 0; blk < blocks; ++blk, block += 34, xblk += 32) {
+        float wv[16];
         const float d = (float)(*(const device half *)block);
         const device packed_char4 *qv = (const device packed_char4 *)(block + 2u + w_k);
         TM_UNROLL for (uint i = 0; i < 4u; ++i) {
@@ -669,10 +661,9 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
             wv[4u * i + 3u] = d * q.w;
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
-        xv0 = float4(xp[0]);
-        xv1 = float4(xp[1]);
-    }
-    for (uint blk = 0; blk < blocks; ++blk, block += 34, xblk += 32) {
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
         /* W^T fragment element (k % 8, row % 8); the 16 k values span two
          * k-blocks of 8. */
@@ -684,25 +675,7 @@ kernel void tm_q8_0_gemm_mma(device const uchar *w [[buffer(0)]],
         *(threadgroup float4 *)(sb_dst + 4u) = xv1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (blk + 1u < blocks) {
-            const device uchar *nblock = block + 34;
-            const device float *nxblk = xblk + 32;
-            const float d = (float)(*(const device half *)nblock);
-            const device packed_char4 *nqv =
-                (const device packed_char4 *)(nblock + 2u + w_k);
-            TM_UNROLL for (uint i = 0; i < 4u; ++i) {
-                const float4 q = float4(char4(nqv[i]));
-                wv[4u * i + 0u] = d * q.x;
-                wv[4u * i + 1u] = d * q.y;
-                wv[4u * i + 2u] = d * q.z;
-                wv[4u * i + 3u] = d * q.w;
-            }
-            const device packed_float4 *nxp = (const device packed_float4 *)nxblk;
-            xv0 = float4(nxp[0]);
-            xv1 = float4(nxp[1]);
-        }
-
-        TM_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+        TM_UNROLL for (ushort kb = 0; kb < 4; ++kb) {
             simdgroup_float8x8 ma[4];
             simdgroup_float8x8 mb[2];
             simdgroup_barrier(mem_flags::mem_none);
@@ -815,13 +788,8 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
     /* This SIMD group's fragment bases; each k-block of 8 advances them. */
     const threadgroup half *lsa = sa + 64u * sg_r;
     const threadgroup half *lsb = sb + 64u * sg_t;
-    /* Software pipeline as in tm_q8_0_gemm_mma: block blk's device
-     * values live in registers (primed for block 0, re-filled under
-     * block blk-1's mma); the rounding to half happens at the store,
-     * exactly as before. */
-    float wv[16];
-    float4 xv0, xv1;
-    {
+    for (uint blk = 0; blk < blocks; ++blk, block += 34, xblk += 32) {
+        float wv[16];
         const float d = (float)(*(const device half *)block);
         const device packed_char4 *qv = (const device packed_char4 *)(block + 2u + w_k);
         TM_UNROLL for (uint i = 0; i < 4u; ++i) {
@@ -832,10 +800,9 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
             wv[4u * i + 3u] = d * q.w;
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
-        xv0 = float4(xp[0]);
-        xv1 = float4(xp[1]);
-    }
-    for (uint blk = 0; blk < blocks; ++blk, block += 34, xblk += 32) {
+        const float4 xv0 = float4(xp[0]);
+        const float4 xv1 = float4(xp[1]);
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
         /* W^T fragment element (k % 8, row % 8); the 16 k values span two
          * k-blocks of 8. Rounding to half happens here, once per staged
@@ -847,24 +814,6 @@ kernel void tm_q8_0_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         *(threadgroup half4 *)(sb_dst) = half4(xv0);
         *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        if (blk + 1u < blocks) {
-            const device uchar *nblock = block + 34;
-            const device float *nxblk = xblk + 32;
-            const float d = (float)(*(const device half *)nblock);
-            const device packed_char4 *nqv =
-                (const device packed_char4 *)(nblock + 2u + w_k);
-            TM_UNROLL for (uint i = 0; i < 4u; ++i) {
-                const float4 q = float4(char4(nqv[i]));
-                wv[4u * i + 0u] = d * q.x;
-                wv[4u * i + 1u] = d * q.y;
-                wv[4u * i + 2u] = d * q.z;
-                wv[4u * i + 3u] = d * q.w;
-            }
-            const device packed_float4 *nxp = (const device packed_float4 *)nxblk;
-            xv0 = float4(nxp[0]);
-            xv1 = float4(nxp[1]);
-        }
 
         TM_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
             simdgroup_half8x8 ma[4];
