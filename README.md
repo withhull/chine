@@ -52,15 +52,16 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
 | Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **0.932 (0.931/0.932/0.938) — the bar met with margin in every clean fast-mode pair**: 94.2–95.7 steady vs llama's 101.2–102.2. The arc: vectorized gemv loads 86.4 → 91.7, then the shape-adaptive redesign (one-row-per-simdgroup below 2048 rows, multi-row above) → 95.3 (+3.9%); the head is measured at the DRAM ceiling (closed) and the norm stack at its floor | **92% (312 vs 287 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
 | Qwen3.5-0.8B **Q4_K_M** (K-quants: Q4_K + Q6_K + Q5_K + F32 GDN projections) | **1.020 (1.028/1.020/1.008) — parity-plus, reproduced across three quiet runs**: 112.71/113.03/111.81 vs 109.62/110.79/110.94. The arc: first-cut 0.866 → three invented/derived forms quiet-reverted → **the verbatim port of the reference lane decomposition** (+17.2% decode, then held) | **104% (267.7 vs 279 ms, paired 0.96 — ahead in every pair)**: the grouped prefill profile relocated the gap to the unsloth F32 GDN projections on the scalar path (171.8 ms = 37.8% of prefill GPU, absent from the Q8_0 control); F32 admitted to the MMA fast path — the class collapses to 6.4 ms and the quiet TTFT moved 384 → 268 ms. **Both Phase 1 bars met; the fifth of five pins** |
-| Qwen3.5-2B **Q4_K_M** (dominant Q6_K; no MTP block) | ⛔ **0.886 standing (0.886/0.879 clean rounds) — the lever taken, quiet acceptance pending**: the profile relocated the gap to the unported Q5_K gemv (34.3 GB/s vs our ported Q4_K's 46.5 on the identical shape); the verbatim port of the reference's Q5_K mul_mv (their `N_R0_Q5_K = 1` form) collapses the class to 70 GB/s in-process — envelope and drift bounds unmoved. Round 3 of the standing run is both-engine drift, its 0.986 not a gain | ✅ **~101% (622/697 vs 629/668 ms, paired 0.99/1.04)**: the artifact's F32 GDN projections rode the MMA path from its first run — the scalar class that cost the 0.8B 37.8% of prefill never existed here |
+| Qwen3.5-2B **Q4_K_M** (dominant Q6_K; no MTP block) | **1.017 (1.014/1.018/1.017) — parity-plus, ahead in every pair**: 58.44/58.81/57.75 vs 57.62/57.74/56.78. The arc: 0.886 standing → the profile relocated the gap to the unported Q5_K gemv (34.3 GB/s vs our ported Q4_K's 46.5 on the identical shape) → the verbatim port of the reference's Q5_K mul_mv (their `N_R0_Q5_K = 1` form) → **+14.7% decode** | **~100% (paired 1.00; 622/621/657 vs 621/619/668 ms)**: the artifact's F32 GDN projections rode the MMA path from its first run — the scalar class that cost the 0.8B 37.8% of prefill never existed here |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Both bars
-are met on every one of the five pins: the 0.8B (reproduced), the
-2B (decode parity 0.996, prefill ~101% — reproduced across two runs),
-Gemma 3 (decode worst pair 0.977, prefill 96%), its Q4_0 pin (decode
-0.931–0.938 with margin, prefill 92%), and the Q4_K_M K-quant pin
-(decode 1.020 parity-plus, prefill 104% — ahead in every pair) —
-llama.cpp's own first-token spread (0.269–0.300 s on the
+are met on every measured pin: the five Phase 1 pins — the 0.8B
+(reproduced), the 2B (decode parity 0.996, prefill ~101%, reproduced
+across two runs), Gemma 3 (decode worst pair 0.977, prefill 96%), its
+Q4_0 pin (decode 0.931–0.938 with margin, prefill 92%), and the 0.8B
+Q4_K_M pin (decode 1.020 parity-plus, prefill 104% — ahead in every
+pair) — and the sixth model, the 2B Q4_K_M (decode 1.017, prefill
+~100%). llama.cpp's own first-token spread (0.269–0.300 s on the
 0.8B) is as wide as several of these margins, so parity is stated
 where a lead is not established.
 
