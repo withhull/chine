@@ -2335,7 +2335,9 @@ int ch_metal_q5_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
             return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"q5_k_gemv: device simd width %lu != 32", (unsigned long)lanes]);
         }
-        const NSUInteger rows_per_tg = 8;
+        /* The reference's Q5_K grid (b11695): N_R0_Q5_K = 1 row per
+         * simdgroup x NSG = 2 -> 2 rows per 64-thread group. */
+        const NSUInteger rows_per_tg = 2;
         NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
