@@ -4441,3 +4441,4 @@ fn f32_gemv_and_gemm_match_the_scalar_reference() {
         }
     }
 }
+

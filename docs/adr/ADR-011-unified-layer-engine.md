@@ -1352,3 +1352,50 @@ three passes each; full prefill ~330 ms):
   where the 0.866 actually sits. Provenance pinned: the artifact's
   sha256 `ac7c9d7a…d6d3d86`; MLX cannot load the identical GGUF
   (the harness records the typed refusal), so no MLX row.
+
+- **The K-quant kernel arc, measured against the pinned reference
+  (2026-11-23).** Reading the actual `kernel_mul_mat_vec_q` at the
+  pinned revision (b11695 `mul_mv.metal`) found the algebra our
+  first-cut kernels lacked: the reference **dots the raw nibble codes
+  and subtracts the affine term once** — `d*sc*sum(nib*x) -
+  dmin*m*sum(x)` for Q4_K/Q5_K, the -32 as a single per-run term for
+  Q6_K — with `sum(x)` hoisted outside the row loop, so the inner
+  loop is one extract + one FMA per element with no per-element
+  multiply or subtract. Two structural lessons, both recorded with
+  their measurements:
+  - **A 64-value-lane rewrite (fewer loads per value) measured
+    -40-60% and was reverted** across four interleaved runs: holding
+    16 x-float4 plus the construction vectors per lane blows the
+    128-register budget and spills — the reference's lanes hold
+    16-32 SCALAR x registers (`yl`/`yh` arrays) with two lanes per
+    64 values. Register pressure, not load count, is the first wall.
+    Two algebra bugs the CPU gate caught before any artifact ran
+    (a mixed-run -32 correction; a run-paired x register) are also
+    on record from this attempt.
+  - **The surgical form shipped instead: the end-form algebra on the
+    committed lane mapping** — strictly less inner-loop work, no
+    register change, per-element values unchanged (the reorder is
+    f32-rounding-level; the real-artifact verify envelope is
+    identical, max |d| 1.045, texts equal). The loaded in-model A/B
+    cannot resolve its size (two interleaved pairs, class-total
+    direction positive, the head's -9.7% not reproduced in the
+    second pair; the control ops swing +/-15%): per the recorded
+    rule, the quiet acceptance decides.
+  - **The MMA staging vectorized (the prefill lever)**: the
+    K-quant MMA kernels staged each thread's 16 values with sixteen
+    scalar byte loads; the values are contiguous runs, so four
+    packed loads each (ql, qh) with vector extraction replace them —
+    same values, same write order, strictly fewer loads. The Q4_K_M
+    verify envelope is identical; the quiet acceptance decides the
+    request-level effect on the 1.39x prefill gap.
+  - **Not model-specific, on either side:** the pinned reference
+    keeps its split exactly as this repo does — format-generic
+    kernels (one templated mul_mv per quant type serving every
+    model) and per-family architecture files (`src/models/
+    qwen35.cpp` for the GDN hybrid, as our `adapters::qwen35`). The
+    K-quant kernels serve any artifact carrying the types; the
+    Q4_K_M run is the first proof, and nothing in this arc is
+    specific to it. If the quiet run shows the gaps persist, the
+    recorded follow-up is a faithful port of the reference's lane
+    decomposition (their `tid/ix` mapping, 16-scalar x registers,
+    two lanes per 64 values) rather than another invented one.
