@@ -54,6 +54,7 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
 | Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
 | Gemma 3 1B **Q4_0** (with Q4_1 tensors) | **0.932 (0.931/0.932/0.938) — the bar met with margin in every clean fast-mode pair**: 94.2–95.7 steady vs llama's 101.2–102.2. The arc: vectorized gemv loads 86.4 → 91.7, then the shape-adaptive redesign (one-row-per-simdgroup below 2048 rows, multi-row above) → 95.3 (+3.9%); the head is measured at the DRAM ceiling (closed) and the norm stack at its floor | **92% (312 vs 287 ms, paired 1.09×)** — prefill bar met on the first Q4 artifact |
+| Qwen3.5-0.8B **Q4_K_M** (K-quants: Q4_K + Q6_K + Q5_K + F32 GDN projections) | ⛔ **0.866 (0.861–0.867)**: 95.93 (± 0.03) vs 110.78 — the first K-quant artifact runs (reference-verified, spec-decode token-identical) but the decode bar is not yet met; the same first-acceptance shape the Q4_0 pin recorded (0.844) before its kernel arc | ⛔ **72% (388 vs 279 ms, paired 1.39×)** — prefill bar not yet met |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Decode
 meets it on the 0.8B (reproduced), at parity-or-ahead on the 2B, on

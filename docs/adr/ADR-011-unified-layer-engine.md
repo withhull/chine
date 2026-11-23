@@ -1328,3 +1328,27 @@ three passes each; full prefill ~330 ms):
   token-identical to plain greedy on a 96-token continuation. The
   honest record tag derives `q6_k` (the dominant weight bytes) —
   Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K now all label correctly.
+
+- **The K-quant acceptance run: the artifact runs, the bars are not
+  yet met (2026-11-22, `20261123T021417Z-…-qwen35-0.8b-q4_k_m`,
+  battery, zero swap, all 3 ABBA rounds valid, clean tree `d50f609`).**
+  Warm decode **95.99/95.93/95.93 (± 0.03, the steadiest band yet
+  recorded)** vs llama.cpp 110.72/110.78/111.36 — **paired 0.866
+  (0.861–0.867), the >= 0.90 decode bar NOT met**. Warm TTFT
+  387/388/388 vs 279/279/279 ms — **paired 1.39x, prefill ~72%, the
+  prefill bar NOT met** (the Q8_0 pin's prefill is at parity,
+  94-106%). Footprint 817 MiB resident vs llama's 241 MiB mmap peak.
+  Both engines sped up proportionally on the halved weights (llama
+  71.9 -> 110.8; ours 84.2 -> 95.9), but llama gained 1.54x where we
+  gained 1.14x — the same shape as the Q4_0 Gemma arc's first
+  acceptance (0.844 decode), which closed to 0.932 after its
+  measured kernel work. The recorded follow-up hypotheses, named at
+  design time and NOT yet measured: the Q6_K gemv reads its qh
+  plane with 4x per-lane redundancy (each of the four j-lanes reads
+  the same 16 bytes), and the K-quant MMA staging is scalar-byte
+  based (16 scalar loads per thread per K-step where the Q8_0
+  kernels vectorize). The profile-first rule applies before any
+  rewrite: the per-operator decode profile on this pin decides
+  where the 0.866 actually sits. Provenance pinned: the artifact's
+  sha256 `ac7c9d7a…d6d3d86`; MLX cannot load the identical GGUF
+  (the harness records the typed refusal), so no MLX row.
