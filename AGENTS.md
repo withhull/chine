@@ -3,11 +3,12 @@
 ## What this project is
 
 Chine is a Mac-native, high-performance local inference framework for
-Apple Silicon, from 8 GB upward. Canonical positioning and the five
-engineering goals live in `docs/adr/ADR-006-positioning-and-memory-tiers.md`;
-the product contract (local-only, same-profile execution, honest labels) is
-`docs/adr/ADR-001-product-contract.md`. 8 GB is the **minimum tier**, never
-the framing of the product.
+Apple Silicon. Canonical positioning and the five engineering goals live in
+`docs/adr/ADR-006-positioning-and-memory-tiers.md` (Addendum 2026-11-23: no
+declared memory minimum — admission is typed and decides per model and per
+Mac; 8 GB is the **measured** tier, never the framing of the product); the
+product contract (local-only, same-profile execution, honest labels) is
+`docs/adr/ADR-001-product-contract.md`.
 
 ## Commands
 

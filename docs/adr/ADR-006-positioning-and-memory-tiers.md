@@ -75,3 +75,25 @@ supported target.
   2 GiB, so high-memory machines are not artificially capped.
 - MoE/hybrid/compressed families remain gated milestones (ADR-005); nothing
   here weakens the same-profile rules.
+
+## Addendum (2026-11-23): no declared minimum — admission-governed tiers
+
+Supersedes the "floor" framing in the Context and in point 6 ("8 GB remains
+the floor at which qualification begins"). The product declares no minimum
+memory, the same posture as llama.cpp — verified at the pinned revision
+b11695, where the model loader defaults to mmap (`llama-model-loader.cpp`,
+`use_mmap` at line 560; `--load-mode auto: mmap, unless a device does not
+support it`) and contains no total-RAM check anywhere: llama's admission is
+allocation success, implicit and discovered at load time.
+
+Chine matches the posture but not the mechanism, deliberately: admission is
+**typed and upfront** — the planner prices `R + U + H ≤ B` from the device's
+actual budget before any GPU allocation and refuses infeasible requests
+with a safe next action. No request is mmap-and-pray; the OS is never left
+to page weights under the engine's feet; the refusal is a record, not a
+crash. A machine smaller than 8 GB gets the same typed admission as any
+other size, and machines of every size are unmeasured until a record
+exists in docs/claims.md — 8 GB is where every standing record was measured
+(one M3), which makes it the *measured* tier, never a requirement. The
+per-tier strategy table above remains the strategy scope, not a
+requirements floor.
