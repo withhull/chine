@@ -7,7 +7,7 @@ nothing.
 
 ## Context
 
-Five references reviewed 2026-11-23. Every competitor number below is
+Six references reviewed 2026-11-23. Every competitor number below is
 **their published claim at read date**, not a Chine measurement; Chine
 rows cite records already in `benchmarks/results/` and
 `docs/certification-matrix.md`.
@@ -47,6 +47,21 @@ rows cite records already in `benchmarks/results/` and
   Fidelity is published as next-token **agreement 99.30–99.45%** (27B) —
   i.e. not bit-exact. All of their headline ratios are on 27B+ MoE at
   48–64 GB tiers; no small-model or 8 GB number is published anywhere.
+- **airllm** (lyogavin/airllm, 34.9k stars): layer-wise weight streaming
+  — the checkpoint is split into per-decoder-layer files on disk, one
+  layer at a time is loaded, computed and freed, and the next is
+  prefetched asynchronously. Peak memory is the largest layer plus KV,
+  not the model: 70B on a single 4 GB GPU, DeepSeek-V3 (671B) in
+  ~12 GB, Kimi K3 (2.8T) under 4 GB — MoE streams only the routed
+  experts per token. The README publishes capacity, never absolute
+  speed; community measurements span ~13 s to ~2 min per token:
+  access at the price of throughput. Optional 4/8-bit block-wise
+  compression at split time (their "up to 3×", contested in their own
+  issues) is a requantization of the model. macOS runs via MLX,
+  Llama-style architectures only, with community-documented garbled
+  Llama-3 output on unfixed versions — the silent-degradation
+  anti-example again. Their split doubles disk usage
+  (`delete_original` reclaims it).
 
 **Where Chine is (locally-calibrated, one M3 8 GB, identity rules):**
 decode and prefill at parity or parity-plus with pinned llama.cpp on five
@@ -63,7 +78,9 @@ executing.
 **The gap map.** The levers others measurably exploit that Chine has not
 measured: (1) drafts at higher accept-length × cost ratios, (2)
 concurrency, (3) cache depth (paged blocks, SSD tiers), (4) long-context
-KV cost, (5) big MoE at 32 GB+ tiers. Nobody publishes an advantage on
+KV cost, (5) big MoE at 32 GB+ tiers, (6) capacity-class execution of
+oversized artifacts — airllm's whole premise, at their
+throughput-sacrificing extreme. Nobody publishes an advantage on
 our measured tier — the ≤ 2B dense/hybrid class at 8 GB — where our
 decode is already at the DRAM ceiling and paired at parity-plus.
 
@@ -120,11 +137,26 @@ rules (rule 6).
    Then, only on real larger-tier hardware: the two ADR-011 Phase-2
    levers — bf16-in-MMA decode operands and ANE FFN prefill — evaluated,
    not ported blind.
-7. **Distribution and API surface (ADR-012 step 5, unchanged):** pull
+7. **Capacity-class execution for oversized artifacts** — Phase 2's GPU
+   partial residency and streaming, now with airllm as the reference
+   to design against. Admission may plan a resident-head +
+   streamed-tail hybrid per ADR-006: resident layers within the
+   budget, the tail streamed through the mapped, verified artifact in
+   bounded blocks — the CPU path's existing streaming discipline, on
+   the GPU. Two refusals from the airllm read: the all-streaming
+   whole-model path, whose decode floor is disk bandwidth (their
+   ~13 s–2 min per token), and split-time weight requantization
+   (rule 2 — the artifact's own computation or nothing). Their
+   per-layer split doubles disk; GGUF tensor blocks plus the mapped
+   handle need no split copy at all. Gate: the plan record carries an
+   `estimated` decode rate derived from measured disk bandwidth, and
+   the executed run must land inside its registered band — an
+   honest-to-the-tier admission, never a speed claim.
+8. **Distribution and API surface (ADR-012 step 5, unchanged):** pull
    with verified content hashes; an Anthropic-compatible endpoint;
    tool calls and structured output only through declared templates,
    never by prompt injection.
-8. **Robustness campaigns gate every public claim above:** the G4 items
+9. **Robustness campaigns gate every public claim above:** the G4 items
    already in the certification matrix (GGUF fuzzing, worker crash
    injection, pressure soak, streaming-disconnect soak) plus multi-tier
    measurement (M1/M2 minimum cohorts, 16 GB+) — no tier claim exists
@@ -136,7 +168,10 @@ error); context truncation and free-memory heuristics (Ollama, ADR-012);
 per-model bespoke kernel suites replacing the unified engine (Splash
 pairs each model with its own kernels; Chine keeps one engine and typed
 adapters); remote-code execution (dspark refuses it by default — agreed);
-and every unmeasured speedup claim — all four publish self-measured
+split-time weight requantization and the all-streaming whole-model
+decode path (airllm's compression option and operating point —
+rule 2 and the honest-latency gate above); and every unmeasured
+speedup claim — all five publish self-measured
 numbers on their own workloads; `docs/claims.md` line 28 stands until a
 matched record exists under our identity rules.
 
