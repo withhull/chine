@@ -1,17 +1,14 @@
 # Chine
 
-Local inference for Apple Silicon — no declared memory minimum: typed
-admission decides per model and per Mac — built around one engine this
-project owns end to end.
+Local AI inference engine for Apple Silicon.
 
 - **One unified Metal engine runs every supported family** (ADR-011). A
   small adapter describes a model as a typed graph — which tensors are
   which projections, the attention window, the activation — and the
-  engine executes it from shared blocks: matrix-unit Q8_0/Q4/F16
-  GEMMs,
-  chunk attention with or without sliding windows, Gated DeltaNet
-  recurrence, RMSNorm, GeGLU, sampling. There is no per-model forward
-  pass and no vendored foreign engine on this path.
+  engine executes it from shared blocks: matrix-unit F16, Q8_0, Q4 and
+  K-quant GEMMs, chunk attention with or without sliding windows, Gated
+  DeltaNet recurrence, RMSNorm, GeGLU, sampling. There is no per-model
+  forward pass and no vendored foreign engine on this path.
 - **llama.cpp b11695 is pinned as both oracle and baseline**
   (`scripts/fetch-llama.sh`, loaded at runtime, never vendored). Every
   comparison runs under identity rules — identical artifact, token IDs,
@@ -40,14 +37,13 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
   and pipelined greedy decoding. The CPU path (scalar + NEON, bounded
   weight streaming) stays as the CPU executor and arithmetic oracle.
 - **Not built yet**: GPU partial residency and streaming, MoE execution,
-  K-quant kernels, speculative sampling (greedy MTP speculation is
-  built).
-- **Hardware exercised**: one MacBook Air M3 8 GB. Other tiers are
-  pending; all numbers below are locally-calibrated on that machine.
+  speculative sampling (greedy MTP speculation is built).
+- **Hardware exercised**: one MacBook Air M3 8 GB; every number below is
+  locally-calibrated on it. Other tiers are unmeasured.
 
 ## Measured against pinned llama.cpp (M3 8 GB, 512 tokens in / 256 out, ABBA)
 
-| Model (Q8_0) | Decode, paired | First token, paired |
+| Model | Decode, paired | First token, paired |
 | --- | --- | --- |
 | Qwen3.5-0.8B | 0.99–1.26× (two idle runs + a rerun; 84.2–84.3 vs 66.8–84.7 tok/s) | 94–106% — parity |
 | Qwen3.5-2B (3 GiB budget) | 0.956–1.030 across four runs — parity | 94% with f32-operand GEMMs, **98%** on the f16-operand profile (0.601 vs 0.587 s, quiet AC run) |
@@ -162,18 +158,15 @@ constrained machines, not the architecture (ADR-006).
 
 | Unified memory | Strategy | State |
 | --- | --- | --- |
-| < 8 GB | Same typed admission, streaming-first; unmeasured | budgeting and admission ✅; no performance record (unmeasured) |
+| < 8 GB | Same admission and streaming strategies | unmeasured |
 | 8 GB | Compact weights, strict budgeting, selective streaming | budgeting and admission ✅; resident Metal ✅ (≤ 2B); CPU block streaming ✅ (dense Qwen3); GPU streaming ⛔ Phase 2 |
 | 16–24 GB | Hybrid resident and streamed execution, adaptive caching | ⛔ Phases 2–3 |
 | 32–48 GB | Larger resident models, fast prefill, speculative decoding | resident Metal ✅ (small models); speculation ✅ experimental (MTP greedy) |
 | 64–128 GB+ | Maximum resident execution, batching, low-latency decoding | ⛔ Phases 1, 4 |
 
-No memory size is a product requirement (ADR-006 Addendum): llama.cpp
-declares no minimum — its loader defaults to mmap with no total-RAM check
-(pinned b11695) — and neither do we. The difference is the mechanism:
-admission here is typed and priced before any GPU allocation, never
-mmap-and-pray. 8 GB is the *measured* tier — every record in this README
-was measured on one M3 8 GB — not a floor.
+8 GB is the tier with measured records — one MacBook Air M3; every other
+tier is unmeasured until a record exists ([docs/claims.md](docs/claims.md),
+ADR-006).
 
 ## What works today
 
@@ -242,8 +235,8 @@ scripts/            build, test, demo, fetch-llama, bench-baseline
 
 ## Verification
 
-`scripts/test.sh` is the gate (511 tests at this revision) and the same
-gate CI runs on a macOS runner. It covers formatting,
+`scripts/test.sh` is the gate (575 test functions at this revision) and
+the same gate CI runs on a macOS runner. It covers formatting,
 `clippy -D warnings`, and:
 
 - adversarial GGUF and Safetensors fixtures;
