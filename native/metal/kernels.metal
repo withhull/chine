@@ -3097,6 +3097,97 @@ kernel void ch_q4_1_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
 }
 
 
+/* ---------------- K-quant mul_mm staging, pinned to llama.cpp b11695 ----------------
+ * Verbatim ports of ggml/src/ggml-metal/kernels/dequantize.h: the block
+ * structs, get_scale_min_k4_just2, and dequantize_q4_K/q5_K/q6_K, plus the
+ * legacy kernel_mul_mm staging walk (mul_mm.metal:151): each staging
+ * thread dequantizes one 16-value sub-chunk per 32-value K-step through
+ * the inlined function - Q6_K reads four packed u16 loads per 16 values,
+ * Q4_K/Q5_K keep the nibble in its bit position with the exact d/16
+ * compensation - with the il even/odd sub-chunk cycle and the one-block
+ * x advance. ABI adaptations only: our buffers and tile-batch guards. */
+
+struct block_q4_K_t { half d; half dmin; uchar scales[12]; uchar qs[128]; };
+struct block_q5_K_t { half d; half dmin; uchar scales[12]; uchar qh[32]; uchar qs[128]; };
+struct block_q6_K_t { uchar ql[128]; uchar qh[64]; int8_t scales[16]; half d; };
+
+static inline uchar2 get_scale_min_k4_just2(int j, int k, device const uchar * q) {
+    return j < 4 ? uchar2{uchar(q[j+0+k] & 63), uchar(q[j+4+k] & 63)}
+                 : uchar2{uchar((q[j+4+k] & 0xF) | ((q[j-4+k] & 0xc0) >> 2)), uchar((q[j+4+k] >> 4) | ((q[j-0+k] & 0xc0) >> 2))};
+}
+
+static inline void dequantize_q4_K(device const block_q4_K_t * xb, short il, thread float4x4 & reg) {
+    device const uchar * q = xb->qs;
+
+    short is = (il/4) * 2;
+    q = q + (il/4) * 32 + 16 * (il&1);
+    il = il & 3;
+    const uchar2 sc = get_scale_min_k4_just2(is, il/2, xb->scales);
+    const float d   = il < 2 ? xb->d : xb->d / 16.h;
+    const float min = xb->dmin;
+    const float dl = d * sc[0];
+    const float ml = min * sc[1];
+
+    const ushort mask = il < 2 ? 0x0F : 0xF0;
+    for (int i = 0; i < 16; ++i) {
+        reg[i/4][i%4] = dl * (q[i] & mask) - ml;
+    }
+}
+
+static inline void dequantize_q5_K(device const block_q5_K_t *xb, short il, thread float4x4 & reg) {
+    device const uchar * q  = xb->qs;
+    device const uchar * qh = xb->qh;
+
+    short is = (il/4) * 2;
+    q  = q + 32 * (il/4) + 16 * (il&1);
+    qh = qh + 16 * (il&1);
+    uint8_t ul = 1 << (il/2);
+    il = il & 3;
+    const uchar2 sc = get_scale_min_k4_just2(is, il/2, xb->scales);
+    const float d = il < 2 ? xb->d : xb->d / 16.f;
+    const float min = xb->dmin;
+    const float dl = d * sc[0];
+    const float ml = min * sc[1];
+
+    const ushort mask  = il<2 ? 0x0F : 0xF0;
+    const float qh_val = il<2 ? 16.f : 256.f;
+    for (int i = 0; i < 16; ++i) {
+        reg[i/4][i%4] = dl * ((q[i] & mask) + (qh[i] & ul ? qh_val : 0)) - ml;
+    }
+}
+
+static inline void dequantize_q6_K(device const block_q6_K_t *xb, short il, thread float4x4 & reg) {
+    const half d_all = xb->d;
+    device const uint16_t * ql = (device const uint16_t *)xb->ql;
+    device const uint16_t * qh = (device const uint16_t *)xb->qh;
+    device const int8_t * scales = (device const int8_t *)xb->scales;
+
+    ql = ql + 32*(il/8) + 16*((il/2)&1) + 8*(il&1);
+    qh = qh + 16*(il/8) + 8*(il&1);
+    float sc = scales[(il%2) + 2 * ((il/2))];
+    il = (il/2) & 3;
+
+    const uint32_t kmask1 = il>1 ? (il>2 ? 0xC0C0C0C0 : 0x30303030) : (il>0 ? 0x0C0C0C0C : 0x03030303);
+    const uint32_t kmask2 = il>1 ? 0xF0F0F0F0                       : 0x0F0F0F0F;
+    const float ml = d_all * sc * 32.f;
+    const float dl0 = d_all * sc;
+    const float dl1 = dl0 / 256.f;
+    const float dl2 = dl0 / (256.f * 256.f);
+    const float dl3 = dl0 / (256.f * 256.f * 256.f);
+    const uint8_t shr_h = il>2 ? 2 : 0;
+    const uint8_t shl_h = il>1 ? 0 : (il>0 ? 2 : 4);
+    const uint8_t shr_l = il>1 ? 4 : 0;
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t  low = (ql[2*i] | (uint32_t)(ql[2*i+1] << 16)) & kmask2;
+        const uint32_t high = (qh[2*i] | (uint32_t)(qh[2*i+1] << 16)) & kmask1;
+        const uint32_t q = ((high << shl_h) >> shr_h) | (low >> shr_l);
+        reg[i][0] = dl0 *  ((half)(q & 0xFF))       - ml;
+        reg[i][1] = dl1 * ((float)(q & 0xFF00))     - ml;
+        reg[i][2] = dl2 * ((float)(q & 0xFF0000))   - ml;
+        reg[i][3] = dl3 * ((float)(q & 0xFF000000)) - ml;
+    }
+}
+
 /* ---------------- Q4_K kernels (2026-11-22) ----------------
  * Pinned to llama.cpp b11695 (ggml-common.h block_q4_K, ggml-quants.c
  * dequantize_row_q4_K / get_scale_min_k4): 256-value super-blocks,
@@ -3418,43 +3509,26 @@ kernel void ch_q4_k_gemm_mma(device const uchar *w [[buffer(0)]],
     const device float *xblk = xrow;
     const threadgroup float *lsa = sa + 64u * sg_r;
     const threadgroup float *lsb = sb + 64u * sg_t;
-    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
-        const uint k = blk & 7u;
-        const device uchar *block = wrow + (size_t)(blk >> 3) * 144u;
-        const float d = (float)(*(const device half *)block);
-        const float dmin = (float)(*(const device half *)(block + 2u));
-        const device uchar *sc = block + 4u;
-        float a, mn;
-        if (k < 4u) {
-            a = (float)(sc[k] & 63u);
-            mn = (float)(sc[k + 4u] & 63u);
-        } else {
-            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
-            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
-        }
-        const float ds = d * a;
-        const float dm = dmin * mn;
-        const device uchar *qs = block + 16u + 32u * (k / 2u) + w_k;
-        float wv[16];
-        if (k % 2u == 0u) {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                wv[i] = (float)(qs[i] & 0x0fu) * ds - dm;
-            }
-        } else {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                wv[i] = (float)(qs[i] >> 4) * ds - dm;
-            }
-        }
+    /* Verbatim port of the reference staging walk (b11695 mul_mm.metal:238):
+       one inlined dequantize per thread per 32-value step, the il even/odd
+       sub-chunk cycle, the one-block x advance. */
+    short il = (short)(w_k / 16u);
+    device const block_q4_K_t * xb = (device const block_q4_K_t *)wrow;
+    for (uint step = 0; step < blocks; ++step, xblk += 32) {
+        float4x4 temp_a;
+        dequantize_q4_K(xb, il, temp_a);
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
         const float4 xv1 = float4(xp[1]);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
-            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = temp_a[i / 4][i % 4];
         }
         *(threadgroup float4 *)(sb_dst) = xv0;
         *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        xb = (il < 2) ? xb + 1 : xb;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
@@ -3552,43 +3626,26 @@ kernel void ch_q4_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
     const device float *xblk = xrow;
     const threadgroup half *lsa = sa + 64u * sg_r;
     const threadgroup half *lsb = sb + 64u * sg_t;
-    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
-        const uint k = blk & 7u;
-        const device uchar *block = wrow + (size_t)(blk >> 3) * 144u;
-        const float d = (float)(*(const device half *)block);
-        const float dmin = (float)(*(const device half *)(block + 2u));
-        const device uchar *sc = block + 4u;
-        float a, mn;
-        if (k < 4u) {
-            a = (float)(sc[k] & 63u);
-            mn = (float)(sc[k + 4u] & 63u);
-        } else {
-            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
-            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
-        }
-        const float ds = d * a;
-        const float dm = dmin * mn;
-        const device uchar *qs = block + 16u + 32u * (k / 2u) + w_k;
-        float wv[16];
-        if (k % 2u == 0u) {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                wv[i] = (float)(qs[i] & 0x0fu) * ds - dm;
-            }
-        } else {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                wv[i] = (float)(qs[i] >> 4) * ds - dm;
-            }
-        }
+    /* Verbatim port of the reference staging walk (b11695 mul_mm.metal:238):
+       one inlined dequantize per thread per 32-value step, the il even/odd
+       sub-chunk cycle, the one-block x advance. */
+    short il = (short)(w_k / 16u);
+    device const block_q4_K_t * xb = (device const block_q4_K_t *)wrow;
+    for (uint step = 0; step < blocks; ++step, xblk += 32) {
+        float4x4 temp_a;
+        dequantize_q4_K(xb, il, temp_a);
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
         const float4 xv1 = float4(xp[1]);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
-            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)temp_a[i / 4][i % 4];
         }
         *(threadgroup half4 *)(sb_dst) = half4(xv0);
         *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        xb = (il < 2) ? xb + 1 : xb;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
@@ -3941,36 +3998,26 @@ kernel void ch_q6_k_gemm_mma(device const uchar *w [[buffer(0)]],
     const device float *xblk = xrow;
     const threadgroup float *lsa = sa + 64u * sg_r;
     const threadgroup float *lsb = sb + 64u * sg_t;
-    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
-        const device uchar *block = wrow + (size_t)(blk >> 3) * 210u;
-        const float d = (float)(*(const device half *)(block + 208u));
-        const uint v0 = blk * 32u + w_k;
-        const uint r0 = v0 & 255u;
-        const float s = (float)((const device int8_t *)(block + 192u))[(r0 / 16u) & 15u];
-        const float ds = d * s;
-        const device uchar *qlb = block;
-        const device uchar *qhb = block + 128u;
-        float wv[16];
-        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-            const uint r = r0 + i;
-            const uint c = r / 128u;
-            const uint jj = (r % 128u) / 32u;
-            const uint l = r % 32u;
-            const uint nib = jj < 2u ? (qlb[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
-                                     : (qlb[64u * c + 32u * (jj % 2u) + l] >> 4);
-            const uint qh = (qhb[32u * c + l] >> (2u * jj)) & 3u;
-            wv[i] = ds * ((float)(nib | (qh << 4)) - 32.0f);
-        }
+    /* Verbatim port of the reference staging walk (b11695 mul_mm.metal:238):
+       one inlined dequantize per thread per 32-value step, the il even/odd
+       sub-chunk cycle, the one-block x advance. */
+    short il = (short)(w_k / 16u);
+    device const block_q6_K_t * xb = (device const block_q6_K_t *)wrow;
+    for (uint step = 0; step < blocks; ++step, xblk += 32) {
+        float4x4 temp_a;
+        dequantize_q6_K(xb, il, temp_a);
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
         const float4 xv1 = float4(xp[1]);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
-            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = temp_a[i / 4][i % 4];
         }
         *(threadgroup float4 *)(sb_dst) = xv0;
         *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        xb = (il < 2) ? xb + 1 : xb;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
@@ -4068,36 +4115,26 @@ kernel void ch_q6_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
     const device float *xblk = xrow;
     const threadgroup half *lsa = sa + 64u * sg_r;
     const threadgroup half *lsb = sb + 64u * sg_t;
-    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
-        const device uchar *block = wrow + (size_t)(blk >> 3) * 210u;
-        const float d = (float)(*(const device half *)(block + 208u));
-        const uint v0 = blk * 32u + w_k;
-        const uint r0 = v0 & 255u;
-        const float s = (float)((const device int8_t *)(block + 192u))[(r0 / 16u) & 15u];
-        const float ds = d * s;
-        const device uchar *qlb = block;
-        const device uchar *qhb = block + 128u;
-        float wv[16];
-        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-            const uint r = r0 + i;
-            const uint c = r / 128u;
-            const uint jj = (r % 128u) / 32u;
-            const uint l = r % 32u;
-            const uint nib = jj < 2u ? (qlb[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
-                                     : (qlb[64u * c + 32u * (jj % 2u) + l] >> 4);
-            const uint qh = (qhb[32u * c + l] >> (2u * jj)) & 3u;
-            wv[i] = ds * ((float)(nib | (qh << 4)) - 32.0f);
-        }
+    /* Verbatim port of the reference staging walk (b11695 mul_mm.metal:238):
+       one inlined dequantize per thread per 32-value step, the il even/odd
+       sub-chunk cycle, the one-block x advance. */
+    short il = (short)(w_k / 16u);
+    device const block_q6_K_t * xb = (device const block_q6_K_t *)wrow;
+    for (uint step = 0; step < blocks; ++step, xblk += 32) {
+        float4x4 temp_a;
+        dequantize_q6_K(xb, il, temp_a);
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
         const float4 xv1 = float4(xp[1]);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
-            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)temp_a[i / 4][i % 4];
         }
         *(threadgroup half4 *)(sb_dst) = half4(xv0);
         *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        xb = (il < 2) ? xb + 1 : xb;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
@@ -4488,49 +4525,26 @@ kernel void ch_q5_k_gemm_mma(device const uchar *w [[buffer(0)]],
     const device float *xblk = xrow;
     const threadgroup float *lsa = sa + 64u * sg_r;
     const threadgroup float *lsb = sb + 64u * sg_t;
-    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
-        const uint k = blk & 7u;
-        const device uchar *block = wrow + (size_t)(blk >> 3) * 176u;
-        const float d = (float)(*(const device half *)block);
-        const float dmin = (float)(*(const device half *)(block + 2u));
-        const device uchar *sc = block + 4u;
-        float a, mn;
-        if (k < 4u) {
-            a = (float)(sc[k] & 63u);
-            mn = (float)(sc[k + 4u] & 63u);
-        } else {
-            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
-            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
-        }
-        const float ds = d * a;
-        const float dm = dmin * mn;
-        const device uchar *qs = block + 48u + 32u * (k / 2u) + w_k;
-        const device uchar *qh = block + 16u + w_k;
-        const uint shift = 2u * (k / 2u) + (k % 2u);
-        float wv[16];
-        if (k % 2u == 0u) {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                const uint nib = qs[i] & 0x0fu;
-                const uint hb = (qh[i] >> shift) & 1u;
-                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
-            }
-        } else {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                const uint nib = qs[i] >> 4;
-                const uint hb = (qh[i] >> shift) & 1u;
-                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
-            }
-        }
+    /* Verbatim port of the reference staging walk (b11695 mul_mm.metal:238):
+       one inlined dequantize per thread per 32-value step, the il even/odd
+       sub-chunk cycle, the one-block x advance. */
+    short il = (short)(w_k / 16u);
+    device const block_q5_K_t * xb = (device const block_q5_K_t *)wrow;
+    for (uint step = 0; step < blocks; ++step, xblk += 32) {
+        float4x4 temp_a;
+        dequantize_q5_K(xb, il, temp_a);
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
         const float4 xv1 = float4(xp[1]);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
-            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = temp_a[i / 4][i % 4];
         }
         *(threadgroup float4 *)(sb_dst) = xv0;
         *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        xb = (il < 2) ? xb + 1 : xb;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
@@ -4628,49 +4642,26 @@ kernel void ch_q5_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
     const device float *xblk = xrow;
     const threadgroup half *lsa = sa + 64u * sg_r;
     const threadgroup half *lsb = sb + 64u * sg_t;
-    for (uint blk = 0; blk < blocks; ++blk, xblk += 32) {
-        const uint k = blk & 7u;
-        const device uchar *block = wrow + (size_t)(blk >> 3) * 176u;
-        const float d = (float)(*(const device half *)block);
-        const float dmin = (float)(*(const device half *)(block + 2u));
-        const device uchar *sc = block + 4u;
-        float a, mn;
-        if (k < 4u) {
-            a = (float)(sc[k] & 63u);
-            mn = (float)(sc[k + 4u] & 63u);
-        } else {
-            a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
-            mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
-        }
-        const float ds = d * a;
-        const float dm = dmin * mn;
-        const device uchar *qs = block + 48u + 32u * (k / 2u) + w_k;
-        const device uchar *qh = block + 16u + w_k;
-        const uint shift = 2u * (k / 2u) + (k % 2u);
-        float wv[16];
-        if (k % 2u == 0u) {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                const uint nib = qs[i] & 0x0fu;
-                const uint hb = (qh[i] >> shift) & 1u;
-                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
-            }
-        } else {
-            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
-                const uint nib = qs[i] >> 4;
-                const uint hb = (qh[i] >> shift) & 1u;
-                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
-            }
-        }
+    /* Verbatim port of the reference staging walk (b11695 mul_mm.metal:238):
+       one inlined dequantize per thread per 32-value step, the il even/odd
+       sub-chunk cycle, the one-block x advance. */
+    short il = (short)(w_k / 16u);
+    device const block_q5_K_t * xb = (device const block_q5_K_t *)wrow;
+    for (uint step = 0; step < blocks; ++step, xblk += 32) {
+        float4x4 temp_a;
+        dequantize_q5_K(xb, il, temp_a);
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
         const float4 xv1 = float4(xp[1]);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
-            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)temp_a[i / 4][i % 4];
         }
         *(threadgroup half4 *)(sb_dst) = half4(xv0);
         *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        xb = (il < 2) ? xb + 1 : xb;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {

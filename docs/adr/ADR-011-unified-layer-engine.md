@@ -1476,3 +1476,36 @@ three passes each; full prefill ~330 ms):
   prefill; the recorded follow-up is the same verbatim treatment for
   the reference's `kernel_mul_mm` K-quant staging (mul_mm.metal),
   which owns the 1.39x.
+
+- **The verbatim port of the reference mul_mm K-quant staging
+  (2026-11-23).** The six K-quant MMA kernels' staging sections are
+  now the pinned reference's own: `dequantize_q4_K/q5_K/q6_K` and
+  `get_scale_min_k4_just2` ported verbatim from b11695
+  `kernels/dequantize.h`, with the legacy `kernel_mul_mm` staging walk
+  (mul_mm.metal:151/238) — each staging thread dequantizes one
+  16-value sub-chunk per 32-value K-step through the inlined
+  function (Q6_K: **four packed u16 loads per 16 values** where our
+  first-cut form made 32 scalar byte loads; Q4_K/Q5_K keep the
+  nibble in its bit position with the exact d/16 and qh_val
+  compensations), the il even/odd sub-chunk cycle, and the one-block
+  x advance. ABI adaptations only: our buffers, row/tile clamps
+  (the reference clamps its lr0/lr1 identically), and our sb staging
+  (two float4 loads per step — the same 8 floats the reference's
+  2x4 load moves). The scatter addressing is unchanged: our
+  sa_dst form is the reference's 64*ib + 8*ly + lx verbatim
+  (verified algebraically identical before the port). The gemv
+  ports from the prior note are untouched.
+  **Verified:** all 64 metal gates green; the f16op gates print the
+  same worst relatives as the committed forms (7.08e-4/7.52e-4/
+  2.94e-4 — the dequantize values match to f32 exactness); the
+  Q4_K_M verify PASS with the same envelope (max |d| 1.045, texts
+  equal); the 9 pinned core gates and 25 e2e gates green on the
+  unchanged pins; spec-decode token-identical.
+  **The loaded in-model A/B is a wash** (interleaved pairs: port
+  467/462/492 vs committed 459/498 ms TTFT — overlapping bands, the
+  loaded machine cannot resolve it, per the twice-proven rule).
+  Shipped on the verbatim principle instead of a projection: this
+  is the reference's own staging, the code that runs llama.cpp's
+  279 ms prefill on this very artifact (both engines execute the
+  same 512-token shape). The quiet acceptance run decides the
+  request-level verdict on the 1.39x prefill gap.
