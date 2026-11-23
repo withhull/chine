@@ -1,0 +1,97 @@
+{
+  "schema_version": 5,
+  "run_id": "293ef54ab9720ad3b8c3a1d4d59899c4cca2c1c2bf5ca084ab5e70399cf52d27",
+  "started_unix_ms": 1795436333194,
+  "device_id": "a79b62e9051f9e98755dd3a9e2dce85a545c54dc07126e03c17bf5f31a05f55f",
+  "artifact_id": "83967f49c8e27f2d150e7efa3551d3ca6c0fcf76676fbd2d6ba45f784222f0e7",
+  "plan_id": "de37c2963e8aa6a0a44547b9bdb21571243db028155036187db7f789aa46ce81",
+  "engine": {
+    "engine": "llama.cpp",
+    "certified": false,
+    "backend_abi_version": 1,
+    "worker_protocol_version": 8,
+    "kernels": [
+      "llama.cpp:ngl=99:metal"
+    ],
+    "build_id": "chine 0.2.0 (release)"
+  },
+  "workload": {
+    "suite": "standard-v1",
+    "input_tokens": 512,
+    "output_tokens": 256,
+    "repetitions": 3,
+    "prompt_set": "frozen-synthetic-ids"
+  },
+  "cache_state": "cache-uncontrolled",
+  "samples": [
+    {
+      "prompt_id": "std-512-256-r0",
+      "ttft_ms": 973.865833,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 5397.8865000000005,
+      "gap_p95_ms": 17.434667,
+      "gap_max_ms": 19.153208000000003,
+      "footprint_peak_bytes": 259639336,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 57.644578646318294,
+      "worker_total_ms": 4731.480375,
+      "worker_decode_ms": 4423.659709,
+      "notes": []
+    },
+    {
+      "prompt_id": "std-512-256-r1",
+      "ttft_ms": 653.6565410000001,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 5075.886750000001,
+      "gap_p95_ms": 17.499375,
+      "gap_max_ms": 18.8785,
+      "footprint_peak_bytes": 259164200,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 57.6673929648664,
+      "worker_total_ms": 4757.131041,
+      "worker_decode_ms": 4421.909624999999,
+      "notes": []
+    },
+    {
+      "prompt_id": "std-512-256-r2",
+      "ttft_ms": 681.5297919999999,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 5101.687457999999,
+      "gap_p95_ms": 17.399708,
+      "gap_max_ms": 19.182041,
+      "footprint_peak_bytes": 259180584,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 57.694971085359775,
+      "worker_total_ms": 4769.339416,
+      "worker_decode_ms": 4419.795958,
+      "notes": []
+    }
+  ],
+  "summary": {
+    "ttft_median_ms": 681.5297919999999,
+    "ttft_p95_ms": 973.865833,
+    "throughput_median_tps": 50.17947534174486,
+    "throughput_decode_median_tps": 57.6673929648664,
+    "gap_p95_ms": 17.499375,
+    "completion_rate": 1.0,
+    "footprint_peak_bytes": 259639336
+  },
+  "performance_class": "interactive",
+  "confidence": "estimated",
+  "slow_mode_accepted": false,
+  "caveats": [
+    "suite standard-v1 frozen: frozen workload definition; prompts are synthetic token-id sets derived deterministically from prompt ids, so no private user prompts are collected; standard measurement shape: 512 input / 256 output tokens with exact recorded prompt ids and cache conditions; cache labels are explicit: cold-declared, warm, prefix-hit, or cache-uncontrolled; a first run is not automatically a cold-storage run; reference inputs are compared only through the four-way identity in PRD section 20.1 (R0/R1/T0/T1); draft tokens are never reported as final throughput",
+    "all throughput figures count model tokens from the worker's Done frame: throughput_median_tps is end-to-end (generated tokens / total request time, including TTFT) and throughput_decode_median_tps is (generated - 1) over the worker's first-to-last sampled-token span; ttft_ms, visible_chunks, and the gap percentiles describe the visible stream (user experience), not token production",
+    "experimental backend llama.cpp: uncertified kernels; real weights executed, performance and quality unmeasured",
+    "logical read traffic is measured weight bytes read via positioned reads; not physical SSD counters",
+    "footprint sampled from proc_pid_rusage at ~50ms cadence",
+    "cold-start and warm-cache are separate labels; this run's cache state is declared explicitly",
+    "cache state was not controlled or established; treated as uncontrolled"
+  ]
+}

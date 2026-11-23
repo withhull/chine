@@ -230,7 +230,7 @@ native/llamaref     narrow C shim over pinned llama.cpp
 kernels/            kernel work-package registry
 adapters/           model-family adapter specs
 benchmarks/         standard-v1 workload and per-tier results
-docs/adr/           architecture decisions (ADR-001..013)
+docs/adr/           architecture decisions (ADR-001..014)
 scripts/            build, test, demo, fetch-llama, bench-baseline
 ```
 
