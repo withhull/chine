@@ -3116,80 +3116,109 @@ kernel void ch_q4_k_gemv(device const uchar *w [[buffer(0)]],
                          uint tg [[threadgroup_position_in_grid]],
                          uint sg [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]]) {
-    const uint blocks = cols / 256u;
-    const size_t row_bytes = (size_t)blocks * 144u;
-    const uint first = (tg * CH_Q8_SG + sg) * CH_Q8_ROWS;
-    if (first >= rows) {
+    /* Verbatim port of llama.cpp b11695 kernel_mul_mv_q4_K_f32_impl
+     * (ggml/src/ggml-metal/kernels/mul_mv.metal:1511), pinned by revision.
+     * Lane decomposition: ix = tiisg/8 (super-block stride 4), it =
+     * tiisg%8 -> iq = it/4, ir = it%4; each lane holds 32 x values in
+     * 16+16 SCALAR registers (yl/yh), re-read per block iteration; the
+     * W side loads qs as uint16 pairs so one AND serves two values (the
+     * nibble stays in its bit position; 1/256 and 1/16 exact
+     * power-of-two corrections recover it), and the affine min term
+     * subtracts once via the per-block sumy. Scales decode through the
+     * reference's u16 kmask construction, byte-for-byte their
+     * expressions. N_R0_Q4_K = 2 rows per simdgroup (impl.h), NSG = 2
+     * (64-thread groups). ABI-level adaptations only: our buffers and
+     * row-tail guards on the loads (the reference guards only the
+     * writes; our buffers are bounds-checked, so tail rows break out
+     * instead of reading past the end). */
+    constexpr uint16_t kmask1 = 0x3f3f;
+    constexpr uint16_t kmask2 = 0x0f0f;
+    constexpr uint16_t kmask3 = 0xc0c0;
+
+    const int nb = (int)(cols / 256u);
+    const size_t row_bytes = (size_t)nb * 144u;
+
+    const short ix = (short)(lane / 8u);  /* 0..3 */
+    const short it = (short)(lane % 8u);  /* 0..7 */
+    const short iq = it / 4;              /* 0 or 1 */
+    const short ir = it % 4;              /* 0..3 */
+
+    const int first_row = (int)((tg * 2u + sg) * 2u);
+    if (first_row >= (int)rows) {
         return;
     }
-    const uint k = lane % 8u;        /* 32-value slice of the super-block */
-    const uint lane_sb = lane / 8u; /* which of the 4 super-blocks this step */
-    const bool hi = k % 2u == 1u;
 
-    float acc[CH_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (uint b = lane_sb; b < blocks; b += 4u) {
-        const device packed_float4 *xv =
-            (const device packed_float4 *)(x + (size_t)b * 256u + k * 32u);
-        float4 x0 = float4(xv[0]);
-        float4 x1 = float4(xv[1]);
-        float4 x2 = float4(xv[2]);
-        float4 x3 = float4(xv[3]);
-        float4 x4 = float4(xv[4]);
-        float4 x5 = float4(xv[5]);
-        float4 x6 = float4(xv[6]);
-        float4 x7 = float4(xv[7]);
-        for (uint r = 0; r < CH_Q8_ROWS; ++r) {
-            const uint row = first + r;
-            if (row >= rows) {
+    device const uchar *base = w + (size_t)first_row * row_bytes;
+
+    float yl[16];
+    float yh[16];
+
+    float sumf[2] = {0.f, 0.f};
+
+    device const float * y4 = x + (size_t)ix * 256u + 64u * (uint)iq + 8u * (uint)ir;
+
+    uint16_t sc16[4];
+    thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
+
+    for (int ib = ix; ib < nb; ib += 4) {
+        float4 sumy = {0.f, 0.f, 0.f, 0.f};
+
+        for (short i = 0; i < 8; ++i) {
+            yl[i + 0] = y4[i + 0]; sumy[0] += yl[i + 0];
+            yl[i + 8] = y4[i + 32]; sumy[1] += yl[i + 8];
+            yh[i + 0] = y4[i + 128]; sumy[2] += yh[i + 0];
+            yh[i + 8] = y4[i + 160]; sumy[3] += yh[i + 8];
+        }
+
+        device const uchar * blk = base + (size_t)ib * 144u;
+        device const uint16_t * sc = (device const uint16_t *)(blk + 4u) + iq;
+        device const uint16_t * q1 = (device const uint16_t *)(blk + 16u) + 16 * iq + 4 * ir;
+        device const half * dh = (device const half *)blk;
+
+        for (short row = 0; row < 2; ++row) {
+            if (first_row + row >= (int)rows) {
                 break;
             }
-            const device uchar *blk = w + (size_t)row * row_bytes + (size_t)b * 144u;
-            const float d = (float)(*(const device half *)blk);
-            const float dmin = (float)(*(const device half *)(blk + 2u));
-            const device uchar *sc = blk + 4u;
-            float a, mn;
-            if (k < 4u) {
-                a = (float)(sc[k] & 63u);
-                mn = (float)(sc[k + 4u] & 63u);
-            } else {
-                a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
-                mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
+
+            sc16[0] = sc[0] & kmask1;
+            sc16[1] = sc[2] & kmask1;
+            sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
+            sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+
+            device const uint16_t * q2 = q1 + 32;
+
+            float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+            float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+
+            CH_UNROLL for (short i = 0; i < 4; ++i) {
+                acc1[0] += yl[2*i + 0] * (q1[i] & 0x000F);
+                acc1[1] += yl[2*i + 1] * (q1[i] & 0x0F00);
+                acc1[2] += yl[2*i + 8] * (q1[i] & 0x00F0);
+                acc1[3] += yl[2*i + 9] * (q1[i] & 0xF000);
+                acc2[0] += yh[2*i + 0] * (q2[i] & 0x000F);
+                acc2[1] += yh[2*i + 1] * (q2[i] & 0x0F00);
+                acc2[2] += yh[2*i + 8] * (q2[i] & 0x00F0);
+                acc2[3] += yh[2*i + 9] * (q2[i] & 0xF000);
             }
-            const float ds = d * a;
-            const float dm = dmin * mn;
-            const device uchar *qs = blk + 16u + 32u * (k / 2u);
-            /* 32 values as eight packed 4-byte loads; the affine dequant
-             * keeps every product inside the f16 domain when staged. */
-            const device packed_uchar4 *qv = (const device packed_uchar4 *)qs;
-            float4 q0, q1, q2, q3, q4, q5, q6, q7;
-            if (!hi) {
-                q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu) * ds - dm;
-                q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu) * ds - dm;
-                q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu) * ds - dm;
-                q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu) * ds - dm;
-                q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu) * ds - dm;
-                q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu) * ds - dm;
-                q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu) * ds - dm;
-                q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu) * ds - dm;
-            } else {
-                q0 = float4(uchar4(qv[0]) >> 4) * ds - dm;
-                q1 = float4(uchar4(qv[1]) >> 4) * ds - dm;
-                q2 = float4(uchar4(qv[2]) >> 4) * ds - dm;
-                q3 = float4(uchar4(qv[3]) >> 4) * ds - dm;
-                q4 = float4(uchar4(qv[4]) >> 4) * ds - dm;
-                q5 = float4(uchar4(qv[5]) >> 4) * ds - dm;
-                q6 = float4(uchar4(qv[6]) >> 4) * ds - dm;
-                q7 = float4(uchar4(qv[7]) >> 4) * ds - dm;
-            }
-            acc[r] += dot(q0, x0) + dot(q1, x1) + dot(q2, x2) + dot(q3, x3)
-                    + dot(q4, x4) + dot(q5, x5) + dot(q6, x6) + dot(q7, x7);
+
+            sumf[row] += dh[0] * ((acc1[0] + 1.f/256.f * acc1[1]) * sc8[0] +
+                                  (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f +
+                                  (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4] +
+                                  (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f) -
+                         dh[1] * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
+
+            q1 += row_bytes/2;
+            sc += row_bytes/2;
+            dh += row_bytes/2;
         }
+
+        y4 += 4 * 256;
     }
-    for (uint r = 0; r < CH_Q8_ROWS; ++r) {
-        const float total = simd_sum(acc[r]);
-        const uint row = first + r;
-        if (lane == 0u && row < rows) {
-            y[row] = total;
+
+    for (int row = 0; row < 2 && first_row + row < (int)rows; ++row) {
+        float sum_all = simd_sum(sumf[row]);
+        if (lane == 0u) {
+            y[first_row + row] = sum_all;
         }
     }
 }
@@ -3641,70 +3670,92 @@ kernel void ch_q6_k_gemv(device const uchar *w [[buffer(0)]],
                          uint tg [[threadgroup_position_in_grid]],
                          uint sg [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]]) {
-    const uint blocks = cols / 256u;
-    const size_t row_bytes = (size_t)blocks * 210u;
-    const uint first = (tg * CH_Q8_SG + sg) * CH_Q8_ROWS;
-    if (first >= rows) {
+    /* Verbatim port of llama.cpp b11695 kernel_mul_mv_q6_K_f32_impl
+     * (ggml/src/ggml-metal/kernels/mul_mv.metal:1763), pinned by
+     * revision. Lane decomposition: tid = tiisg/2, ix = tiisg%2
+     * (super-block stride 2); ip = tid/8, il = tid%8, l0 = 4*il,
+     * is = 8*ip + l0/16; each lane holds 16 x values in SCALAR yl
+     * registers, re-read per block iteration; the W side extracts the
+     * 6-bit codes inline in the multiply with the reference's kmask
+     * bit patterns and applies the int8 scale per 16-value run at the
+     * end. N_R0_Q6_K = 2 (impl.h), NSG = 2 (64-thread groups).
+     * ABI-level adaptations only: our buffers and row-tail guards on
+     * the loads (the reference guards only the writes). */
+    constexpr uint8_t kmask1 = 0x03;
+    constexpr uint8_t kmask2 = 0x0C;
+    constexpr uint8_t kmask3 = 0x30;
+    constexpr uint8_t kmask4 = 0xC0;
+
+    const int nb = (int)(cols / 256u);
+    const size_t row_bytes = (size_t)nb * 210u;
+
+    const int first_row = (int)((tg * 2u + sg) * 2u);
+    if (first_row >= (int)rows) {
         return;
     }
-    const uint k = lane % 16u;      /* 16-value slice of the super-block */
-    const uint lane_sb = lane / 16u; /* which of the 2 super-blocks this step */
-    const uint c = k / 8u;
-    const uint jj = (k % 8u) / 2u;
-    const bool hi = jj >= 2u;
-    const uint l0 = 16u * (k % 2u);
-    const uint ql0 = 64u * c + 32u * (jj % 2u) + l0;
-    const uint qh0 = 32u * c + l0;
-    const uint shift = 2u * jj;
 
-    float acc[CH_Q8_ROWS] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (uint b = lane_sb; b < blocks; b += 2u) {
-        const device packed_float4 *xv =
-            (const device packed_float4 *)(x + (size_t)b * 256u + k * 16u);
-        float4 x0 = float4(xv[0]);
-        float4 x1 = float4(xv[1]);
-        float4 x2 = float4(xv[2]);
-        float4 x3 = float4(xv[3]);
-        for (uint r = 0; r < CH_Q8_ROWS; ++r) {
-            const uint row = first + r;
-            if (row >= rows) {
+    device const uchar *base = w + (size_t)first_row * row_bytes;
+
+    float sumf[2] = {0.f, 0.f};
+
+    float yl[16];
+
+    const short tid = (short)(lane / 2u);
+    const short ix  = (short)(lane % 2u);
+    const short ip  = tid/8;         /* 0 or 1 */
+    const short il  = tid%8;
+    const short l0  = 4*il;
+    const short is  = 8*ip + l0/16;  /* 0..15 */
+
+    const short y_offset   = 128*ip + l0;
+    const short q_offset_l =  64*ip + l0;
+    const short q_offset_h =  32*ip + l0;
+
+    for (int i = ix; i < nb; i += 2) {
+        device const uchar * blk = base + (size_t)i * 210u;
+        device const uint8_t * q1 = blk + q_offset_l;
+        device const uint8_t * q2 = q1 + 32;
+        device const uint8_t * qh = blk + 128u + q_offset_h;
+        device const int8_t  * sc = (device const int8_t *)(blk + 192u) + is;
+        device const half    * dh = (device const half *)(blk + 208u);
+
+        device const float * yy = x + (size_t)i * 256u + (size_t)y_offset;
+
+        for (short l = 0; l < 4; ++l) {
+            yl[4*l + 0] = yy[l +  0];
+            yl[4*l + 1] = yy[l + 32];
+            yl[4*l + 2] = yy[l + 64];
+            yl[4*l + 3] = yy[l + 96];
+        }
+
+        for (short row = 0; row < 2; ++row) {
+            if (first_row + row >= (int)rows) {
                 break;
             }
-            const device uchar *blk = w + (size_t)row * row_bytes + (size_t)b * 210u;
-            const float d = (float)(*(const device half *)(blk + 208u));
-            const float s = (float)((const device int8_t *)(blk + 192u))[k];
-            const float ds = d * s;
-            const device packed_uchar4 *qlv = (const device packed_uchar4 *)(blk + ql0);
-            const device packed_uchar4 *qhv = (const device packed_uchar4 *)(blk + 128u + qh0);
-            float4 q0, q1, q2, q3;
-            if (!hi) {
-                q0 = float4(uchar4(qlv[0]) & (uchar4)0x0fu);
-                q1 = float4(uchar4(qlv[1]) & (uchar4)0x0fu);
-                q2 = float4(uchar4(qlv[2]) & (uchar4)0x0fu);
-                q3 = float4(uchar4(qlv[3]) & (uchar4)0x0fu);
-            } else {
-                q0 = float4(uchar4(qlv[0]) >> 4);
-                q1 = float4(uchar4(qlv[1]) >> 4);
-                q2 = float4(uchar4(qlv[2]) >> 4);
-                q3 = float4(uchar4(qlv[3]) >> 4);
+
+            float4 sums = {0.f, 0.f, 0.f, 0.f};
+
+            CH_UNROLL for (short l = 0; l < 4; ++l) {
+                sums[0] += yl[4*l + 0] * ((int8_t)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
+                sums[1] += yl[4*l + 1] * ((int8_t)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
+                sums[2] += yl[4*l + 2] * ((int8_t)((q1[l]  >> 4) | ((qh[l] & kmask3) << 0)) - 32);
+                sums[3] += yl[4*l + 3] * ((int8_t)((q2[l]  >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
             }
-            const uchar4 h0 = uchar4(qhv[0]);
-            const uchar4 h1 = uchar4(qhv[1]);
-            const uchar4 h2 = uchar4(qhv[2]);
-            const uchar4 h3 = uchar4(qhv[3]);
-            q0 += float4(h0 >> shift & (uchar4)3u) * 16.0f;
-            q1 += float4(h1 >> shift & (uchar4)3u) * 16.0f;
-            q2 += float4(h2 >> shift & (uchar4)3u) * 16.0f;
-            q3 += float4(h3 >> shift & (uchar4)3u) * 16.0f;
-            acc[r] += ds * (dot(q0 - 32.0f, x0) + dot(q1 - 32.0f, x1)
-                          + dot(q2 - 32.0f, x2) + dot(q3 - 32.0f, x3));
+
+            sumf[row] += dh[0] * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
+
+            q1 += row_bytes;
+            q2 += row_bytes;
+            qh += row_bytes;
+            sc += row_bytes;
+            dh += row_bytes/2;
         }
     }
-    for (uint r = 0; r < CH_Q8_ROWS; ++r) {
-        const float total = simd_sum(acc[r]);
-        const uint row = first + r;
-        if (lane == 0u && row < rows) {
-            y[row] = total;
+
+    for (int row = 0; row < 2 && first_row + row < (int)rows; ++row) {
+        float sum_all = simd_sum(sumf[row]);
+        if (lane == 0u) {
+            y[first_row + row] = sum_all;
         }
     }
 }

@@ -1423,3 +1423,36 @@ three passes each; full prefill ~330 ms):
   kernels hold 0.866/1.39 against llama's design, the faithful-port
   follow-up is speculative until measured, and both bars on the
   Q4_K_M remain the open items of the K-quant arc.
+
+- **The verbatim port of the reference K-quant gemv lane decomposition
+  (2026-11-23): the measured win the invented forms could not find.**
+  After three quiet-reversed attempts (the 64-value lanes, the end-form,
+  the staged MMA), the recorded follow-up was executed exactly as
+  named: `ch_q4_k_gemv` and `ch_q6_k_gemv` are now **verbatim ports of
+  llama.cpp b11695 `kernel_mul_mv_q4_K_f32_impl` / `q6_K_f32_impl`**
+  (mul_mv.metal:1511 / :1763, fetched at the pinned revision), with
+  `N_R0_Q4_K = N_R0_Q6_K = 2` from ggml-metal-impl.h and NSG = 2
+  (64-thread groups; the wrapper grid moves to 4 rows per group).
+  The lane decomposition is theirs, unadapted: Q4_K's ix/iq/ir split
+  holding 32 x values in 16+16 SCALAR registers with uint16 qs pairs
+  (one AND serves two values; the 1/256 and 1/16 exact power-of-two
+  corrections recover the bit positions), the u16 kmask scale
+  construction, and the sumy min-term end-form; Q6_K's tid/ix/ip/il
+  split with inline 6-bit extraction and the int8 scale applied per
+  16-value run. ABI-level adaptations only: our buffers, and row-tail
+  guards on the loads (the reference guards only its writes — our
+  buffers are bounds-checked). Q5_K's gemv stays the committed form
+  (4% of the decode profile; the user named the two dominant types).
+  **Verified:** both ports pass their CPU gates first try; all 16
+  K-quant gates green; the Q4_K_M verify PASS with the same envelope
+  (max |d| 1.045, texts equal); the 9 pinned core gates and 25 e2e
+  gates green on the unchanged pins; spec-decode token-identical.
+  **In-model, two interleaved pairs, controls stable:** head
+  2.87-3.29 -> **2.49-2.55** (-15%), q6_k 6144x1024 -16%,
+  q6_k 1024x3584 -20%, q4_k shapes -9..-19%, total GPU busy
+  **10.82-10.87 -> 9.16-9.37 (-15%)** — every band non-overlapping,
+  reproduced in both pairs, the first change in the arc whose gains
+  sit far outside the noise floor. The quiet acceptance run decides
+  the request-level verdict on the 0.866 decode and 1.39x prefill
+  gaps (the port touches decode only; prefill's MMA kernels are
+  unchanged from the committed form).

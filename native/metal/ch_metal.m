@@ -2059,7 +2059,7 @@ int ch_metal_q4_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
             return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"q4_k_gemv: device simd width %lu != 32", (unsigned long)lanes]);
         }
-        const NSUInteger rows_per_tg = 8;
+        const NSUInteger rows_per_tg = 4; /* N_R0 = 2 rows per simdgroup, NSG = 2 (the reference grid) */
         NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
@@ -2110,7 +2110,7 @@ int ch_metal_q6_k_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x
             return ch_fail(err, err_cap, CH_METAL_ERR_INTERNAL,
                            [NSString stringWithFormat:@"q6_k_gemv: device simd width %lu != 32", (unsigned long)lanes]);
         }
-        const NSUInteger rows_per_tg = 8;
+        const NSUInteger rows_per_tg = 4; /* N_R0 = 2 rows per simdgroup, NSG = 2 (the reference grid) */
         NSUInteger groups = ((NSUInteger)rows + rows_per_tg - 1) / rows_per_tg;
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
