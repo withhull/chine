@@ -46,7 +46,7 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Model | Decode, paired | First token, paired |
 | --- | --- | --- |
 | Qwen3.5-0.8B | 0.99–1.26× (two idle runs + a rerun; 84.2–84.3 vs 66.8–84.7 tok/s) | 94–106% — parity |
-| Qwen3.5-2B (3 GiB budget) | 0.956–1.030 across four runs — parity | 94% with f32-operand GEMMs, **98%** on the f16-operand profile (0.601 vs 0.587 s, quiet AC run) |
+| Qwen3.5-2B (3 GiB budget) | 0.956–1.030 across four runs, **0.996 on the reproduction** (40.42–40.52 vs llama's 40.62–40.63, the tightest control band recorded on any model) — parity | 94% with f32-operand GEMMs, 98% on the f16-operand profile, **~101% on the reproduction** (585 vs 588 ms, paired 0.99) |
 | Qwen3-1.7B (4 GiB budget) | **0.990 (0.989–0.991)** — the tightest paired band recorded on any model (both engines ± 0.05 tok/s) | **95% (588 vs 559 ms, paired 1.05×)** — the dense family one size up, zero engine changes; both Phase 1 bars met |
 | Qwen3-0.6B | not measurable in this harness (the frozen prompt hits EOS after 1–2 tokens on both engines) | 83% (0.254 vs 0.212 s) |
 | Gemma 3 1B (f16 KV, ignore-EOS) | **1.067 median (0.977–1.197)** — split-K decode attention: 74.2 tok/s steady, up from 65.0; ≥ 0.9 even against llama.cpp's fastest round | **96% (301 vs 289 ms, paired 1.04×)** — prefill chunks of 512 tokens: 324 → 301 ms; **both Phase 1 bars met in this run** |
@@ -54,8 +54,8 @@ per row, is [docs/certification-matrix.md](docs/certification-matrix.md).
 | Qwen3.5-0.8B **Q4_K_M** (K-quants: Q4_K + Q6_K + Q5_K + F32 GDN projections) | **1.020 (1.028/1.020/1.008) — parity-plus, reproduced across three quiet runs**: 112.71/113.03/111.81 vs 109.62/110.79/110.94. The arc: first-cut 0.866 → three invented/derived forms quiet-reverted → **the verbatim port of the reference lane decomposition** (+17.2% decode, then held) | **104% (267.7 vs 279 ms, paired 0.96 — ahead in every pair)**: the grouped prefill profile relocated the gap to the unsloth F32 GDN projections on the scalar path (171.8 ms = 37.8% of prefill GPU, absent from the Q8_0 control); F32 admitted to the MMA fast path — the class collapses to 6.4 ms and the quiet TTFT moved 384 → 268 ms. **Both Phase 1 bars met; the fifth of five pins** |
 
 The Phase 1 bar is ≥ 90% of llama.cpp for decode and prefill. Both bars
-are now met on every one of the five pins: the 0.8B (reproduced), the
-2B (decode parity-or-ahead, prefill 98% with reproduction pending),
+are met on every one of the five pins: the 0.8B (reproduced), the
+2B (decode parity 0.996, prefill ~101% — reproduced across two runs),
 Gemma 3 (decode worst pair 0.977, prefill 96%), its Q4_0 pin (decode
 0.931–0.938 with margin, prefill 92%), and the Q4_K_M K-quant pin
 (decode 1.020 parity-plus, prefill 104% — ahead in every pair) —
