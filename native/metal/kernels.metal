@@ -4783,3 +4783,285 @@ kernel void ch_f32_gemm(device const float *w [[buffer(0)]],
         }
     }
 }
+
+
+/* ---------------- F32 mul_mm MMA (2026-11-23) ----------------
+ * The unsloth K-quant artifacts store the small GDN projections
+ * (ssm_alpha/beta [rows,16], ssm_conv1d) as F32 matrices; the mid-batch
+ * scalar gemm path cost 171.8 ms of a 512-token prefill on the Q4_K_M
+ * pin (37.8% of prefill GPU - the class absent from the Q8_0 control,
+ * whose GDN projections are Q8_0 on the MMA path). Same 64x32
+ * tile/mma shell as the K-quant kernels; the staging is the reference's
+ * F32 branch (b11695 mul_mm.metal: `is_same<T0_4x4, block_q>` - direct
+ * element reads, no dequantize) with per-element bounds guards so any
+ * cols multiple of 8 works (cols 16 and 6144 both covered); K positions
+ * beyond cols stage zero so the matrix-unit tiles stay exact. */
+
+kernel void ch_f32_gemm_mma(device const float *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            constant uint &rows [[buffer(3)]],
+                            constant uint &cols [[buffer(4)]],
+                            constant uint &batch [[buffer(5)]],
+                            constant uint &x_off [[buffer(6)]],
+                            constant uint &y_off [[buffer(7)]],
+                            uint tg [[threadgroup_position_in_grid]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sa[CH_MMA_ROWS * 32u];
+    threadgroup float sb[CH_MMA_TOK * 32u];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint steps = (cols + 31u) / 32u;
+    const size_t row_elems = (size_t)cols;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device float *wrow =
+        w + (size_t)min(row0 + w_r, rows - 1u) * row_elems;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow =
+        x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * row_elems + x_k;
+
+    threadgroup float *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup float *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup float *lsa = sa + 64u * sg_r;
+    const threadgroup float *lsb = sb + 64u * sg_t;
+    for (uint step = 0; step < steps; ++step, xblk += 32) {
+        /* Direct F32 staging with per-element bounds guards (the
+         * reference's element-wise branch); zero beyond cols keeps the
+         * 32-value tile exact for any cols multiple of 8. */
+        const int rem_w = (int)cols - (int)(32u * step + w_k);
+        float wv[16];
+        const device float *wp = wrow + 32u * step + w_k;
+        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+            wv[i] = (int)i < rem_w ? wp[i] : 0.0f;
+        }
+        const int rem_x = (int)cols - (int)(32u * step + x_k);
+        float4 xv0 = 0.0f;
+        float4 xv1 = 0.0f;
+        if (rem_x >= 8) {
+            xv0 = float4(xblk[0], xblk[1], xblk[2], xblk[3]);
+            xv1 = float4(xblk[4], xblk[5], xblk[6], xblk[7]);
+        } else if (rem_x > 0) {
+            float v[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            for (int j = 0; j < rem_x; ++j) {
+                v[j] = xblk[j];
+            }
+            xv0 = float4(v[0], v[1], v[2], v[3]);
+            xv1 = float4(v[4], v[5], v[6], v[7]);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = wv[i];
+        }
+        *(threadgroup float4 *)(sb_dst) = xv0;
+        *(threadgroup float4 *)(sb_dst + 4u) = xv1;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_float8x8 ma[4];
+            simdgroup_float8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *ot = sa;
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            simdgroup_store(mc[j][i], ot + (sg_t + j) * 8u * CH_MMA_ROWS + (sg_r + i) * 8u,
+                            CH_MMA_ROWS);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint idx = tid; idx < CH_MMA_ROWS * CH_MMA_TOK; idx += 128u) {
+        const uint r = idx % CH_MMA_ROWS;
+        const uint b = idx / CH_MMA_ROWS;
+        if (row0 + r < rows && b < tile_batch) {
+            y[y_off + (size_t)(tok0 + b) * rows + row0 + r] = ot[b * CH_MMA_ROWS + r];
+        }
+    }
+}
+
+/* The f16-operand variant (metal-f16-act): identical staging with half
+ * stores. */
+kernel void ch_f32_gemm_mma_f16op(device const float *w [[buffer(0)]],
+                                  device const float *x [[buffer(1)]],
+                                  device float *y [[buffer(2)]],
+                                  constant uint &rows [[buffer(3)]],
+                                  constant uint &cols [[buffer(4)]],
+                                  constant uint &batch [[buffer(5)]],
+                                  constant uint &x_off [[buffer(6)]],
+                                  constant uint &y_off [[buffer(7)]],
+                                  uint tg [[threadgroup_position_in_grid]],
+                                  uint tid [[thread_position_in_threadgroup]],
+                                  uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half sa[CH_MMA_ROWS * 32u];
+    threadgroup half sb[CH_MMA_TOK * 32u];
+    threadgroup float edge_frag[4][64];
+
+    const uint token_tiles = (batch + CH_MMA_TOK - 1u) / CH_MMA_TOK;
+    const uint tok0 = (tg % token_tiles) * CH_MMA_TOK;
+    if (tok0 >= batch) {
+        return;
+    }
+    const uint tile_batch = min(batch - tok0, CH_MMA_TOK);
+    const uint row0 = (tg / token_tiles) * CH_MMA_ROWS;
+    const uint steps = (cols + 31u) / 32u;
+    const size_t row_elems = (size_t)cols;
+
+    const uint w_r = tid / 2u;
+    const uint w_k = (tid % 2u) * 16u;
+    const device float *wrow =
+        w + (size_t)min(row0 + w_r, rows - 1u) * row_elems;
+    const uint x_t = tid / 4u;
+    const uint x_k = (tid % 4u) * 8u;
+    const device float *xrow =
+        x + x_off + (size_t)(tok0 + min(x_t, tile_batch - 1u)) * row_elems + x_k;
+
+    threadgroup half *sa_dst = sa + 64u * ((w_k / 8u) * 8u + w_r / 8u) + (w_r % 8u);
+    threadgroup half *sb_dst = sb + 64u * ((x_k / 8u) * 4u + x_t / 8u) + 8u * (x_t % 8u);
+
+    const uint sg_r = (sg % 2u) * 4u;
+    const uint sg_t = (sg / 2u) * 2u;
+    simdgroup_float8x8 mc[2][4];
+    for (uint j = 0; j < 2u; ++j) {
+        for (uint i = 0; i < 4u; ++i) {
+            mc[j][i] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    const device float *xblk = xrow;
+    const threadgroup half *lsa = sa + 64u * sg_r;
+    const threadgroup half *lsb = sb + 64u * sg_t;
+    for (uint step = 0; step < steps; ++step, xblk += 32) {
+        const int rem_w = (int)cols - (int)(32u * step + w_k);
+        float wv[16];
+        const device float *wp = wrow + 32u * step + w_k;
+        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+            wv[i] = (int)i < rem_w ? wp[i] : 0.0f;
+        }
+        const int rem_x = (int)cols - (int)(32u * step + x_k);
+        float4 xv0 = 0.0f;
+        float4 xv1 = 0.0f;
+        if (rem_x >= 8) {
+            xv0 = float4(xblk[0], xblk[1], xblk[2], xblk[3]);
+            xv1 = float4(xblk[4], xblk[5], xblk[6], xblk[7]);
+        } else if (rem_x > 0) {
+            float v[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            for (int j = 0; j < rem_x; ++j) {
+                v[j] = xblk[j];
+            }
+            xv0 = float4(v[0], v[1], v[2], v[3]);
+            xv1 = float4(v[4], v[5], v[6], v[7]);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        CH_UNROLL for (ushort i = 0; i < 16u; ++i) {
+            sa_dst[64 * 8 * (i / 8) + 8 * (i % 8)] = (half)wv[i];
+        }
+        *(threadgroup half4 *)(sb_dst) = half4(xv0);
+        *(threadgroup half4 *)(sb_dst + 4u) = half4(xv1);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        CH_UNROLL for (ushort kb = 0; kb < 4u; ++kb) {
+            simdgroup_half8x8 ma[4];
+            simdgroup_half8x8 mb[2];
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                simdgroup_load(ma[i], lsa + 64 * (8 * kb + i), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                simdgroup_load(mb[j], lsb + 64 * (4 * kb + j), 8);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            CH_UNROLL for (ushort j = 0; j < 2u; ++j) {
+                CH_UNROLL for (ushort i = 0; i < 4u; ++i) {
+                    simdgroup_multiply_accumulate(mc[j][i], mb[j], ma[i], mc[j][i]);
+                }
+            }
+        }
+    }
+
+    if (row0 + CH_MMA_ROWS <= rows && tile_batch == CH_MMA_TOK) {
+        device float *c = y + y_off + (size_t)(tok0 + sg_t * 8u) * rows + row0 + sg_r * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                simdgroup_store(mc[j][i], c + (size_t)j * 8u * rows + i * 8u, rows);
+            }
+        }
+        return;
+    }
+    const uint tok_end = tok0 + tile_batch;
+    {
+        threadgroup float * const edge_frag_mine = edge_frag[sg];
+        const uint rb_base = row0 + sg_r * 8u;
+        const uint tb_base = tok0 + sg_t * 8u;
+        for (uint j = 0; j < 2u; ++j) {
+            for (uint i = 0; i < 4u; ++i) {
+                const uint rb = rb_base + i * 8u;
+                const uint tb = tb_base + j * 8u;
+                if (rb >= rows || tb >= tok_end) {
+                    continue;
+                }
+                if (rb + 8u <= rows && tb + 8u <= tok_end) {
+                    simdgroup_store(mc[j][i], y + y_off + (size_t)tb * rows + rb, rows);
+                } else {
+                    simdgroup_store(mc[j][i], edge_frag_mine, 8);
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                    for (uint lane = tid % 32u; lane < 64u; lane += 32u) {
+                        const uint fr = lane / 8u;
+                        const uint ft = lane % 8u;
+                        if (tb + fr < tok_end && rb + ft < rows) {
+                            y[y_off + (size_t)(tb + fr) * rows + rb + ft] =
+                                edge_frag_mine[fr * 8u + ft];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

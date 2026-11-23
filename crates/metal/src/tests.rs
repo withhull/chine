@@ -4442,3 +4442,151 @@ fn f32_gemv_and_gemm_match_the_scalar_reference() {
     }
 }
 
+#[test]
+fn f32_gemm_mma_matches_the_cpu_reference_across_real_shapes() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // The unsloth K-quant GDN projection shapes ([rows,16] ssm_alpha/
+    // beta, [4,6144] conv1d) plus tails and the full 512 batch.
+    for (rows, cols, batch) in [
+        (16usize, 16usize, 16usize),
+        (1024, 16, 32),
+        (4, 6144, 64),
+        (100, 16, 77),
+        (1024, 16, 512),
+        (64, 16, 3),
+        (3584, 1024, 16),
+    ] {
+        let w: Vec<f32> = (0..rows * cols)
+            .map(|i| ((Rng(900 + i as u64).next() % 2000) as f32) / 31.0 - 32.0)
+            .collect();
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len() * 4, true).unwrap();
+        wb.upload(0, &f32_bytes(&w)).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.f32_gemm_mma(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert!(
+            got[..y_off].iter().all(|v| *v == 0.0),
+            "nothing before y_off"
+        );
+        for b in 0..batch {
+            let cpu: Vec<f32> = (0..rows)
+                .map(|r| {
+                    (0..cols)
+                        .map(|c| w[r * cols + c] * x[b * cols + c])
+                        .sum::<f32>()
+                })
+                .collect();
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                assert!(
+                    (g - cpu[r]).abs() <= 1e-4 * scale,
+                    "({rows},{cols},{batch}) b {b} r {r}: {g} vs {}",
+                    cpu[r]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn f32_gemm_mma_f16op_matches_the_f32_reference_within_tolerance() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    // Registered bound 1e-3 x max|reference| (the f16 staging envelope).
+    let mut worst_rel = 0f32;
+    for (rows, cols, batch) in [
+        (16usize, 16usize, 16usize),
+        (1024, 16, 32),
+        (4, 6144, 64),
+        (100, 16, 77),
+        (1024, 16, 512),
+        (64, 16, 3),
+    ] {
+        let w: Vec<f32> = (0..rows * cols)
+            .map(|i| {
+                let r = Rng(700 + i as u64).next();
+                ((r % 121) as f32) / 8.0 - 8.0
+            })
+            .collect();
+        let x = boundary_input(cols * batch, 13);
+        let wb = ctx.buffer(w.len() * 4, true).unwrap();
+        wb.upload(0, &f32_bytes(&w)).unwrap();
+        let x_off = 32usize;
+        let xb = ctx.buffer((x_off + cols * batch) * 4, true).unwrap();
+        let mut xs = vec![0f32; x_off];
+        xs.extend_from_slice(&x);
+        xb.upload(0, &f32_bytes(&xs)).unwrap();
+        let y_off = 8usize;
+        let yb = ctx.buffer((y_off + rows * batch) * 4, true).unwrap();
+        ctx.f32_gemm_mma_f16op(
+            &wb,
+            &xb,
+            &yb,
+            rows as u32,
+            cols as u32,
+            batch as u32,
+            x_off as u32,
+            y_off as u32,
+        )
+        .unwrap();
+        ctx.fence().unwrap();
+        let mut out = vec![0u8; (y_off + rows * batch) * 4];
+        yb.download(0, &mut out).unwrap();
+        let got: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert!(
+            got[..y_off].iter().all(|v| *v == 0.0),
+            "nothing before y_off"
+        );
+        for b in 0..batch {
+            let cpu: Vec<f32> = (0..rows)
+                .map(|r| {
+                    (0..cols)
+                        .map(|c| w[r * cols + c] * x[b * cols + c])
+                        .sum::<f32>()
+                })
+                .collect();
+            let scale = cpu.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            for r in 0..rows {
+                let g = got[y_off + b * rows + r];
+                let rel = (g - cpu[r]).abs() / scale;
+                worst_rel = worst_rel.max(rel);
+                assert!(
+                    (g - cpu[r]).abs() <= 1e-3 * scale,
+                    "({rows},{cols},{batch}) b {b} r {r}: {g} vs {}",
+                    cpu[r]
+                );
+            }
+        }
+    }
+    eprintln!("f32 mma f16op worst relative {worst_rel:.3e} (bound 1e-3)");
+}

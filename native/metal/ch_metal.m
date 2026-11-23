@@ -96,6 +96,8 @@ struct ch_metal_ctx {
     id<MTLComputePipelineState> pso_f16gemv;
     id<MTLComputePipelineState> pso_f32gemv;
     id<MTLComputePipelineState> pso_f32gemm;
+    id<MTLComputePipelineState> pso_f32gemm_mma;
+    id<MTLComputePipelineState> pso_f32gemm_mma_f16op;
     id<MTLComputePipelineState> pso_q8row;
     id<MTLComputePipelineState> pso_q4row;
     id<MTLComputePipelineState> pso_q41row;
@@ -537,6 +539,8 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
         ctx->pso_f16gemv = ch_pipeline(ctx, @"ch_f16_gemv", &error);
         ctx->pso_f32gemv = ch_pipeline(ctx, @"ch_f32_gemv", &error);
         ctx->pso_f32gemm = ch_pipeline(ctx, @"ch_f32_gemm", &error);
+        ctx->pso_f32gemm_mma = ch_pipeline(ctx, @"ch_f32_gemm_mma", &error);
+        ctx->pso_f32gemm_mma_f16op = ch_pipeline(ctx, @"ch_f32_gemm_mma_f16op", &error);
         ctx->pso_q8row = ch_pipeline(ctx, @"ch_q8_0_row_f32", &error);
         ctx->pso_q4row = ch_pipeline(ctx, @"ch_q4_0_row_f32", &error);
         ctx->pso_q41row = ch_pipeline(ctx, @"ch_q4_1_row_f32", &error);
@@ -610,7 +614,7 @@ ch_metal_ctx *ch_metal_create(const char *msl_source, char *err, size_t err_cap)
             ctx->pso_q35_attention_gqa_f32_128x4 == nil ||
             ctx->pso_q35_attention_chunk_f32 == nil || ctx->pso_q35_kv_store_chunk_f32 == nil ||
             ctx->pso_f16f32 == nil ||
-            ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_q4gemv == nil || ctx->pso_q4gemv_one == nil || ctx->pso_q41gemv == nil || ctx->pso_f16gemv == nil || ctx->pso_f32gemv == nil || ctx->pso_f32gemm == nil ||
+            ctx->pso_f32f16 == nil || ctx->pso_q8gemv == nil || ctx->pso_q4gemv == nil || ctx->pso_q4gemv_one == nil || ctx->pso_q41gemv == nil || ctx->pso_f16gemv == nil || ctx->pso_f32gemv == nil || ctx->pso_f32gemm == nil || ctx->pso_f32gemm_mma == nil || ctx->pso_f32gemm_mma_f16op == nil ||
             ctx->pso_q8row == nil || ctx->pso_q4row == nil || ctx->pso_q41row == nil || ctx->pso_rmsnorm == nil || ctx->pso_norm_add == nil ||
             ctx->pso_qk_norm == nil || ctx->pso_silu == nil ||
             ctx->pso_f16row == nil || ctx->pso_q8gemm == nil || ctx->pso_q4gemm == nil || ctx->pso_q41gemm == nil || ctx->pso_q8gemm_mma == nil || ctx->pso_q4gemm_mma == nil || ctx->pso_q41gemm_mma == nil ||
@@ -707,6 +711,8 @@ void ch_metal_destroy(ch_metal_ctx *ctx) {
         [ctx->pso_f16gemv release];
         [ctx->pso_f32gemv release];
         [ctx->pso_f32gemm release];
+        [ctx->pso_f32gemm_mma release];
+        [ctx->pso_f32gemm_mma_f16op release];
         [ctx->pso_q8gemv release];
         [ctx->pso_q4gemv release];
         [ctx->pso_q4gemv_one release];
@@ -2456,6 +2462,34 @@ int ch_metal_f32_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
     size_t w_need = (size_t)rows * (size_t)cols * 4u;
     return ch_gemm_dispatch(ctx, ctx->pso_f32gemm, w, w_need, x, y, rows, cols, batch, x_off,
                             y_off, err, err_cap, "f32_gemm");
+}
+
+int ch_metal_f32_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                           ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                           uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 8u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"f32_gemm_mma: cols %u (positive multiple of 8), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * (size_t)cols * 4u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_f32gemm_mma, w, w_need, x, y, rows, cols, batch,
+                                x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32, err,
+                                err_cap, "f32_gemm_mma");
+}
+
+int ch_metal_f32_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                uint32_t x_off, uint32_t y_off, char *err, size_t err_cap) {
+    if (cols == 0 || (cols % 8u) != 0u || batch == 0 || batch > CH_METAL_GEMM_MMA_MAX_BATCH) {
+        return ch_fail(err, err_cap, CH_METAL_ERR_UNSUPPORTED,
+                       [NSString stringWithFormat:@"f32_gemm_mma_f16op: cols %u (positive multiple of 8), batch %u (1..=%u)",
+                                                  cols, batch, CH_METAL_GEMM_MMA_MAX_BATCH]);
+    }
+    size_t w_need = (size_t)rows * (size_t)cols * 4u;
+    return ch_gemm_dispatch_rows(ctx, ctx->pso_f32gemm_mma_f16op, w, w_need, x, y, rows, cols,
+                                batch, x_off, y_off, 64, 128, CH_METAL_GEMM_MMA_MAX_BATCH, 32,
+                                err, err_cap, "f32_gemm_mma_f16op");
 }
 
 int ch_metal_fence(ch_metal_ctx *ctx, char *err, size_t err_cap) {

@@ -200,6 +200,14 @@ int ch_metal_f32_gemv(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
 int ch_metal_f32_gemm(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
                       ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
                       uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+/* F32 mul_mm on the matrix units (the unsloth K-quant GDN projections);
+ * cols a positive multiple of 8, K positions beyond cols zero-padded. */
+int ch_metal_f32_gemm_mma(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                          ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                          uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
+int ch_metal_f32_gemm_mma_f16op(ch_metal_ctx *ctx, ch_metal_buffer *w, ch_metal_buffer *x,
+                                ch_metal_buffer *y, uint32_t rows, uint32_t cols, uint32_t batch,
+                                uint32_t x_off, uint32_t y_off, char *err, size_t err_cap);
 
 /* y[row] = rmsnorm(x[row], weight, eps) for `rows` rows of `cols`. */
 int ch_metal_rmsnorm_f32(ch_metal_ctx *ctx, ch_metal_buffer *x, ch_metal_buffer *weight,

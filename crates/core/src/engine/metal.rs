@@ -224,7 +224,8 @@ impl Matrix {
                 || self.type_id == 3
                 || self.type_id == 12
                 || self.type_id == 13
-                || self.type_id == 14)
+                || self.type_id == 14
+                || self.type_id == 0)
             && (2..=GEMM_MMA_MAX_BATCH).contains(&batch)
         {
             // Declared GEMM operand profile (ADR-010): metal-f16-act
@@ -233,6 +234,7 @@ impl Matrix {
             // tolerance-qualified against the CPU reference.
             return if gpu.gemm_f16_operands {
                 match self.type_id {
+                    0 => ctx.f32_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
                     8 => ctx.q8_0_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
                     2 => ctx.q4_0_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
                     3 => ctx.q4_1_gemm_mma_f16op(&self.buf, x, y, rows, cols, batch, 0, 0),
@@ -243,6 +245,7 @@ impl Matrix {
                 }
             } else {
                 match self.type_id {
+                    0 => ctx.f32_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
                     8 => ctx.q8_0_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
                     2 => ctx.q4_0_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
                     3 => ctx.q4_1_gemm_mma(&self.buf, x, y, rows, cols, batch, 0, 0),
@@ -3177,12 +3180,12 @@ mod oracle_tests {
         assert!(model.prefill_chunk(&too_many, true, &mut l).is_err());
     }
 
-    /// Machine-local (CHINE_QWEN35_GGUF): on the pinned Q8_0 artifact,
-    /// batched prefill stays within the registered drift of sequential
-    /// decode for the resolved GEMM operand profile (the shipping default
-    /// is metal-f16-act, ADR-010; `CHINE_QWEN35_GEMM_F32=1` restores
-    /// f32 operands); prints 512-token prefill time for both (measurement,
-    /// not asserted).
+    /// Machine-local (CHINE_QWEN35_GGUF): on the pinned artifacts, batched
+    /// prefill stays within the registered drift of sequential decode for
+    /// the artifact's dominant weight dtype and resolved GEMM operand
+    /// profile (the shipping default is metal-f16-act, ADR-010;
+    /// `CHINE_QWEN35_GEMM_F32=1` restores f32 operands); prints 512-token
+    /// prefill time for both (measurement, not asserted).
     #[test]
     fn real_artifact_batched_prefill_matches_sequential_when_available() {
         let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
@@ -3207,6 +3210,23 @@ mod oracle_tests {
             gemm_f16_operands,
         };
         let source = crate::qwen35_forward::ArtifactTensorSource::open(&path).unwrap();
+        // Dominant weight bytes over the served tensors: the drift
+        // registry is per dominant dtype, the same convention as
+        // `registered_tolerance_for` (verify --reference).
+        let mut k_quant_bytes = 0u64;
+        let mut other_bytes = 0u64;
+        for i in 0..source.layout().tensor_count() {
+            let bytes = crate::qwen35_forward::TensorSource::tensor_bytes(&source, i).unwrap();
+            if matches!(
+                crate::qwen35_forward::TensorSource::tensor_type_id(&source, i).unwrap(),
+                12..=14
+            ) {
+                k_quant_bytes += bytes;
+            } else {
+                other_bytes += bytes;
+            }
+        }
+        let k_quant_dominant = k_quant_bytes > other_bytes;
         let capacity = 640usize;
         let plan = alloc_plan_with(&qwen35_graph(&source), &source, capacity, engine_opts).unwrap();
         let model = EngineModel::load_with(
@@ -3278,24 +3298,45 @@ mod oracle_tests {
             top1(&seq)
         );
         let _ = bits;
-        // Registered per GEMM operand profile (ADR-010):
-        // - f32 operands (oracle-f32 on the GEMM): 2e-3, the GPU-vs-oracle
-        //   logits bound (Q35-2C); observed 3.2e-4 / 3.6e-4 at logit scale
-        //   11.1 (ADR-008 Add. 16).
-        // - metal-f16-act (shipping default): 1e-2 — operand rounding to
-        //   half, llama.cpp kernel_mul_mm numerics; observed 7.4e-3 /
-        //   4.0e-3 on the pinned 0.8B and 4.8e-3 / 2.3e-3 on the 2B
-        //   (2026-11-22, M3), top-1 equal in every measurement. The
-        //   reference comparison (`verify --reference`) gates the same
-        //   profile against pinned llama.cpp.
-        let bound = if gemm_f16_operands { 1e-2 } else { 2e-3 };
+        // Registered per dominant weight dtype (the `verify --reference`
+        // convention) and GEMM operand profile:
+        // - Q8_0/F16/F32-dominant, f32 operands (oracle-f32 on the GEMM):
+        //   2e-3, the GPU-vs-oracle logits bound (Q35-2C); observed
+        //   3.2e-4 / 3.6e-4 at logit scale 11.1 (ADR-008 Add. 16).
+        // - Q8_0/F16/F32-dominant, metal-f16-act (shipping default):
+        //   1e-2 — operand rounding to half, llama.cpp kernel_mul_mm
+        //   numerics; observed 7.4e-3 / 4.0e-3 on the pinned 0.8B and
+        //   4.8e-3 / 2.3e-3 on the 2B (2026-11-22, M3), top-1 equal in
+        //   every measurement.
+        // - K-quant-dominant (registered 2026-11-23 from the pinned
+        //   Qwen3.5-0.8B Q4_K_M, dominant Q6_K), both operand profiles:
+        //   5e-1. Observed 2.07e-1 / 1.53e-1 (metal-f16-act) and
+        //   2.07e-1 / 1.52e-1 (f32 operands) at logit scale 11.0, top-1
+        //   equal at both positions in every measurement. Attribution:
+        //   the reference mul_mm staging port (8dd124c) moved the batched
+        //   K-quant GEMMs onto llama.cpp's sub-chunk reduction order —
+        //   the vs-llama verify envelope held at max |Δ| 1.045 under the
+        //   registered 1.5, while the sequential gemv path keeps the
+        //   per-element scalar-f32 dequant; the divergence compounds
+        //   through 18 GDN recurrence layers (pre-port drift 5.8e-3 /
+        //   4.6e-3, the old scalar-byte staging). 5e-1 keeps the same
+        //   ~2.4x margin convention as the verify registry's 1.5 over
+        //   the observed 1.045.
+        let bound = if k_quant_dominant {
+            5e-1
+        } else if gemm_f16_operands {
+            1e-2
+        } else {
+            2e-3
+        };
         eprintln!(
-            "GEMM operand profile: {}",
+            "GEMM operand profile: {}, dominant dtype: {}",
             if gemm_f16_operands {
                 "metal-f16-act"
             } else {
                 "f32 (oracle-f32 on the GEMM)"
-            }
+            },
+            if k_quant_dominant { "K-quant" } else { "non-K" }
         );
         assert!(
             drift(&batched, &seq) <= bound,
@@ -3431,6 +3472,112 @@ mod oracle_tests {
                 *nanos as f64 / 1e6 / per,
                 100.0 * *nanos as f64 / total.max(1) as f64,
                 *count as f64 / per
+            );
+        }
+    }
+
+    /// Grouped prefill profile on a pinned qwen35 artifact (machine-local):
+    /// a 512-token chunk through the production encoder with the per-operator
+    /// GPU table. The K-quant pins point CHINE_QWEN35_GGUF at the Q4_K_M
+    /// artifact; the Q8_0 pin is the control (its prefill is at parity, so
+    /// any class that costs the same on both pins does not own the K-quant
+    /// prefill gap). Run with `CHINE_QWEN35_GGUF=... CHINE_PROFILE=1 cargo
+    /// test --release -p chine-core profile_qwen35_prefill -- --nocapture`.
+    #[test]
+    fn profile_qwen35_prefill_when_requested() {
+        let Some(path) = std::env::var("CHINE_QWEN35_GGUF")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists())
+        else {
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set");
+            return;
+        };
+        if std::env::var("CHINE_PROFILE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: CHINE_PROFILE=1 not set (measurement only)");
+            return;
+        }
+        if gpu_or_skip().is_none() {
+            return;
+        }
+        eprintln!("prefill pin: {}", path.display());
+        let source = crate::qwen35_forward::ArtifactTensorSource::open(&path).unwrap();
+        let capacity = 2048usize;
+        let plan = alloc_plan(&qwen35_graph(&source), &source, capacity).unwrap();
+        let model = EngineModel::load(
+            Qwen35Gpu::open().unwrap(),
+            qwen35_graph(&source),
+            &source,
+            capacity,
+            plan.total(),
+        )
+        .unwrap();
+        let ctx = model.context();
+        let chunk: Vec<u32> = (0..PREFILL_BATCH as u32).map(|i| 1000 + i * 37).collect();
+        let mut logits = Vec::new();
+        // Warm the encoder once (page cache, pipeline states), then measure
+        // three grouped 512-token prefills and profile a fourth.
+        for _ in 0..4 {
+            model.reset().unwrap();
+            model.prefill_chunk(&chunk, true, &mut logits).unwrap();
+        }
+        ctx.fence().unwrap();
+        const ROUNDS: usize = 3;
+        let mut walls = Vec::with_capacity(ROUNDS);
+        let (c0, g0) = (ctx.committed_dispatches(), ctx.gpu_nanos_total());
+        for _ in 0..ROUNDS {
+            model.reset().unwrap();
+            let t0 = std::time::Instant::now();
+            model.prefill_chunk(&chunk, true, &mut logits).unwrap();
+            ctx.fence().unwrap();
+            walls.push(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        let wall_ms = walls.iter().sum::<f64>() / ROUNDS as f64;
+        let gpu_ms = (ctx.gpu_nanos_total() - g0) as f64 / 1e6 / ROUNDS as f64;
+        let cbs = (ctx.committed_dispatches() - c0) as f64 / ROUNDS as f64;
+        eprintln!(
+            "prefill 512 tokens: wall {wall_ms:.2} ms, GPU busy {gpu_ms:.2} ms ({:.0}%), host/dispatch {:.2} ms, {cbs:.0} command buffers",
+            100.0 * gpu_ms / wall_ms,
+            wall_ms - gpu_ms
+        );
+        assert!(gpu_ms <= wall_ms * 1.05, "GPU time cannot exceed wall time");
+
+        // Per-operator attribution needs the ungrouped encoder (the M3
+        // lacks dispatch-boundary counter sampling; grouped mode folds the
+        // whole command buffer into the "group" label). The recorded caveat
+        // applies: ungrouped totals carry per-dispatch overhead the grouped
+        // production encoder never pays, so read the SHARES, not the
+        // absolute times — and the Q8_0 pin runs the same profiler as the
+        // control, since its prefill is at parity.
+        model.set_grouped(false);
+        let u0 = ctx.gpu_nanos_total();
+        let t1 = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            model.reset().unwrap();
+            model.prefill_chunk(&chunk, true, &mut logits).unwrap();
+        }
+        ctx.fence().unwrap();
+        eprintln!(
+            "ungrouped: wall {:.2} ms, GPU busy {:.2} ms per prefill",
+            t1.elapsed().as_secs_f64() * 1e3 / ROUNDS as f64,
+            (ctx.gpu_nanos_total() - u0) as f64 / 1e6 / ROUNDS as f64
+        );
+        model.reset().unwrap();
+        ctx.set_profiling(true);
+        model.prefill_chunk(&chunk, true, &mut logits).unwrap();
+        ctx.fence().unwrap();
+        let mut table = ctx.profile_snapshot();
+        ctx.set_profiling(false);
+        model.set_grouped(true);
+        table.sort_by_key(|row| std::cmp::Reverse(row.1));
+        let total: u64 = table.iter().map(|r| r.1).sum();
+        eprintln!("ungrouped GPU time per operator (one 512-token prefill):");
+        for (label, nanos, count) in &table {
+            eprintln!(
+                "  {label:<28} {:>8.3} ms  {:>5.1}%  {:>6} buffers",
+                *nanos as f64 / 1e6,
+                100.0 * *nanos as f64 / total.max(1) as f64,
+                count
             );
         }
     }

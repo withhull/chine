@@ -424,6 +424,32 @@ mod imp {
             err: *mut c_char,
             err_cap: usize,
         ) -> c_int;
+        pub fn ch_metal_f32_gemm_mma(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
+        pub fn ch_metal_f32_gemm_mma_f16op(
+            ctx: *mut TmMetalCtx,
+            w: *mut TmMetalBuffer,
+            x: *mut TmMetalBuffer,
+            y: *mut TmMetalBuffer,
+            rows: u32,
+            cols: u32,
+            batch: u32,
+            x_off: u32,
+            y_off: u32,
+            err: *mut c_char,
+            err_cap: usize,
+        ) -> c_int;
         pub fn ch_metal_qwen35_conv_step(
             ctx: *mut TmMetalCtx,
             hist: *mut TmMetalBuffer,
@@ -3870,7 +3896,7 @@ impl MetalContext {
             (code, err)
         })
     }
-    /// Batched F16 GEMM.
+    /// Mid-batch F32 GEMV projection (`batch <= 32` rows of `x`).
     #[allow(clippy::too_many_arguments)]
     pub fn f32_gemm(
         &self,
@@ -3892,6 +3918,83 @@ impl MetalContext {
             // SAFETY: raw handles were validated against this context.
             let code = unsafe {
                 imp::ch_metal_f32_gemm(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+    /// F32 mul_mm on the SIMD-group matrix units (f32 operands); the
+    /// unsloth K-quant GDN projections' prefill path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn f32_gemm_mma(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("f32_gemm_mma", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_f32_gemm_mma(
+                    ctx,
+                    wc,
+                    xc,
+                    yc,
+                    rows,
+                    cols,
+                    batch,
+                    x_off,
+                    y_off,
+                    err.as_mut_ptr(),
+                    ERR_CAP,
+                )
+            };
+            (code, err)
+        })
+    }
+    /// [`Self::f32_gemm_mma`] with f16 operand tiles (metal-f16-act).
+    #[allow(clippy::too_many_arguments)]
+    pub fn f32_gemm_mma_f16op(
+        &self,
+        w: &MetalBuffer,
+        x: &MetalBuffer,
+        y: &MetalBuffer,
+        rows: u32,
+        cols: u32,
+        batch: u32,
+        x_off: u32,
+        y_off: u32,
+    ) -> Result<()> {
+        for (buffer, name) in [(w, "weights"), (x, "x"), (y, "y")] {
+            self.check_owned(buffer, name)?;
+        }
+        let (wc, xc, yc) = (w.raw, x.raw, y.raw);
+        self.operate("f32_gemm_mma_f16op", move |ctx| {
+            let mut err = [0 as c_char; ERR_CAP];
+            // SAFETY: raw handles were validated against this context.
+            let code = unsafe {
+                imp::ch_metal_f32_gemm_mma_f16op(
                     ctx,
                     wc,
                     xc,
