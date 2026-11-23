@@ -916,23 +916,37 @@ mod tests {
 
     /// Machine-local Q35-1A gate: the typed contract must resolve the
     /// pinned artifact exactly — every served tensor, every dimension,
-    /// MTP excluded, state sizing equal to the adapter's priced geometry.
+    /// state sizing equal to the adapter's priced geometry. The asserted
+    /// facts are family-general (measured on all four pins: both sizes
+    /// declare identical attention and GDN geometry, tokenizer ids and
+    /// the (i+1) % 4 attention map); only the hidden width, FFN size and
+    /// the MTP block's presence are size-keyed: the 0.8B (hidden 1024)
+    /// carries the 15-tensor MTP block (335 tensors, 320 served), the
+    /// 2B (hidden 2048) has none (320 tensors, all served).
     #[test]
     fn real_artifact_layout_when_available() {
         let Some(path) = real_artifact_path() else {
-            eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
+            eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5 family artifact)");
             return;
         };
         let insp =
             chine_manifest::gguf::inspect(&path, &chine_manifest::gguf::Limits::default()).unwrap();
         let (cfg, layout) = resolve(&insp, &registry()).unwrap();
         assert_eq!(cfg.layers, 24);
-        assert_eq!(cfg.block_count, 25);
-        assert_eq!(cfg.hidden, 1024);
+        // Size-keyed family facts, measured per pin (inspect + the
+        // declared qwen35 metadata of all four artifacts): the 0.8B
+        // (hidden 1024) carries the 15-tensor MTP block (block_count
+        // 25, 335 tensors), the 2B (hidden 2048) has none (24, 320).
+        let (block_count, ffn, tensor_total) = match cfg.hidden {
+            1024 => (25, 3584, 335usize),
+            2048 => (24, 6144, 320),
+            other => panic!("unrecorded family member: hidden {other}"),
+        };
+        assert_eq!(cfg.block_count, block_count);
         assert_eq!(cfg.heads, 8);
         assert_eq!(cfg.kv_heads, 2);
         assert_eq!(cfg.head_dim, 256);
-        assert_eq!(cfg.ffn, 3584);
+        assert_eq!(cfg.ffn, ffn);
         assert_eq!(cfg.vocab, 248320);
         assert_eq!(cfg.rope_dims, 64);
         assert_eq!(cfg.rope_sections, vec![11, 11, 10, 0]);
@@ -985,9 +999,11 @@ mod tests {
             2048 * 12288 + 18 * 1_122_304,
             "attention KV (f16) at ctx 2048 plus the constant recurrent state"
         );
-        // 335 tensors in the artifact: 320 served (consumed by resolve,
-        // which refuses leftovers) and 15 in the MTP block.
+        // 320 served tensors in both sizes, consumed exactly once by
+        // resolve (which refuses leftovers); the 0.8B additionally
+        // carries the 15-tensor MTP block, which stays excluded from
+        // the served stack.
         assert_eq!(layout.tensor_count(), 320);
-        assert_eq!(insp.tensors.len(), 335);
+        assert_eq!(insp.tensors.len(), tensor_total);
     }
 }

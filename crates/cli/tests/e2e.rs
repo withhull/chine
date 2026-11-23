@@ -966,8 +966,11 @@ fn llama_reference_comparison_when_available() {
 /// Q35-0 real-artifact gate (machine-local): with CHINE_QWEN35_GGUF
 /// pointing at the pinned ggml-org Qwen3.5-0.8B Q8_0 file, inspect,
 /// import and plan must work on the real hybrid contract and execution
-/// must stay refused for the precise reason. Machine-local by design:
-/// the artifact is ~834 MB and pinned by SHA-256 (ADR-008).
+/// must stay refused for the precise reason. This gate pins ONE
+/// artifact's byte identity (833,592,096 bytes, store hash c93ca9f8…);
+/// other family pins run the general contract and execution gates and
+/// are skipped here with a loud message. Machine-local by design: the
+/// artifact is ~834 MB and pinned by SHA-256 (ADR-008).
 #[test]
 fn qwen35_pinned_artifact_contract_when_available() {
     let Some(gguf) = std::env::var("CHINE_QWEN35_GGUF")
@@ -977,6 +980,15 @@ fn qwen35_pinned_artifact_contract_when_available() {
         eprintln!("skipping: CHINE_QWEN35_GGUF not set (pinned Qwen3.5-0.8B Q8_0)");
         return;
     };
+    let file_bytes = std::fs::metadata(&gguf).unwrap().len();
+    if file_bytes != 833_592_096 {
+        eprintln!(
+            "skipping: this gate pins the 0.8B Q8_0 identity (833,592,096 bytes); \
+             CHINE_QWEN35_GGUF names a {file_bytes}-byte artifact, whose identity \
+             is pinned by its own qualification record"
+        );
+        return;
+    }
     let env = TestEnv::new();
 
     let out = env.run_ok(&["inspect", &gguf, "--json"]);
@@ -1199,12 +1211,27 @@ fn qwen35_teacher_forced_logits_match_reference_when_available() {
         "top-1 token matches the pinned reference"
     );
     // Registered tolerances for the cross-profile comparison (oracle-f32
-    // activations vs llama.cpp's Q8_0 activation quantization): observed
-    // max|diff| 0.325 and mean|diff| 0.048 over the 248,320-token vocab
-    // with reference logit scale 20.6; recorded in the certification
-    // matrix under the Q35-1D row.
+    // activations vs llama.cpp's Q8_0 activation quantization), per
+    // dominant weight dtype — the same registry `verify --reference`
+    // applies (`calibration-2026-10-16.1`): the Q8_0-dominant pins
+    // observed max|diff| 0.325 / mean 0.048 at logit scale 20.6
+    // (Q35-1D); the K-quant-dominant pins carry the registered 1.5
+    // (0.8B Q4_K_M observed 1.045, 2B Q4_K_M observed 0.576 at scale
+    // 16.3, top-1 equal).
+    let insp =
+        chine_manifest::gguf::inspect(&gguf, &chine_manifest::gguf::Limits::default()).unwrap();
+    let dominant = insp
+        .tensor_stats()
+        .by_type
+        .iter()
+        .max_by_key(|(_, bytes)| **bytes)
+        .map(|(name, _)| name.clone())
+        .expect("non-empty artifact");
+    let max_tolerance = chine_supervisor::verify::registered_tolerance_for(&dominant)
+        .unwrap_or_else(|| panic!("no registered logits tolerance for dominant dtype {dominant}"));
+    eprintln!("dominant weight dtype {dominant}: registered max tolerance {max_tolerance}");
     assert!(
-        max_abs <= 0.5,
+        max_abs <= max_tolerance,
         "registered max logits tolerance (observed {max_abs:.6})"
     );
     assert!(
@@ -1246,8 +1273,10 @@ fn qwen35_teacher_forced_logits_match_reference_when_available() {
                 gpu_top, theirs_top,
                 "GPU top-1 matches the pinned reference"
             );
+            // Same registered per-dominant-dtype policy as the CPU leg
+            // above (Q8_0 pins: 0.5; K-quant-dominant pins: 1.5).
             assert!(
-                gpu_max <= 0.5,
+                gpu_max <= max_tolerance,
                 "registered GPU-vs-reference tolerance (observed {gpu_max:.6})"
             );
         }
