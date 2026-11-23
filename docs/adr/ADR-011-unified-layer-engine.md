@@ -1399,3 +1399,27 @@ three passes each; full prefill ~330 ms):
     recorded follow-up is a faithful port of the reference's lane
     decomposition (their `tid/ix` mapping, 16-scalar x registers,
     two lanes per 64 values) rather than another invented one.
+
+- **The end-form's quiet verdict: a small regression on both metrics —
+  reverted (2026-11-23, `20261123T024825Z-…-q4_k_m-endform`, battery,
+  zero swap, clean tree `fb9d6ee`, llama's control exactly reproduced:
+  110.72/111.00/111.39 vs the prior run's 110.72/110.78/111.36).**
+  Warm decode **95.48/95.53/95.56 (± 0.04)** against the pre-change
+  95.93/95.93/95.99 — the bands do not overlap, paired 0.866 -> 0.858;
+  warm TTFT 395/396/395 vs 387/388 — **+8 ms, paired 1.39 -> 1.42**,
+  the vectorized MMA staging regressing prefill alongside the gemv
+  end-form regressing decode. Both reverted; the K-quant standing
+  returns to the committed kernels' **0.866 decode / 1.39x prefill**.
+  **Rule, now twice proven: strictly-less-work at the op level
+  guarantees nothing at the request level** — these kernels are
+  bandwidth/latency-bound, not ALU-bound, and the changed codegen
+  (scheduling, register allocation) cost more than the saved vector
+  ops; the fifth quiet-reversal on record (prefill fused norms, edge
+  stage, pipelining, norm fusion, now this). The loaded A/B's
+  inability to resolve <2% effects extends in practice to
+  strictly-less-work changes: only the quiet acceptance decides,
+  and it decided against. The reference algebra knowledge stays
+  recorded above; the K-quant boundary stands: the first-cut
+  kernels hold 0.866/1.39 against llama's design, the faithful-port
+  follow-up is speculative until measured, and both bars on the
+  Q4_K_M remain the open items of the K-quant arc.

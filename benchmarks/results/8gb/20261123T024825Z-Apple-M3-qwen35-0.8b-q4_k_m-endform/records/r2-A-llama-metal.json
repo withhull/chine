@@ -1,0 +1,99 @@
+{
+  "schema_version": 5,
+  "run_id": "c3a6cebbc29d26c8e6a01ed8c2dec97adea3d6e202363c895c9a2d736bf9e597",
+  "started_unix_ms": 1795402128866,
+  "device_id": "a79b62e9051f9e98755dd3a9e2dce85a545c54dc07126e03c17bf5f31a05f55f",
+  "artifact_id": "cb14f8022a3af45d1c2170407b9f63853820d81b34b96cb7b92595a72e9defed",
+  "plan_id": "48a355e6f5a6743ef7b024aa169df200b6bd7dfa90fccc6ab04c0c0be7b3473b",
+  "engine": {
+    "engine": "llama.cpp",
+    "certified": false,
+    "backend_abi_version": 1,
+    "worker_protocol_version": 8,
+    "kernels": [
+      "llama.cpp:ngl=99:metal"
+    ],
+    "build_id": "chine 0.2.0 (release)"
+  },
+  "workload": {
+    "suite": "standard-v1",
+    "input_tokens": 512,
+    "output_tokens": 256,
+    "repetitions": 3,
+    "prompt_set": "frozen-synthetic-ids",
+    "ignore_eos": true
+  },
+  "cache_state": "cache-uncontrolled",
+  "samples": [
+    {
+      "prompt_id": "std-512-256-r0",
+      "ttft_ms": 591.782333,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 2888.137291,
+      "gap_p95_ms": 9.053958000000002,
+      "gap_max_ms": 10.533083,
+      "footprint_peak_bytes": 252921320,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 111.06385452986997,
+      "worker_total_ms": 2433.95525,
+      "worker_decode_ms": 2295.9765,
+      "notes": []
+    },
+    {
+      "prompt_id": "std-512-256-r1",
+      "ttft_ms": 278.728333,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 2573.998791,
+      "gap_p95_ms": 9.07,
+      "gap_max_ms": 10.101083000000001,
+      "footprint_peak_bytes": 252986856,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 111.11418953094245,
+      "worker_total_ms": 2432.641541,
+      "worker_decode_ms": 2294.9364170000003,
+      "notes": []
+    },
+    {
+      "prompt_id": "std-512-256-r2",
+      "ttft_ms": 278.367542,
+      "committed_tokens": 256,
+      "generated_tokens": 256,
+      "visible_chunks": 256,
+      "total_ms": 2578.282917,
+      "gap_p95_ms": 9.066917,
+      "gap_max_ms": 10.132292,
+      "footprint_peak_bytes": 252495336,
+      "logical_read_bytes": 0,
+      "throughput_decode_tps": 110.8907589967444,
+      "worker_total_ms": 2437.252917,
+      "worker_decode_ms": 2299.5604169999997,
+      "notes": []
+    }
+  ],
+  "summary": {
+    "ttft_median_ms": 278.728333,
+    "ttft_p95_ms": 591.782333,
+    "throughput_median_tps": 99.29088786651569,
+    "throughput_decode_median_tps": 111.06385452986997,
+    "gap_p95_ms": 9.07,
+    "completion_rate": 1.0,
+    "footprint_peak_bytes": 252986856
+  },
+  "performance_class": "interactive",
+  "confidence": "estimated",
+  "slow_mode_accepted": false,
+  "caveats": [
+    "suite standard-v1 frozen: frozen workload definition; prompts are synthetic token-id sets derived deterministically from prompt ids, so no private user prompts are collected; standard measurement shape: 512 input / 256 output tokens with exact recorded prompt ids and cache conditions; cache labels are explicit: cold-declared, warm, prefix-hit, or cache-uncontrolled; a first run is not automatically a cold-storage run; reference inputs are compared only through the four-way identity in PRD section 20.1 (R0/R1/T0/T1); draft tokens are never reported as final throughput",
+    "all throughput figures count model tokens from the worker's Done frame: throughput_median_tps is end-to-end (generated tokens / total request time, including TTFT) and throughput_decode_median_tps is (generated - 1) over the worker's first-to-last sampled-token span; ttft_ms, visible_chunks, and the gap percentiles describe the visible stream (user experience), not token production",
+    "experimental backend llama.cpp: uncertified kernels; real weights executed, performance and quality unmeasured",
+    "logical read traffic is measured weight bytes read via positioned reads; not physical SSD counters",
+    "footprint sampled from proc_pid_rusage at ~50ms cadence",
+    "cold-start and warm-cache are separate labels; this run's cache state is declared explicitly",
+    "cache state was not controlled or established; treated as uncontrolled",
+    "ignore-EOS workload: the model's end-of-sequence token did not end generation, so every engine generated the full output count; decode throughput is comparable, output text past EOS is not meaningful"
+  ]
+}

@@ -3138,14 +3138,6 @@ kernel void ch_q4_k_gemv(device const uchar *w [[buffer(0)]],
         float4 x5 = float4(xv[5]);
         float4 x6 = float4(xv[6]);
         float4 x7 = float4(xv[7]);
-        /* The affine end-form of the pinned llama.cpp kernel_mul_mv
-         * algebra: dot the RAW nibbles, subtract the min term once —
-         * d*sc*sum(nib*x) - dmin*m*sum(x) — with sum(x) hoisted here
-         * (row-independent). No per-element multiply or subtract. */
-        const float4 one = float4(1.0f);
-        const float sumx = dot(x0, one) + dot(x1, one) + dot(x2, one)
-                        + dot(x3, one) + dot(x4, one) + dot(x5, one)
-                        + dot(x6, one) + dot(x7, one);
         for (uint r = 0; r < CH_Q8_ROWS; ++r) {
             const uint row = first + r;
             if (row >= rows) {
@@ -3163,33 +3155,34 @@ kernel void ch_q4_k_gemv(device const uchar *w [[buffer(0)]],
                 a = (float)((sc[k + 4u] & 0xFu) | ((sc[k - 4u] >> 6) << 4));
                 mn = (float)((sc[k + 4u] >> 4) | ((sc[k] >> 6) << 4));
             }
+            const float ds = d * a;
+            const float dm = dmin * mn;
             const device uchar *qs = blk + 16u + 32u * (k / 2u);
-            /* 32 values as eight packed 4-byte loads. */
+            /* 32 values as eight packed 4-byte loads; the affine dequant
+             * keeps every product inside the f16 domain when staged. */
             const device packed_uchar4 *qv = (const device packed_uchar4 *)qs;
             float4 q0, q1, q2, q3, q4, q5, q6, q7;
             if (!hi) {
-                q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu);
-                q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu);
-                q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu);
-                q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu);
-                q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu);
-                q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu);
-                q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu);
-                q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu);
+                q0 = float4(uchar4(qv[0]) & (uchar4)0x0fu) * ds - dm;
+                q1 = float4(uchar4(qv[1]) & (uchar4)0x0fu) * ds - dm;
+                q2 = float4(uchar4(qv[2]) & (uchar4)0x0fu) * ds - dm;
+                q3 = float4(uchar4(qv[3]) & (uchar4)0x0fu) * ds - dm;
+                q4 = float4(uchar4(qv[4]) & (uchar4)0x0fu) * ds - dm;
+                q5 = float4(uchar4(qv[5]) & (uchar4)0x0fu) * ds - dm;
+                q6 = float4(uchar4(qv[6]) & (uchar4)0x0fu) * ds - dm;
+                q7 = float4(uchar4(qv[7]) & (uchar4)0x0fu) * ds - dm;
             } else {
-                q0 = float4(uchar4(qv[0]) >> 4);
-                q1 = float4(uchar4(qv[1]) >> 4);
-                q2 = float4(uchar4(qv[2]) >> 4);
-                q3 = float4(uchar4(qv[3]) >> 4);
-                q4 = float4(uchar4(qv[4]) >> 4);
-                q5 = float4(uchar4(qv[5]) >> 4);
-                q6 = float4(uchar4(qv[6]) >> 4);
-                q7 = float4(uchar4(qv[7]) >> 4);
+                q0 = float4(uchar4(qv[0]) >> 4) * ds - dm;
+                q1 = float4(uchar4(qv[1]) >> 4) * ds - dm;
+                q2 = float4(uchar4(qv[2]) >> 4) * ds - dm;
+                q3 = float4(uchar4(qv[3]) >> 4) * ds - dm;
+                q4 = float4(uchar4(qv[4]) >> 4) * ds - dm;
+                q5 = float4(uchar4(qv[5]) >> 4) * ds - dm;
+                q6 = float4(uchar4(qv[6]) >> 4) * ds - dm;
+                q7 = float4(uchar4(qv[7]) >> 4) * ds - dm;
             }
-            const float nib_dot = dot(q0, x0) + dot(q1, x1) + dot(q2, x2)
-                                + dot(q3, x3) + dot(q4, x4) + dot(q5, x5)
-                                + dot(q6, x6) + dot(q7, x7);
-            acc[r] += d * a * nib_dot - dmin * mn * sumx;
+            acc[r] += dot(q0, x0) + dot(q1, x1) + dot(q2, x2) + dot(q3, x3)
+                    + dot(q4, x4) + dot(q5, x5) + dot(q6, x6) + dot(q7, x7);
         }
     }
     for (uint r = 0; r < CH_Q8_ROWS; ++r) {
@@ -3412,34 +3405,16 @@ kernel void ch_q4_k_gemm_mma(device const uchar *w [[buffer(0)]],
         }
         const float ds = d * a;
         const float dm = dmin * mn;
-        /* The thread's 16 staging values are one contiguous 16-byte run:
-         * four packed loads with vector nibble math instead of sixteen
-         * scalar byte loads. Values and write order are identical. */
-        const device packed_uchar4 *qv =
-            (const device packed_uchar4 *)(block + 16u + 32u * (k / 2u) + w_k);
-        const uchar4 v0 = uchar4(qv[0]);
-        const uchar4 v1 = uchar4(qv[1]);
-        const uchar4 v2 = uchar4(qv[2]);
-        const uchar4 v3 = uchar4(qv[3]);
+        const device uchar *qs = block + 16u + 32u * (k / 2u) + w_k;
         float wv[16];
         if (k % 2u == 0u) {
-            const float4 a0 = float4(v0 & (uchar4)0x0fu) * ds - dm;
-            const float4 a1 = float4(v1 & (uchar4)0x0fu) * ds - dm;
-            const float4 a2 = float4(v2 & (uchar4)0x0fu) * ds - dm;
-            const float4 a3 = float4(v3 & (uchar4)0x0fu) * ds - dm;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] & 0x0fu) * ds - dm;
+            }
         } else {
-            const float4 a0 = float4(v0 >> 4) * ds - dm;
-            const float4 a1 = float4(v1 >> 4) * ds - dm;
-            const float4 a2 = float4(v2 >> 4) * ds - dm;
-            const float4 a3 = float4(v3 >> 4) * ds - dm;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] >> 4) * ds - dm;
+            }
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
@@ -3564,34 +3539,16 @@ kernel void ch_q4_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         }
         const float ds = d * a;
         const float dm = dmin * mn;
-        /* The thread's 16 staging values are one contiguous 16-byte run:
-         * four packed loads with vector nibble math instead of sixteen
-         * scalar byte loads. Values and write order are identical. */
-        const device packed_uchar4 *qv =
-            (const device packed_uchar4 *)(block + 16u + 32u * (k / 2u) + w_k);
-        const uchar4 v0 = uchar4(qv[0]);
-        const uchar4 v1 = uchar4(qv[1]);
-        const uchar4 v2 = uchar4(qv[2]);
-        const uchar4 v3 = uchar4(qv[3]);
+        const device uchar *qs = block + 16u + 32u * (k / 2u) + w_k;
         float wv[16];
         if (k % 2u == 0u) {
-            const float4 a0 = float4(v0 & (uchar4)0x0fu) * ds - dm;
-            const float4 a1 = float4(v1 & (uchar4)0x0fu) * ds - dm;
-            const float4 a2 = float4(v2 & (uchar4)0x0fu) * ds - dm;
-            const float4 a3 = float4(v3 & (uchar4)0x0fu) * ds - dm;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] & 0x0fu) * ds - dm;
+            }
         } else {
-            const float4 a0 = float4(v0 >> 4) * ds - dm;
-            const float4 a1 = float4(v1 >> 4) * ds - dm;
-            const float4 a2 = float4(v2 >> 4) * ds - dm;
-            const float4 a3 = float4(v3 >> 4) * ds - dm;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                wv[i] = (float)(qs[i] >> 4) * ds - dm;
+            }
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
@@ -3708,10 +3665,6 @@ kernel void ch_q6_k_gemv(device const uchar *w [[buffer(0)]],
         float4 x1 = float4(xv[1]);
         float4 x2 = float4(xv[2]);
         float4 x3 = float4(xv[3]);
-        /* Affine end-form (the pinned kernel_mul_mv algebra): the -32
-         * term subtracts once with this run's own sum(x), hoisted. */
-        const float4 one = float4(1.0f);
-        const float sumx = dot(x0, one) + dot(x1, one) + dot(x2, one) + dot(x3, one);
         for (uint r = 0; r < CH_Q8_ROWS; ++r) {
             const uint row = first + r;
             if (row >= rows) {
@@ -3743,8 +3696,8 @@ kernel void ch_q6_k_gemv(device const uchar *w [[buffer(0)]],
             q1 += float4(h1 >> shift & (uchar4)3u) * 16.0f;
             q2 += float4(h2 >> shift & (uchar4)3u) * 16.0f;
             q3 += float4(h3 >> shift & (uchar4)3u) * 16.0f;
-            acc[r] += ds * (dot(q0, x0) + dot(q1, x1) + dot(q2, x2) + dot(q3, x3)
-                          - 32.0f * sumx);
+            acc[r] += ds * (dot(q0 - 32.0f, x0) + dot(q1 - 32.0f, x1)
+                          + dot(q2 - 32.0f, x2) + dot(q3 - 32.0f, x3));
         }
     }
     for (uint r = 0; r < CH_Q8_ROWS; ++r) {
@@ -3944,49 +3897,18 @@ kernel void ch_q6_k_gemm_mma(device const uchar *w [[buffer(0)]],
         const uint r0 = v0 & 255u;
         const float s = (float)((const device int8_t *)(block + 192u))[(r0 / 16u) & 15u];
         const float ds = d * s;
-        /* c and jj are constant across the thread's 16 values (the run
-         * never crosses a 32- or 128-value boundary), so the ql and qh
-         * bytes are contiguous 16-byte runs: four packed loads each
-         * with vector extraction. Values and write order are identical. */
-        const uint rr = r0 % 128u;
-        const uint c = rr / 128u + (r0 / 128u);
-        const uint jj = (rr % 128u) / 32u;
-        const uint l0 = r0 % 32u;
-        const device packed_uchar4 *qlv =
-            (const device packed_uchar4 *)(block + 64u * c + 32u * (jj % 2u) + l0);
-        const device packed_uchar4 *qhv =
-            (const device packed_uchar4 *)(block + 128u + 32u * c + l0);
-        const uchar4 u0 = uchar4(qlv[0]);
-        const uchar4 u1 = uchar4(qlv[1]);
-        const uchar4 u2 = uchar4(qlv[2]);
-        const uchar4 u3 = uchar4(qlv[3]);
-        const uchar4 g0 = uchar4(qhv[0]);
-        const uchar4 g1 = uchar4(qhv[1]);
-        const uchar4 g2 = uchar4(qhv[2]);
-        const uchar4 g3 = uchar4(qhv[3]);
-        const float4 hq0 = float4((g0 >> (2u * jj)) & (uchar4)3u) * 16.0f;
-        const float4 hq1 = float4((g1 >> (2u * jj)) & (uchar4)3u) * 16.0f;
-        const float4 hq2 = float4((g2 >> (2u * jj)) & (uchar4)3u) * 16.0f;
-        const float4 hq3 = float4((g3 >> (2u * jj)) & (uchar4)3u) * 16.0f;
+        const device uchar *qlb = block;
+        const device uchar *qhb = block + 128u;
         float wv[16];
-        if (jj < 2u) {
-            const float4 a0 = (float4(u0 & (uchar4)0x0fu) + hq0 - 32.0f) * ds;
-            const float4 a1 = (float4(u1 & (uchar4)0x0fu) + hq1 - 32.0f) * ds;
-            const float4 a2 = (float4(u2 & (uchar4)0x0fu) + hq2 - 32.0f) * ds;
-            const float4 a3 = (float4(u3 & (uchar4)0x0fu) + hq3 - 32.0f) * ds;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
-        } else {
-            const float4 a0 = (float4(u0 >> 4) + hq0 - 32.0f) * ds;
-            const float4 a1 = (float4(u1 >> 4) + hq1 - 32.0f) * ds;
-            const float4 a2 = (float4(u2 >> 4) + hq2 - 32.0f) * ds;
-            const float4 a3 = (float4(u3 >> 4) + hq3 - 32.0f) * ds;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
+        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+            const uint r = r0 + i;
+            const uint c = r / 128u;
+            const uint jj = (r % 128u) / 32u;
+            const uint l = r % 32u;
+            const uint nib = jj < 2u ? (qlb[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
+                                     : (qlb[64u * c + 32u * (jj % 2u) + l] >> 4);
+            const uint qh = (qhb[32u * c + l] >> (2u * jj)) & 3u;
+            wv[i] = ds * ((float)(nib | (qh << 4)) - 32.0f);
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
@@ -4102,49 +4024,18 @@ kernel void ch_q6_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         const uint r0 = v0 & 255u;
         const float s = (float)((const device int8_t *)(block + 192u))[(r0 / 16u) & 15u];
         const float ds = d * s;
-        /* c and jj are constant across the thread's 16 values (the run
-         * never crosses a 32- or 128-value boundary), so the ql and qh
-         * bytes are contiguous 16-byte runs: four packed loads each
-         * with vector extraction. Values and write order are identical. */
-        const uint rr = r0 % 128u;
-        const uint c = rr / 128u + (r0 / 128u);
-        const uint jj = (rr % 128u) / 32u;
-        const uint l0 = r0 % 32u;
-        const device packed_uchar4 *qlv =
-            (const device packed_uchar4 *)(block + 64u * c + 32u * (jj % 2u) + l0);
-        const device packed_uchar4 *qhv =
-            (const device packed_uchar4 *)(block + 128u + 32u * c + l0);
-        const uchar4 u0 = uchar4(qlv[0]);
-        const uchar4 u1 = uchar4(qlv[1]);
-        const uchar4 u2 = uchar4(qlv[2]);
-        const uchar4 u3 = uchar4(qlv[3]);
-        const uchar4 g0 = uchar4(qhv[0]);
-        const uchar4 g1 = uchar4(qhv[1]);
-        const uchar4 g2 = uchar4(qhv[2]);
-        const uchar4 g3 = uchar4(qhv[3]);
-        const float4 hq0 = float4((g0 >> (2u * jj)) & (uchar4)3u) * 16.0f;
-        const float4 hq1 = float4((g1 >> (2u * jj)) & (uchar4)3u) * 16.0f;
-        const float4 hq2 = float4((g2 >> (2u * jj)) & (uchar4)3u) * 16.0f;
-        const float4 hq3 = float4((g3 >> (2u * jj)) & (uchar4)3u) * 16.0f;
+        const device uchar *qlb = block;
+        const device uchar *qhb = block + 128u;
         float wv[16];
-        if (jj < 2u) {
-            const float4 a0 = (float4(u0 & (uchar4)0x0fu) + hq0 - 32.0f) * ds;
-            const float4 a1 = (float4(u1 & (uchar4)0x0fu) + hq1 - 32.0f) * ds;
-            const float4 a2 = (float4(u2 & (uchar4)0x0fu) + hq2 - 32.0f) * ds;
-            const float4 a3 = (float4(u3 & (uchar4)0x0fu) + hq3 - 32.0f) * ds;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
-        } else {
-            const float4 a0 = (float4(u0 >> 4) + hq0 - 32.0f) * ds;
-            const float4 a1 = (float4(u1 >> 4) + hq1 - 32.0f) * ds;
-            const float4 a2 = (float4(u2 >> 4) + hq2 - 32.0f) * ds;
-            const float4 a3 = (float4(u3 >> 4) + hq3 - 32.0f) * ds;
-            wv[0] = a0.x; wv[1] = a0.y; wv[2] = a0.z; wv[3] = a0.w;
-            wv[4] = a1.x; wv[5] = a1.y; wv[6] = a1.z; wv[7] = a1.w;
-            wv[8] = a2.x; wv[9] = a2.y; wv[10] = a2.z; wv[11] = a2.w;
-            wv[12] = a3.x; wv[13] = a3.y; wv[14] = a3.z; wv[15] = a3.w;
+        CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+            const uint r = r0 + i;
+            const uint c = r / 128u;
+            const uint jj = (r % 128u) / 32u;
+            const uint l = r % 32u;
+            const uint nib = jj < 2u ? (qlb[64u * c + 32u * (jj % 2u) + l] & 0x0fu)
+                                     : (qlb[64u * c + 32u * (jj % 2u) + l] >> 4);
+            const uint qh = (qhb[32u * c + l] >> (2u * jj)) & 3u;
+            wv[i] = ds * ((float)(nib | (qh << 4)) - 32.0f);
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
@@ -4258,12 +4149,6 @@ kernel void ch_q5_k_gemv(device const uchar *w [[buffer(0)]],
         float4 x5 = float4(xv[5]);
         float4 x6 = float4(xv[6]);
         float4 x7 = float4(xv[7]);
-        /* Affine end-form (the pinned kernel_mul_mv algebra): dot the raw
-         * 5-bit codes, subtract dmin*m*sum(x) once with sum(x) hoisted. */
-        const float4 one = float4(1.0f);
-        const float sumx = dot(x0, one) + dot(x1, one) + dot(x2, one)
-                        + dot(x3, one) + dot(x4, one) + dot(x5, one)
-                        + dot(x6, one) + dot(x7, one);
         for (uint r = 0; r < CH_Q8_ROWS; ++r) {
             const uint row = first + r;
             if (row >= rows) {
@@ -4322,9 +4207,10 @@ kernel void ch_q5_k_gemv(device const uchar *w [[buffer(0)]],
                 q6 = float4(uchar4(qv[6]) >> 4) + float4(hb6) * 16.0f;
                 q7 = float4(uchar4(qv[7]) >> 4) + float4(hb7) * 16.0f;
             }
-            acc[r] += ds * (dot(q0, x0) + dot(q1, x1) + dot(q2, x2) + dot(q3, x3)
-                          + dot(q4, x4) + dot(q5, x5) + dot(q6, x6) + dot(q7, x7))
-                    - dm * sumx;
+            acc[r] += (dot(q0 * ds - dm, x0) + dot(q1 * ds - dm, x1)
+                     + dot(q2 * ds - dm, x2) + dot(q3 * ds - dm, x3)
+                     + dot(q4 * ds - dm, x4) + dot(q5 * ds - dm, x5)
+                     + dot(q6 * ds - dm, x6) + dot(q7 * ds - dm, x7));
         }
     }
     for (uint r = 0; r < CH_Q8_ROWS; ++r) {
@@ -4567,52 +4453,22 @@ kernel void ch_q5_k_gemm_mma(device const uchar *w [[buffer(0)]],
         }
         const float ds = d * a;
         const float dm = dmin * mn;
-        /* Contiguous ql and qh runs: four packed loads each, vector
-         * extraction. Values and write order are identical. */
-        const device packed_uchar4 *qv =
-            (const device packed_uchar4 *)(block + 48u + 32u * (k / 2u) + w_k);
-        const device packed_uchar4 *hv = (const device packed_uchar4 *)(block + 16u + w_k);
-        const uchar4 u0 = uchar4(qv[0]);
-        const uchar4 u1 = uchar4(qv[1]);
-        const uchar4 u2 = uchar4(qv[2]);
-        const uchar4 u3 = uchar4(qv[3]);
-        const uchar4 g0 = uchar4(hv[0]);
-        const uchar4 g1 = uchar4(hv[1]);
-        const uchar4 g2 = uchar4(hv[2]);
-        const uchar4 g3 = uchar4(hv[3]);
+        const device uchar *qs = block + 48u + 32u * (k / 2u) + w_k;
+        const device uchar *qh = block + 16u + w_k;
         const uint shift = 2u * (k / 2u) + (k % 2u);
-        const uchar4 mask = (uchar4)1u;
-        const float4 hb0 = float4((g0 >> shift) & mask) * 16.0f;
-        const float4 hb1 = float4((g1 >> shift) & mask) * 16.0f;
-        const float4 hb2 = float4((g2 >> shift) & mask) * 16.0f;
-        const float4 hb3 = float4((g3 >> shift) & mask) * 16.0f;
         float wv[16];
         if (k % 2u == 0u) {
-            const float4 a0 = float4(u0 & (uchar4)0x0fu) + hb0;
-            const float4 a1 = float4(u1 & (uchar4)0x0fu) + hb1;
-            const float4 a2 = float4(u2 & (uchar4)0x0fu) + hb2;
-            const float4 a3 = float4(u3 & (uchar4)0x0fu) + hb3;
-            wv[0] = a0.x * ds - dm; wv[1] = a0.y * ds - dm;
-            wv[2] = a0.z * ds - dm; wv[3] = a0.w * ds - dm;
-            wv[4] = a1.x * ds - dm; wv[5] = a1.y * ds - dm;
-            wv[6] = a1.z * ds - dm; wv[7] = a1.w * ds - dm;
-            wv[8] = a2.x * ds - dm; wv[9] = a2.y * ds - dm;
-            wv[10] = a2.z * ds - dm; wv[11] = a2.w * ds - dm;
-            wv[12] = a3.x * ds - dm; wv[13] = a3.y * ds - dm;
-            wv[14] = a3.z * ds - dm; wv[15] = a3.w * ds - dm;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] & 0x0fu;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
         } else {
-            const float4 a0 = float4(u0 >> 4) + hb0;
-            const float4 a1 = float4(u1 >> 4) + hb1;
-            const float4 a2 = float4(u2 >> 4) + hb2;
-            const float4 a3 = float4(u3 >> 4) + hb3;
-            wv[0] = a0.x * ds - dm; wv[1] = a0.y * ds - dm;
-            wv[2] = a0.z * ds - dm; wv[3] = a0.w * ds - dm;
-            wv[4] = a1.x * ds - dm; wv[5] = a1.y * ds - dm;
-            wv[6] = a1.z * ds - dm; wv[7] = a1.w * ds - dm;
-            wv[8] = a2.x * ds - dm; wv[9] = a2.y * ds - dm;
-            wv[10] = a2.z * ds - dm; wv[11] = a2.w * ds - dm;
-            wv[12] = a3.x * ds - dm; wv[13] = a3.y * ds - dm;
-            wv[14] = a3.z * ds - dm; wv[15] = a3.w * ds - dm;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] >> 4;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
@@ -4737,52 +4593,22 @@ kernel void ch_q5_k_gemm_mma_f16op(device const uchar *w [[buffer(0)]],
         }
         const float ds = d * a;
         const float dm = dmin * mn;
-        /* Contiguous ql and qh runs: four packed loads each, vector
-         * extraction. Values and write order are identical. */
-        const device packed_uchar4 *qv =
-            (const device packed_uchar4 *)(block + 48u + 32u * (k / 2u) + w_k);
-        const device packed_uchar4 *hv = (const device packed_uchar4 *)(block + 16u + w_k);
-        const uchar4 u0 = uchar4(qv[0]);
-        const uchar4 u1 = uchar4(qv[1]);
-        const uchar4 u2 = uchar4(qv[2]);
-        const uchar4 u3 = uchar4(qv[3]);
-        const uchar4 g0 = uchar4(hv[0]);
-        const uchar4 g1 = uchar4(hv[1]);
-        const uchar4 g2 = uchar4(hv[2]);
-        const uchar4 g3 = uchar4(hv[3]);
+        const device uchar *qs = block + 48u + 32u * (k / 2u) + w_k;
+        const device uchar *qh = block + 16u + w_k;
         const uint shift = 2u * (k / 2u) + (k % 2u);
-        const uchar4 mask = (uchar4)1u;
-        const float4 hb0 = float4((g0 >> shift) & mask) * 16.0f;
-        const float4 hb1 = float4((g1 >> shift) & mask) * 16.0f;
-        const float4 hb2 = float4((g2 >> shift) & mask) * 16.0f;
-        const float4 hb3 = float4((g3 >> shift) & mask) * 16.0f;
         float wv[16];
         if (k % 2u == 0u) {
-            const float4 a0 = float4(u0 & (uchar4)0x0fu) + hb0;
-            const float4 a1 = float4(u1 & (uchar4)0x0fu) + hb1;
-            const float4 a2 = float4(u2 & (uchar4)0x0fu) + hb2;
-            const float4 a3 = float4(u3 & (uchar4)0x0fu) + hb3;
-            wv[0] = a0.x * ds - dm; wv[1] = a0.y * ds - dm;
-            wv[2] = a0.z * ds - dm; wv[3] = a0.w * ds - dm;
-            wv[4] = a1.x * ds - dm; wv[5] = a1.y * ds - dm;
-            wv[6] = a1.z * ds - dm; wv[7] = a1.w * ds - dm;
-            wv[8] = a2.x * ds - dm; wv[9] = a2.y * ds - dm;
-            wv[10] = a2.z * ds - dm; wv[11] = a2.w * ds - dm;
-            wv[12] = a3.x * ds - dm; wv[13] = a3.y * ds - dm;
-            wv[14] = a3.z * ds - dm; wv[15] = a3.w * ds - dm;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] & 0x0fu;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
         } else {
-            const float4 a0 = float4(u0 >> 4) + hb0;
-            const float4 a1 = float4(u1 >> 4) + hb1;
-            const float4 a2 = float4(u2 >> 4) + hb2;
-            const float4 a3 = float4(u3 >> 4) + hb3;
-            wv[0] = a0.x * ds - dm; wv[1] = a0.y * ds - dm;
-            wv[2] = a0.z * ds - dm; wv[3] = a0.w * ds - dm;
-            wv[4] = a1.x * ds - dm; wv[5] = a1.y * ds - dm;
-            wv[6] = a1.z * ds - dm; wv[7] = a1.w * ds - dm;
-            wv[8] = a2.x * ds - dm; wv[9] = a2.y * ds - dm;
-            wv[10] = a2.z * ds - dm; wv[11] = a2.w * ds - dm;
-            wv[12] = a3.x * ds - dm; wv[13] = a3.y * ds - dm;
-            wv[14] = a3.z * ds - dm; wv[15] = a3.w * ds - dm;
+            CH_UNROLL for (uint i = 0; i < 16u; ++i) {
+                const uint nib = qs[i] >> 4;
+                const uint hb = (qh[i] >> shift) & 1u;
+                wv[i] = (float)(nib | (hb << 4)) * ds - dm;
+            }
         }
         const device packed_float4 *xp = (const device packed_float4 *)xblk;
         const float4 xv0 = float4(xp[0]);
