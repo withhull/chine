@@ -1509,3 +1509,42 @@ three passes each; full prefill ~330 ms):
   279 ms prefill on this very artifact (both engines execute the
   same 512-token shape). The quiet acceptance run decides the
   request-level verdict on the 1.39x prefill gap.
+
+- **The mul_mm staging port's quiet acceptance: decode held, prefill
+  unmoved — the gap is relocated, not closed (2026-11-23,
+  `20261123T035714Z-…-q4_k_m-mmaport`, battery, zero swap, clean tree
+  `8dd124c`, all 3 ABBA rounds valid).** Warm decode
+  **113.06/113.19/113.25 (± 0.1) vs 111.16/111.17/111.28 — paired
+  1.017 (1.017/1.017/1.019)**: the gemv port's lead reproduced,
+  slightly tighter. Warm TTFT **384/384/385 vs 279/279/279 — paired
+  1.38 (from 1.39)**: the reference's own dequantize staging moved
+  prefill by ~1 ms, a wash, exactly as the loaded A/B's overlapping
+  bands predicted. **The 1.38x prefill gap is now measured to NOT be
+  the dequantize staging arithmetic** — it sits elsewhere in the MMA
+  path or the prefill dispatch (our Q8_0 pins reach 94-106% prefill
+  parity, so the engine's prefill machinery is proven; only the
+  K-quant MMA path differs). The recorded follow-up per the
+  profiling rule: a grouped prefill profile on this pin to relocate
+  the gap before any further porting.
+
+- **Landscape check: Splash (incoai/splash, Apache-2.0, 2.6k stars,
+  2026-11-23 read, from their own sources).** Their GGUF decode
+  kernel (`runtime/metal/kernels/decode/linear_gguf_sgmatrix.metal`)
+  is a genuinely different design worth recording: weights enter the
+  simdgroup MMA as **exact bf16 code operands** (128+code, 160+code
+  with zero-point offsets) with the affine algebra closed once per
+  chain (`s*chain + b*sum`) — the integer pipe carries the dequant,
+  the FP32 pipe only the epilogue, deliberately for Apple9's register
+  MMA path. Their prefill numbers (2,011 tok/s on 32K prompts) rely
+  on the **Neural Engine** for FFN (`--disable-ane` reverts to GPU)
+  and their own model packages (GSQ-RCO etc., not GGUF
+  identity-matched); their llama.cpp comparison table is measured on
+  **M5 Pro 20-core and M3 Max 40-core** with 27B/35B-A3B MoE models —
+  their 2.5-5.3x decode advantage is on big MoE at tiers we do not
+  have; no small-model or 8 GB tier number is claimed anywhere in
+  their README. Recorded as the Phase 2 reference (MoE/large models
+  on larger machines): the bf16-in-MMA decode trick and the ANE FFN
+  prefill are the two levers to evaluate when that hardware is in
+  hand — not port targets for the 8 GB M3 tier, where our decode
+  already holds 1.017 paired and the prefill gap is measured to sit
+  outside the dequantize arithmetic.
