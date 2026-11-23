@@ -1456,3 +1456,23 @@ three passes each; full prefill ~330 ms):
   the request-level verdict on the 0.866 decode and 1.39x prefill
   gaps (the port touches decode only; prefill's MMA kernels are
   unchanged from the committed form).
+
+- **The verbatim port's quiet acceptance: the K-quant decode bar is
+  closed — ahead of llama.cpp in every pair (2026-11-23,
+  `20261123T033520Z-…-q4_k_m-llamaport`, battery, zero swap, clean
+  tree `e0fa4ca`, all 3 ABBA rounds valid).** Warm decode
+  **112.63/113.15/113.32 (± 0.35)** vs llama.cpp
+  111.16/111.25/111.33 — the control's band is exact against every
+  prior run — **paired 1.018 (1.012/1.018/1.018), parity-plus**. The
+  port's request-level effect: **95.93 -> 113.15 median (+17.2%)**,
+  matching the in-model -15% GPU-busy projection. The arc's summary
+  in one line: our first-cut kernels held 0.866; three invented or
+  derived forms lost at the quiet level (0.858, plus two reverted
+  mid-session); the reference's lane decomposition, ported verbatim,
+  holds **1.018** — the fourth quiet decision in this arc, and the
+  one that finally went the other way. Warm TTFT 385/388/387 vs
+  278/279/279 — paired 1.39x, unchanged as designed (the port
+  touches decode only). The K-quant artifact's one open item is now
+  prefill; the recorded follow-up is the same verbatim treatment for
+  the reference's `kernel_mul_mm` K-quant staging (mul_mm.metal),
+  which owns the 1.39x.
